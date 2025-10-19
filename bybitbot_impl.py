@@ -14,6 +14,55 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
 _LAST_COMMIT_HASH: Optional[str] = None
 
+BASE_PAIR_CANDIDATES = [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "XRP/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "BNB/USDT:USDT",
+    "LTC/USDT:USDT",
+    "ADA/USDT:USDT",
+    "TRX/USDT:USDT",
+    "MATIC/USDT:USDT",
+    "LINK/USDT:USDT",
+    "AVAX/USDT:USDT",
+    "APT/USDT:USDT",
+    "ARB/USDT:USDT",
+    "OP/USDT:USDT",
+    "SUI/USDT:USDT",
+    "DOT/USDT:USDT",
+    "ATOM/USDT:USDT",
+    "UNI/USDT:USDT",
+    "FIL/USDT:USDT",
+    "NEAR/USDT:USDT",
+    "ETC/USDT:USDT",
+    "AAVE/USDT:USDT",
+    "XLM/USDT:USDT",
+    "HBAR/USDT:USDT",
+]
+
+BASE_INDICATOR_CANDIDATES = [
+    "ema20",
+    "ema50",
+    "ema200",
+    "sma50",
+    "rsi14",
+    "stoch14",
+    "macd",
+    "atr14",
+    "bbands",
+    "vwma20",
+    "supertrend",
+]
+
+BASE_TIMEFRAME_CANDIDATES = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"]
+PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BASE_PAIR_CANDIDATES}
+
+PAIR_CANDIDATE_LIMIT = int(os.getenv('PAIR_CANDIDATE_LIMIT', '25'))
+PAIR_PREFETCH_LIMIT = int(os.getenv('PAIR_PREFETCH_LIMIT', '30'))
+
+
 # --- Безопасные настройки OpenBLAS (исключаем падения из-за многопоточности) ---
 import os
 import shutil
@@ -57,7 +106,7 @@ LOG_TZINFO = None
 LOG_TIMEZONE = ""
 _LOG_TZ_WARNING_EMITTED = False
 
-DEFAULT_NEXT_RUN_MINUTES = 29.0
+DEFAULT_NEXT_RUN_MINUTES = 28.0
 RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
 
 
@@ -86,6 +135,20 @@ def ensure_version_backup() -> None:
         print(f"[WARN] Failed to create backup '{backup_path.name}': {exc}")
 
 
+def safe_float(val):
+    try:
+        if val is None or val == "":
+            return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            cleaned = val.replace(',', '').strip()
+            return float(cleaned)
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
 def _read_change_log_entry() -> Tuple[str, str]:
     version = BOT_VERSION
     changelog_text = BOT_CHANGELOG
@@ -107,6 +170,24 @@ def _read_change_log_entry() -> Tuple[str, str]:
     if not body:
         body = _build_commit_changelog()
     return new_version, body
+
+
+def _collect_news_pairs(limit: int = 40) -> set[str]:
+    dynamic_pairs: set[str] = set()
+    try:
+        rss_payload = get_news_from_rss("", limit)
+    except Exception as exc:
+        log(f"⚠️ Не удалось собрать RSS-новости для расширения универсума: {exc}", Fore.YELLOW)
+        rss_payload = {}
+    items = (rss_payload or {}).get("items") or []
+    for item in items:
+        title = ((item or {}).get("title") or "").upper()
+        if not title:
+            continue
+        for pair, ticker in PAIR_TICKER_MAP.items():
+            if ticker and ticker in title:
+                dynamic_pairs.add(pair)
+    return dynamic_pairs
 
 
 def _build_commit_changelog(limit: int = 8) -> str:
@@ -402,6 +483,8 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
         )
     request_payload = {
         "available_pairs": symbols,
+        "indicator_candidates": BASE_INDICATOR_CANDIDATES,
+        "timeframe_candidates": BASE_TIMEFRAME_CANDIDATES,
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
         "positions": positions_compact,
@@ -427,7 +510,10 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
         '  "reason": "краткое описание новостного фона"\n'
         "}\n"
         "Если данных недостаточно, верни {\"targets\": [], \"needs\": [\"news\", ...], \"reason\": \"...\"]"
-    )
+          "  Допустимые типы ордеров: limit, market, stop, stop_limit, take_profit, stop_loss, trailing_stop. Не используй другие значения orderType.\n"
+        "  Перед отправкой reduce-only убедись, что позиция существует и объём больше нуля.\n"
+        "  Не планируй ордера, если требуемая маржа превышает available_margin_usdt.\n"
+  )
     messages = [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": json.dumps(request_payload, ensure_ascii=False)},
@@ -749,7 +835,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         if executed:
             send_tg(f"{sym}: �?�?�?��? выполнил:\n- " + "\n- ".join(executed))
         if actions_performed:
-            positions_map, _ = fetch_positions_snapshot(exchange, symbols_filter=PAIR_LIST)
+            positions_map, _ = fetch_positions_snapshot(exchange, symbols_filter=[sym])
             current_position = positions_map.get(sym)
             try:
                 open_orders_symbol = fetch_open_orders_for_symbol(exchange, sym)
@@ -818,6 +904,7 @@ def refresh_settings():
     global NEWS_API_TOKEN, NEWS_API_ENDPOINT, NEWS_API_KINDS, NEWS_API_FILTER, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
+    global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -852,6 +939,9 @@ def refresh_settings():
     DEFAULT_CONTEXT_4H = max(MIN_CONTEXT_4H, env_int("AI_CONTEXT_4H", 40))
     CONTEXT_STEP_30M = max(1, env_int("AI_CONTEXT_30M_STEP", 4))
     CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
+
+    PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
+    PAIR_PREFETCH_LIMIT = env_int("PAIR_PREFETCH_LIMIT", PAIR_PREFETCH_LIMIT)
 
     NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
     NEWS_API_ENDPOINT = os.getenv("CRYPTO_NEWS_ENDPOINT", "https://cryptopanic.com/api/v1/posts/")
@@ -1502,6 +1592,126 @@ def normalize_order_type_key(raw_type):
     return ORDER_TYPE_ALIASES.get(key, key)
 
 
+def get_trigger_direction_for_side(side: str) -> str:
+    """Return trigger direction flag understood by ccxt/bybit for a closing order."""
+    side_lower = (side or "").lower()
+    if side_lower == "sell":
+        return "below"
+    if side_lower == "buy":
+        return "above"
+    # Default to trigger on downside to avoid missing protection for long positions.
+    return "below"
+
+
+def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
+    cfg = config or {}
+    position_amount = safe_float((position or {}).get("amount"))
+    if position is None or position_amount is None or not math.isfinite(position_amount) or position_amount == 0:
+        return open_orders or []
+
+    position_side = (position.get("side") or "").lower()
+    if position_side in ("sell", "short"):
+        protection_side = "buy"
+    elif position_side in ("buy", "long"):
+        protection_side = "sell"
+    else:
+        protection_side = "sell" if position_amount > 0 else "buy"
+
+    sl_mult = cfg.get("sl_atr", SL_ATR)
+    tp_mult = cfg.get("tp_atr", TP_ATR)
+    trailing_mult = cfg.get("trailing_atr_mult", TRAILING_ATR_MULT)
+    reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
+    has_stop = False
+    has_take = False
+    has_trailing = False
+    for existing in reduce_orders:
+        try:
+            if existing.get("reduceOnly") not in (True, "true", "1", 1):
+                continue
+            if (existing.get("side") or "").lower() != protection_side:
+                continue
+            order_type = (existing.get("type") or "").lower()
+        except AttributeError:
+            continue
+        stop_price_existing = safe_float(existing.get("stopPrice") or existing.get("triggerPrice") or existing.get("stopLoss"))
+        trailing_flag = safe_float(existing.get("trailingStop")) if isinstance(existing.get("trailingStop"), (int, float, str)) else None
+        if order_type in ("stop", "stoploss", "stop_limit", "stoplimit") or stop_price_existing is not None:
+            has_stop = True
+        elif order_type in ("takeprofit", "limit") and existing.get("price") is not None:
+            has_take = True
+        elif order_type == "trailingstop" or trailing_flag:
+            has_trailing = True
+    if has_stop and has_take and (trailing_mult <= 0 or has_trailing):
+        return open_orders or []
+
+    df_calc = df_primary.copy() if isinstance(df_primary, pd.DataFrame) and not df_primary.empty else None
+    if df_calc is None:
+        return open_orders or []
+    if "atr" not in df_calc.columns:
+        try:
+            df_calc["atr"] = atr(df_calc, 14)
+        except Exception as exc:
+            log(f"⚠️ {symbol}: не удалось вычислить ATR для защиты позиции ({exc})", Fore.YELLOW)
+            return open_orders or []
+    last_row = df_calc.iloc[-1]
+    price = safe_float(last_row.get("close"))
+    atrv = safe_float(last_row.get("atr"))
+    if not (math.isfinite(price) and math.isfinite(atrv) and atrv and atrv > 0):
+        log(f"⚠️ {symbol}: нет валидных значений ATR/цены для защиты позиции", Fore.YELLOW)
+        return open_orders or []
+
+    stop_price = price - sl_mult * atrv if position_amount > 0 else price + sl_mult * atrv
+    take_price = price + tp_mult * atrv if position_amount > 0 else price - tp_mult * atrv
+    qty = abs(position_amount)
+    position_idx = get_position_idx(protection_side)
+    base_params = {
+        "reduceOnly": True,
+    }
+    if position_idx is not None:
+        base_params["positionIdx"] = position_idx
+
+    created_orders = []
+    try:
+        trigger_direction = get_trigger_direction_for_side(protection_side)
+        stop_params = dict(base_params)
+        stop_params.update(
+            {
+                "triggerPrice": stop_price,
+                "triggerDirection": trigger_direction,
+                "closeOnTrigger": True,
+            }
+        )
+        exchange.create_order(symbol, "market", protection_side, qty, None, stop_params)
+        created_orders.append(("stopLoss", stop_price))
+    except Exception as exc:
+        log(f"⚠️ {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
+
+    try:
+        tp_params = dict(base_params)
+        tp_params["takeProfit"] = take_price
+        exchange.create_order(symbol, "takeProfit", protection_side, qty, take_price, tp_params)
+        created_orders.append(("takeProfit", take_price))
+    except Exception as exc:
+        log(f"⚠️ {symbol}: не удалось выставить тейк-профит позиции: {exc}", Fore.YELLOW)
+
+    if trailing_mult > 0 and math.isfinite(trailing_mult):
+        try:
+            trailing_params = dict(base_params)
+            trailing_params["trailingStop"] = trailing_mult * atrv
+            exchange.create_order(symbol, "trailingStop", protection_side, qty, None, trailing_params)
+            created_orders.append(("trailingStop", trailing_mult * atrv))
+        except Exception as exc:
+            log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп: {exc}", Fore.YELLOW)
+
+    if created_orders:
+        log(f"🛡️ {symbol}: обновлена защита позиции {created_orders}", Fore.LIGHTBLUE_EX)
+        send_tg(
+            f"🛡️ {symbol}: обновлена защита позиции\n"
+            + "\n".join(f"- {typ} @ {price}" for typ, price in created_orders)
+        )
+    return fetch_open_orders_for_symbol(exchange, symbol)
+
+
 def execute_extra_orders(exchange, symbol, orders, current_position=None, open_orders=None):
     executed = []
     open_orders = open_orders or []
@@ -1536,6 +1746,12 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
         reduce_only = order.get("reduceOnly")
         if reduce_only is not None:
             params["reduceOnly"] = bool(reduce_only)
+        position_amount = 0.0
+        if current_position:
+            try:
+                position_amount = float(current_position.get("amount") or 0)
+            except (TypeError, ValueError):
+                position_amount = 0.0
         side = (order.get("side") or "").lower()
         amount = compute_order_amount(order, current_position)
         price = order.get("price")
@@ -1560,6 +1776,31 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
                 side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
         else:
             ccxt_type = ORDER_TYPE_MAP.get(order_type_key, order_type_key)
+            if order_type_key == "stop_loss":
+                trigger_price = (
+                    order.get("triggerPrice")
+                    or order.get("stopPrice")
+                    or order.get("stop_price")
+                    or params.get("triggerPrice")
+                    or params.get("stopPrice")
+                    or price
+                )
+                try:
+                    trigger_price = float(trigger_price) if trigger_price is not None else None
+                except (TypeError, ValueError):
+                    trigger_price = None
+                if trigger_price is None:
+                    log(f"⚠️ Пропуск стоп-ордера #{idx} для {symbol}: нет triggerPrice", Fore.YELLOW)
+                    continue
+                ccxt_type = "market"
+                price = None
+                params.setdefault("reduceOnly", True)
+                params["triggerPrice"] = trigger_price
+                params.setdefault("triggerDirection", get_trigger_direction_for_side(side))
+                params.setdefault("closeOnTrigger", True)
+                params.pop("stopLoss", None)
+                params.pop("stopPrice", None)
+                params.pop("stop_price", None)
         if ccxt_type not in VALID_ORDER_TYPES:
             fallback_type = "limit" if price is not None else "market"
             log(
@@ -1585,6 +1826,10 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
             continue
 
         if params.get("reduceOnly"):
+            if abs(position_amount) == 0:
+                log(f'[INFO] Пропуск reduce-only ордера по {symbol}: позиция отсутствует', Fore.LIGHTBLACK_EX)
+                send_tg(f'[INFO] {symbol}: reduce-only без позиции пропущен')
+                continue
             existing_list = reduce_only_map.get(side)
             if existing_list:
                 for existing_order in existing_list:
@@ -1594,15 +1839,16 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
                     success, err = cancel_order_by_id(exchange, symbol, str(oid))
                     if success:
                         cancelled_success.append(str(oid))
-                        log(f"🗑️ Отменён существующий reduce-only ордер {oid} для {symbol} перед заменой", Fore.LIGHTBLUE_EX)
+                        log(f'[INFO] Отменён существующий reduce-only ордер {oid} для {symbol} перед заменой', Fore.LIGHTBLUE_EX)
                     else:
                         cancel_errors.append((oid, err))
-                        log(f"⚠️ Не удалось отменить reduce-only ордер {oid} для {symbol}: {err}", Fore.YELLOW)
+                        log(f'[WARN] Не удалось отменить reduce-only ордер {oid} для {symbol}: {err}', Fore.YELLOW)
                 reduce_only_map[side] = []
 
         try:
             order_id = exchange.create_order(symbol, ccxt_type, side, amount, price, params)
-            desc = f"{ccxt_type.upper()} {side.upper()} {amount}"
+            display_type = "STOP-MARKET" if order_type_key == "stop_loss" else ccxt_type.upper()
+            desc = f"{display_type} {side.upper()} {amount}"
             if price:
                 desc += f" @ {price}"
             if note:
@@ -2019,7 +2265,9 @@ def ai_decision(
                 continue
             if n.startswith("higher_tf"):
                 tf = n.split(":",1)[1] if ":" in n else "4h"
-                extra.setdefault("higher_tf", {})[tf] = get_higher_tf(exchange, symbol, tf)
+                tf_safe = (tf or "4h").strip().lower()
+                mapped_tf = {"1h": "1h", "60m": "1h", "4h": "4h", "240m": "4h"}.get(tf_safe, tf_safe)
+                extra.setdefault("higher_tf", {})[mapped_tf] = get_higher_tf(exchange, symbol, mapped_tf or "4h")
             elif n == "funding":
                 extra["funding"] = get_funding_rate(exchange, symbol)
             elif n == "open_interest":
@@ -2108,7 +2356,7 @@ def run_cycle():
     ex = init_exchange()
     ex.load_markets()
     ensure_position_mode(ex)
-    positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_LIST)
+    positions_map, open_positions = fetch_positions_snapshot(ex)
     if MAX_OPEN_POSITIONS > 0 and open_positions is None:
         log("⚠️ Не удалось определить количество открытых позиций — лимит по позициям отключён на этот цикл", Fore.YELLOW)
         open_positions = None
@@ -2128,7 +2376,78 @@ def run_cycle():
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
     send_tg(f"🚀 Бот запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT")
 
-    selection = ai_select_portfolio(ex, PAIR_LIST, positions_map, equity, available_margin)
+    position_symbols: set[str] = set()
+    for sym_pos, payload in positions_map.items():
+        if not payload:
+            continue
+        try:
+            amt = float(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if math.isfinite(amt) and abs(amt) > 0:
+            position_symbols.add(sym_pos)
+
+    candidate_pairs_set: set[str] = {pair for pair in PAIR_LIST if pair}
+    candidate_pairs_set.update(BASE_PAIR_CANDIDATES)
+    candidate_pairs_set.update(position_symbols)
+
+    open_orders_prefetch: dict[str, list] = {}
+    order_symbols: set[str] = set()
+
+    prefetch_candidates = list(candidate_pairs_set)
+    for sym_candidate in prefetch_candidates[:PAIR_PREFETCH_LIMIT]:
+        try:
+            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_candidate)
+        except Exception as orders_exc:
+            log(f"⚠️ Не удалось получить открытые ордера для {sym_candidate}: {orders_exc}", Fore.YELLOW)
+            orders_snapshot = []
+        open_orders_prefetch[sym_candidate] = orders_snapshot
+        if orders_snapshot:
+            order_symbols.add(sym_candidate)
+
+    candidate_pairs_set.update(order_symbols)
+    news_pairs = _collect_news_pairs()
+    if news_pairs:
+        candidate_pairs_set.update(news_pairs)
+
+    for sym_candidate in sorted(candidate_pairs_set):
+        if sym_candidate in open_orders_prefetch:
+            continue
+        if len(open_orders_prefetch) >= PAIR_PREFETCH_LIMIT:
+            break
+        try:
+            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_candidate)
+        except Exception as orders_exc:
+            log(f"⚠️ Не удалось получить открытые ордера для {sym_candidate}: {orders_exc}", Fore.YELLOW)
+            orders_snapshot = []
+        open_orders_prefetch[sym_candidate] = orders_snapshot
+        if orders_snapshot:
+            order_symbols.add(sym_candidate)
+
+    def _append_unique(target_list: list[str], values, seen: set[str]):
+        for val in values:
+            if not val or val in seen:
+                continue
+            target_list.append(val)
+            seen.add(val)
+            if len(target_list) >= PAIR_CANDIDATE_LIMIT:
+                break
+        return target_list
+
+    available_pairs: list[str] = []
+    seen_available: set[str] = set()
+    _append_unique(available_pairs, selected_symbols, seen_available)
+    _append_unique(available_pairs, sorted(position_symbols), seen_available)
+    _append_unique(available_pairs, sorted(order_symbols), seen_available)
+    remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
+    _append_unique(available_pairs, remaining_pairs, seen_available)
+
+    if not available_pairs:
+        available_pairs = list(PAIR_LIST)[:PAIR_CANDIDATE_LIMIT]
+
+    log("🎯 Кандидаты для анализа: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
+
+    selection = ai_select_portfolio(ex, available_pairs, positions_map, equity, available_margin)
     global_timeframes = []
     global_indicators = []
     news_cache = {}
@@ -2148,11 +2467,11 @@ def run_cycle():
             selected_symbols.append(sym_sel)
         selection_reason = selection.get("reason")
         if selection_reason:
-            log(f"🎯 Портфельный фокус: {selection_reason}", Fore.CYAN)
-            send_tg(f"🎯 Портфель: {selection_reason}")
+            log(f"ℹ️ Обоснование портфеля: {selection_reason}", Fore.CYAN)
+            send_tg(f"ℹ️ Анализ портфеля: {selection_reason}")
         confidence = selection.get("confidence")
         if confidence:
-            log(f"🤖 Уверенность модели: {confidence}", Fore.LIGHTBLACK_EX)
+            log(f"🧠 Уверенность модели: {confidence}", Fore.LIGHTBLACK_EX)
     if selection:
         raw_next_run = selection.get("next_run_minutes")
         if raw_next_run is not None:
@@ -2161,7 +2480,31 @@ def run_cycle():
             except (TypeError, ValueError):
                 selection_next_run = None
         selection_next_time = selection.get("next_run_time")
-    symbols_sequence = selected_symbols if selected_symbols else list(PAIR_LIST)
+
+    symbols_sequence: list[str] = []
+    seen_symbols: set[str] = set()
+    for sym_sel in selected_symbols:
+        if sym_sel and sym_sel not in seen_symbols:
+            symbols_sequence.append(sym_sel)
+            seen_symbols.add(sym_sel)
+
+    for sym_candidate in sorted(position_symbols):
+        if sym_candidate not in seen_symbols:
+            symbols_sequence.append(sym_candidate)
+            seen_symbols.add(sym_candidate)
+
+    for sym_candidate in sorted(order_symbols):
+        if sym_candidate not in seen_symbols:
+            symbols_sequence.append(sym_candidate)
+            seen_symbols.add(sym_candidate)
+
+    for sym_candidate in available_pairs:
+        if sym_candidate not in seen_symbols:
+            symbols_sequence.append(sym_candidate)
+            seen_symbols.add(sym_candidate)
+
+    if not symbols_sequence:
+        symbols_sequence = available_pairs or list(PAIR_LIST)
 
     decisions_total = 0
     counts = {"open":0,"close":0,"skip":0}
@@ -2223,7 +2566,14 @@ def run_cycle():
                     log(f"?? не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
                     news_payload_symbol = None
             current_position = positions_map.get(sym)
-            open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+            open_orders_symbol = open_orders_prefetch.get(sym)
+            if open_orders_symbol is None:
+                try:
+                    open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+                except Exception as fetch_exc:
+                    log(f"⚠️ Не удалось получить открытые ордера для {sym}: {fetch_exc}", Fore.YELLOW)
+                    open_orders_symbol = []
+                open_orders_prefetch[sym] = open_orders_symbol
             dec = ai_decision(
                 sym,
                 df,
@@ -2370,7 +2720,7 @@ def run_cycle():
                             ex.create_order(sym, "market", close_side, qty, None, params)
                             log(f"🔻 Закрыть позицию {sym} ({reason})", Fore.YELLOW)
                             send_tg(f"🔻 Закрыт {sym} {close_side.upper()} {qty:.4f} — {reason or 'причина не указана'}")
-                            positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_LIST)
+                            positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                             current_position = positions_map.get(sym)
                         except Exception as e:
                             err_text = str(e)
@@ -2379,6 +2729,11 @@ def run_cycle():
             elif action == "hold":
                 log(f"⏳ Удерживаем {sym} ({reason})", Fore.BLUE)
                 send_tg(f"⏳ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
+                if current_position and abs(float(current_position.get('amount') or 0)) > 0:
+                    updated_orders = ensure_position_protection(ex, sym, current_position, df, open_orders_symbol)
+                    if updated_orders is not None:
+                        open_orders_symbol = updated_orders
+                        open_orders_cache[sym] = updated_orders
             elif action == "open":
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
@@ -2461,10 +2816,15 @@ def run_cycle():
                         log(f"⛔ Недостаточно маржи для минимального ордера {sym} (доступно {available_margin:.2f} USDT)", Fore.YELLOW)
                         send_tg(f"⛔ {sym}: маржа меньше минимального объёма (доступно {available_margin:.2f} USDT)")
                         continue
+                    margin_required = notional / LEVERAGE if LEVERAGE else notional
+                    if margin_required > effective_margin:
+                        log(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT превышает доступную {effective_margin:.2f} USDT, ордер пропущен', Fore.YELLOW)
+                        send_tg(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT больше доступной {effective_margin:.2f} USDT, ордер пропущен')
+                        continue
                     if notional > max_notional:
                         qty = max_notional / price
                         notional = max_notional
-                        log(f"ℹ️ Объём {sym} уменьшен до {qty:.4f} (~{notional:.2f} USDT) из-за лимита маржи", Fore.LIGHTBLACK_EX)
+                        log(f'ℹ️ Объём {sym} уменьшен до {qty:.4f} (~{notional:.2f} USDT) из-за лимита маржи', Fore.LIGHTBLACK_EX)
                     try:
                         qty = float(ex.amount_to_precision(sym, qty))
                     except Exception:
@@ -2498,7 +2858,7 @@ def run_cycle():
                             f"SL {sl:.2f} TP {tp:.2f}\n"
                             f"Объём {notional:.2f} USDT, маржа {margin_required:.2f} USDT"
                         )
-                        positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_LIST)
+                        positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                         current_position = positions_map.get(sym)
                     except Exception as e:
                         err_text = str(e)
@@ -2521,7 +2881,7 @@ def run_cycle():
                     send_tg("🛠️ " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
                 if actions_performed:
                     orders_activity = True
-                    positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_LIST)
+                    positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                     current_position = positions_map.get(sym)
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
 
