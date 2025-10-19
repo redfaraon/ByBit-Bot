@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-# Version: 2025.10.16.12
+# Version: 2025.10.19.1
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
 """
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.16.12"
+BOT_VERSION = "2025.10.19.1"
 BOT_CHANGELOG = (
-    "Добавил поддержку пользовательских индикаторов в допзапросах."
+    "Changelog is now sourced from the latest git commits."
 )
 
 # --- Безопасные настройки OpenBLAS (исключаем падения из-за многопоточности) ---

@@ -1,8 +1,3 @@
-2025.10.19.1
-- Rolled back bot implementation to backup 2025.10.16.12 after corrupted versions.
-- Fixed needs handling so dict entries from the model no longer break order opening.
-- Initialised git repo with .gitignore and removed tracked .env/__pycache__.
-
 2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
@@ -36,5 +31,14 @@
 - Execution layer combines base pair configs with per-decision overrides and logs the effective inputs used for orders.
 - Extra analysis timeout path now returns a safe skip decision immediately to avoid control flow bugs.
 
-
+2025.10.19.1
+Recent commits (last 8)
+- 2025-10-19 e5df32c refactor: enhance runtime status management and default delay configuration
+- 2025-10-19 d24c0b5 refactor: enhance order type handling with aliases and normalization function
+- 2025-10-19 0f28cd5 refactor: update sync_script.sh for targeted synchronization of project files and directories
+- 2025-10-19 c508f72 refactor: streamline sync_file function and enhance synchronization logic
+- 2025-10-19 d51a298 Add sync_script.sh for synchronizing local and remote directories
+- 2025-10-19 95ea8af docs: restore cron autostart workflow
+- 2025-10-19 d05355f 2025.10.19.1: rollback and fix needs handling
+- 2025-10-19 7f118eb Initial commit (recovered)
 

@@ -2,58 +2,87 @@
 """Entry point and fallback wrapper for bybitbot_impl."""
 import importlib
 import os
-import re
 import subprocess
 import sys
 import traceback
 from pathlib import Path
 
-CHANGELOG_FILE = Path(__file__).with_name("CHANGELOG.txt")
+REPO_ROOT = Path(__file__).resolve().parent
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.19.1")
+CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 
 
-def _read_changelog() -> str:
+def _resolve_commit_limit(raw_value: str | None) -> int:
     try:
-        return CHANGELOG_FILE.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return ""
+        value = int(raw_value) if raw_value is not None else 8
+    except ValueError:
+        value = 8
+    return max(1, value)
 
 
-def _parse_changelog_sections(text: str):
-    pattern = re.compile(r"^\d{4}\.\d{2}\.\d{2}\.\d+(?:[A-Z]+)?$")
-    sections = []
-    current_version = None
-    current_lines = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if pattern.match(line):
-            if current_version is not None:
-                sections.append((current_version, "\n".join(current_lines).strip()))
-            current_version = line
-            current_lines = []
+CHANGELOG_COMMIT_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_CHANGELOG_COMMITS"))
+
+
+def _build_commit_changelog(limit: int | None = None):
+    limit = CHANGELOG_COMMIT_LIMIT if limit is None else _resolve_commit_limit(str(limit))
+    cmd = ["git", "log", "-n", str(limit), "--pretty=format:%cs %h %s"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception as exc:
+        header = ""
+        bullets = [f"- git log unavailable: {exc}"]
+        return limit, header, bullets
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        header = "No recent commits available."
+        bullets = ["- No commits to display."]
+        return limit, header, bullets
+    header = f"Recent commits (last {limit})"
+    bullets = [f"- {line}" for line in lines]
+    return limit, header, bullets
+
+
+def _format_changelog_entry(version: str, header: str, bullets: list[str]) -> str:
+    body_lines = []
+    if header:
+        body_lines.append(header)
+    body_lines.extend(bullets or ["- No commits to display."])
+    body = "\n".join(body_lines)
+    return f"{version}\n{body}"
+
+
+def _update_changelog_file(version: str, header: str, bullets: list[str]) -> None:
+    entry = _format_changelog_entry(version, header, bullets)
+    if CHANGELOG_FILE.exists():
+        content = CHANGELOG_FILE.read_text(encoding="utf-8").strip()
+        if content:
+            entries = content.split("\n\n")
         else:
-            if current_version is not None:
-                current_lines.append(raw_line.strip())
-    if current_version is not None:
-        sections.append((current_version, "\n".join(current_lines).strip()))
-    return sections
-
-def _latest_version(changelog_text: str) -> str:
-    pattern = re.compile(r"^\d{4}\.\d{2}\.\d{2}\.\d+(?:[A-Z]+)?$")
-    for line in reversed(changelog_text.splitlines()):
-        line = line.strip()
-        if pattern.match(line):
-            return line
-    return "0.0.0.0"
+            entries = []
+    else:
+        entries = []
+    if entries:
+        if entries[-1].startswith(version):
+            entries[-1] = entry
+        else:
+            entries.append(entry)
+    else:
+        entries = [entry]
+    CHANGELOG_FILE.write_text("\n\n".join(entries).strip() + "\n\n", encoding="utf-8")
 
 
-CHANGELOG_TEXT_RAW = _read_changelog()
-CHANGELOG_SECTIONS = _parse_changelog_sections(CHANGELOG_TEXT_RAW)
-CHANGELOG_MAP = {version: text for version, text in CHANGELOG_SECTIONS}
-LATEST_VERSION = CHANGELOG_SECTIONS[-1][0] if CHANGELOG_SECTIONS else "0.0.0.0"
-CURRENT_CHANGELOG = CHANGELOG_MAP.get(LATEST_VERSION, "")
-BOT_VERSION = LATEST_VERSION
+_commit_limit, CHANGELOG_HEADER, CHANGELOG_LINES = _build_commit_changelog()
+CURRENT_CHANGELOG = "\n".join(
+    [CHANGELOG_HEADER] + CHANGELOG_LINES if CHANGELOG_HEADER else CHANGELOG_LINES
+)
+_update_changelog_file(BOT_VERSION, CHANGELOG_HEADER, CHANGELOG_LINES)
+LATEST_VERSION = BOT_VERSION
 
 
 def _parse_version_tuple(version: str) -> tuple:
@@ -114,7 +143,8 @@ def _run_backups(reason: str) -> bool:
         candidate_version = candidate.stem.split('_v', 1)[-1]
         if candidate_version.endswith('B'):
             continue
-        fallback_changelog = CHANGELOG_MAP.get(candidate_version, '')
+        _, fb_header, fb_lines = _build_commit_changelog()
+        fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
         print(f"[BOOT] Falling back to {candidate.name} due to {reason}", file=sys.stderr)
         env = os.environ.copy()
         env['BYBITBOT_CHANGELOG_VERSION'] = candidate_version
