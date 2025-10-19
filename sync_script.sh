@@ -35,22 +35,32 @@ sync_file() {
     fi
 }
 
-echo "🚀 Полная синхронизация проекта..."
+echo "🚀 Точечная синхронизация..."
 
-# Синхронизируем файлы в корневой директории
-echo "📁 Корневая директория:"
+# 1. Синхронизируем файлы в корне проекта (только файлы, не папки)
+echo "📁 Корневые файлы проекта:"
 find "$LOCAL_DIR" -maxdepth 1 -type f | while read file; do
     sync_file "$file"
 done
 
-# Синхронизируем все папки (включая scripts и backups)
-echo "📁 Все папки:"
-find "$LOCAL_DIR" -mindepth 1 -type d | while read dir; do
-    folder_name=$(basename "$dir")
-    echo "  🔍 Папка: $folder_name"
-    find "$dir" -type f | while read file; do
+# 2. Синхронизируем папку scripts (рекурсивно)
+if [ -d "$LOCAL_DIR/scripts" ]; then
+    echo "📁 Папка scripts:"
+    find "$LOCAL_DIR/scripts" -type f | while read file; do
         sync_file "$file"
     done
-done
+else
+    echo "⚠️ Папка scripts не найдена"
+fi
 
-echo "✅ Полная синхронизация завершена!"
+# 3. Синхронизируем папку backups (рекурсивно)
+if [ -d "$LOCAL_DIR/backups" ]; then
+    echo "📁 Папка backups:"
+    find "$LOCAL_DIR/backups" -type f | while read file; do
+        sync_file "$file"
+    done
+else
+    echo "⚠️ Папка backups не найдена"
+fi
+
+echo "✅ Точечная синхронизация завершена!"
