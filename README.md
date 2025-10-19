@@ -25,12 +25,21 @@
 Use `manage_update.py` to stop the bot, run your update commands, and restart it at the planned trading time.
 If `runtime_status.json` contains `next_run_utc`, the manager aligns the restart to that timestamp; otherwise it falls back to the nearest HH:01 / HH:31 slot.
 
-### Cron example (every 30 minutes)
+### Cron-based autostart
+
+The previous production setup ran via cron. A helper script is provided in `scripts/manage_update_cron.sh`; it:
+
+1. Moves to the repository root.
+2. Attempts to load `load_env.sh` (or a simple `.env`).
+3. Calls `manage_update.py schedule --update-cmd "git pull --ff-only"`.
+
+Install it into crontab (every 5 minutes, adjust as desired):
+
 ```cron
-*/30 * * * * cd /home/user/bybitbot && /usr/bin/python3 manage_update.py schedule --update-cmd "/bin/bash /home/user/bybitbot/update.sh"
+*/5 * * * * /usr/bin/env bash /path/to/ByBit\ Bot/scripts/manage_update_cron.sh >> /path/to/ByBit\ Bot/logs/manage_update.log 2>&1
 ```
 
-`update.sh` is your custom update script (download new code, copy files, etc.). If you do not need any update step, omit `--update-cmd`. Bot output is appended to `bybit.log` unless you pass `--no-log`.
+`manage_update.py` reads `runtime_status.json` to honour model-provided `next_run_minutes` / `next_run_time`. The cron job merely wakes the supervisor; the actual trading cadence remains controlled by the model.
 
 ### Script options
 ```
