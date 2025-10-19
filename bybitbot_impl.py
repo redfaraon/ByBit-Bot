@@ -522,7 +522,7 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
         except Exception as exc:
             err = f"fetch_df({tf}) failed: {exc}"
             dataset["errors"].append(err)
-            log(f"?? {symbol}: {err}", Fore.YELLOW)
+            log(f"[WARN] {symbol}: {err}", Fore.YELLOW)
             continue
         applied = []
         for ind in indicators:
@@ -619,7 +619,7 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
             messages=messages,
         )
     except Exception as exc:
-        log(f"?? OpenAI portfolio select error: {exc}", Fore.RED)
+        log(f"[ERROR] OpenAI portfolio select: {exc}", Fore.RED)
         return None
     try:
         payload = res.choices[0].message.content
@@ -628,7 +628,7 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
     try:
         result = json.loads(payload)
     except json.JSONDecodeError as exc:
-        log(f"?? JSON decode (portfolio select): {exc}", Fore.YELLOW)
+        log(f"[WARN] JSON decode (portfolio select): {exc}", Fore.YELLOW)
         return None
     result["_news_digest"] = news_digest
     return result
@@ -659,7 +659,7 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
         try:
             open_orders = fetch_open_orders_for_symbol(exchange, symbol)
         except Exception as exc:
-            log(f"?? fetch_open_orders {symbol}: {exc}", Fore.YELLOW)
+            log(f"[WARN] fetch_open_orders {symbol}: {exc}", Fore.YELLOW)
             open_orders = []
         dataset["open_orders"] = open_orders
         open_orders_cache[symbol] = open_orders
@@ -777,13 +777,13 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
             messages=messages,
         )
     except Exception as exc:
-        log(f"?? OpenAI trade plan error: {exc}", Fore.RED)
+        log(f"[ERROR] OpenAI trade plan: {exc}", Fore.RED)
         return None
     content = res.choices[0].message.content
     try:
         return json.loads(content)
     except json.JSONDecodeError as exc:
-        log(f"?? JSON decode (trade plan): {exc}", Fore.YELLOW)
+        log(f"[WARN] JSON decode (trade plan): {exc}", Fore.YELLOW)
         return None
 
 
@@ -807,7 +807,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         try:
             open_orders_symbol = fetch_open_orders_for_symbol(exchange, sym)
         except Exception as exc:
-            log(f"?? fetch_open_orders {sym}: {exc}", Fore.YELLOW)
+            log(f"[WARN] fetch_open_orders {sym}: {exc}", Fore.YELLOW)
             open_orders_symbol = []
         open_orders_cache[sym] = open_orders_symbol
 
@@ -923,7 +923,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             try:
                 open_orders_symbol = fetch_open_orders_for_symbol(exchange, sym)
             except Exception as exc:
-                log(f"?? fetch_open_orders {sym}: {exc}", Fore.YELLOW)
+                log(f"[WARN] fetch_open_orders {sym}: {exc}", Fore.YELLOW)
                 open_orders_symbol = []
             open_orders_cache[sym] = open_orders_symbol
 
@@ -2663,7 +2663,7 @@ def run_cycle():
         try:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_candidate)
         except Exception as orders_exc:
-            log(f"⚠️ Не удалось получить открытые ордера для {sym_candidate}: {orders_exc}", Fore.YELLOW)
+            log(f"[WARN] {sym_candidate}: failed to fetch open orders: {orders_exc}", Fore.YELLOW)
             orders_snapshot = []
         open_orders_prefetch[sym_candidate] = orders_snapshot
         if orders_snapshot:
@@ -2671,8 +2671,13 @@ def run_cycle():
 
     add_candidates(order_symbols, record_missing=False)
     news_pairs = _collect_news_pairs()
+    news_priority: list[str] = []
     if news_pairs:
-        add_candidates(news_pairs)
+        for raw_pair in news_pairs:
+            resolved_pair = normalize_symbol(raw_pair)
+            if resolved_pair and resolved_pair not in news_priority:
+                news_priority.append(resolved_pair)
+                candidate_pairs_set.add(resolved_pair)
 
     for sym_candidate in sorted(candidate_pairs_set):
         if sym_candidate in open_orders_prefetch:
@@ -2682,7 +2687,7 @@ def run_cycle():
         try:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_candidate)
         except Exception as orders_exc:
-            log(f"⚠️ Не удалось получить открытые ордера для {sym_candidate}: {orders_exc}", Fore.YELLOW)
+            log(f"[WARN] {sym_candidate}: failed to fetch open orders: {orders_exc}", Fore.YELLOW)
             orders_snapshot = []
         open_orders_prefetch[sym_candidate] = orders_snapshot
         if orders_snapshot:
@@ -2701,11 +2706,17 @@ def run_cycle():
     available_pairs: list[str] = []
     selected_symbols: list[str] = []
     seen_available: set[str] = set()
-    _append_unique(available_pairs, selected_symbols, seen_available)
-    _append_unique(available_pairs, sorted(position_symbols), seen_available)
-    _append_unique(available_pairs, sorted(order_symbols), seen_available)
-    remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
-    _append_unique(available_pairs, remaining_pairs, seen_available)
+
+    news_sorted = sorted(news_priority)
+    if MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS:
+        _append_unique(available_pairs, sorted(position_symbols), seen_available)
+        _append_unique(available_pairs, sorted(order_symbols), seen_available)
+    else:
+        _append_unique(available_pairs, news_sorted, seen_available)
+        _append_unique(available_pairs, sorted(position_symbols), seen_available)
+        _append_unique(available_pairs, sorted(order_symbols), seen_available)
+        remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
+        _append_unique(available_pairs, remaining_pairs, seen_available)
 
     if not available_pairs:
         available_pairs = normalized_pair_list[:PAIR_CANDIDATE_LIMIT]
@@ -2713,16 +2724,70 @@ def run_cycle():
             available_pairs = list(sorted(markets_set))[:PAIR_CANDIDATE_LIMIT]
 
     if missing_symbols:
-        missing_desc = ", ".join(sorted(missing_symbols))
+        missing_desc = ', '.join(sorted(missing_symbols))
         log(f"[WARN] Removed pairs not listed on Bybit: {missing_desc}", Fore.YELLOW)
         send_tg(f"[WARN] Pairs missing on Bybit: {missing_desc}")
         missing_symbols.clear()
     if symbol_alias_hits:
-        alias_desc = ", ".join(f"{src}->{dst}" for src, dst in sorted(symbol_alias_hits.items()))
+        alias_desc = ', '.join(f"{src}->{dst}" for src, dst in sorted(symbol_alias_hits.items()))
         log(f"[INFO] Using alias tickers: {alias_desc}", Fore.LIGHTBLACK_EX)
         symbol_alias_hits.clear()
 
-    log("[INFO] Candidates for analysis: " + ", ".join(available_pairs), Fore.LIGHTBLACK_EX)
+    log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
+
+    selection_universe = available_pairs
+    max_positions_reached = MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS
+    if max_positions_reached:
+        selection_universe = [sym for sym in available_pairs if sym in position_symbols or sym in order_symbols]
+
+    selection = None
+    if selection_universe:
+        selection = ai_select_portfolio(ex, selection_universe, positions_map, equity, available_margin)
+    global_timeframes = []
+    global_indicators = []
+    news_cache = {}
+    target_map = {}
+    selected_symbols = []
+    selection_missing_symbols: list[str] = []
+    selection_next_run = None
+    selection_next_time = None
+    if selection:
+        global_timeframes = selection.get("global_timeframes") or []
+        global_indicators = selection.get("global_indicators") or []
+        news_cache = selection.get("_news_digest") or {}
+        for target in selection.get("targets") or []:
+            raw_symbol = target.get("symbol")
+            if not raw_symbol:
+                continue
+            sym_sel = normalize_symbol(raw_symbol)
+            if not sym_sel:
+                selection_missing_symbols.append(raw_symbol)
+                continue
+            target_copy = dict(target)
+            target_copy["symbol"] = sym_sel
+            target_copy.setdefault("raw_symbol", raw_symbol)
+            target_map[sym_sel] = target_copy
+            if sym_sel not in selected_symbols:
+                selected_symbols.append(sym_sel)
+        selection_reason = selection.get("reason")
+        if selection_reason:
+            log(f"[INFO] Portfolio rationale: {selection_reason}", Fore.CYAN)
+            send_tg(f"[INFO] Portfolio analysis: {selection_reason}")
+        confidence = selection.get("confidence")
+        if confidence:
+            log(f"[INFO] Model confidence: {confidence}", Fore.LIGHTBLACK_EX)
+    if selection:
+        raw_next_run = selection.get("next_run_minutes")
+        if raw_next_run is not None:
+            try:
+                selection_next_run = float(raw_next_run)
+            except (TypeError, ValueError):
+                selection_next_run = None
+        selection_next_time = selection.get("next_run_time")
+
+    if selection_missing_symbols:
+        missing_from_ai = ', '.join(sorted(set(selection_missing_symbols)))
+        log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
 
     selection = ai_select_portfolio(ex, available_pairs, positions_map, equity, available_margin)
     global_timeframes = []
@@ -3157,6 +3222,16 @@ def run_cycle():
             else:
                 if action not in ("hold", "manage", "none", "", None):
                     log(f"ℹ️ Неизвестное действие \"{action}\" для {sym}, обработка только дополнительных ордеров", Fore.YELLOW)
+
+            current_amount_val = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts"))
+            limit_blocks_new_orders = (
+                MAX_OPEN_POSITIONS > 0
+                and open_positions is not None
+                and open_positions >= MAX_OPEN_POSITIONS
+                and (current_amount_val is None or abs(current_amount_val) == 0)
+            )
+            if limit_blocks_new_orders:
+                extra_orders = []
 
             if extra_orders:
                 executed, actions_performed = execute_extra_orders(
