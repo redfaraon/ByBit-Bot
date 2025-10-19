@@ -1755,28 +1755,21 @@ def ai_decision(
         needs_followup = []
         indicator_extra = None
         for n in needs:
-            if n.startswith("higher_tf"):
-                tf = n.split(":",1)[1] if ":" in n else "4h"
-                extra.setdefault("higher_tf", {})[tf] = get_higher_tf(exchange, symbol, tf)
-            elif n == "funding":
-                extra["funding"] = get_funding_rate(exchange, symbol)
-            elif n == "open_interest":
-                extra["open_interest"] = get_open_interest(exchange, symbol)
-            elif n == "news":
-                extra["news"] = get_news(symbol)
-            elif isinstance(n, dict):
-                tf_values = []
-                indicators_requested = []
-                if "timeframe" in n:
+            if isinstance(n, dict):
+                tf_values: list[str] = []
+                indicators_requested: list[str] = []
+                if "timeframe" in n and n.get("timeframe"):
                     tf_values.append(str(n.get("timeframe")))
-                if "timeframes" in n and isinstance(n.get("timeframes"), (list, tuple, set)):
+                if isinstance(n.get("timeframes"), (list, tuple, set)):
                     tf_values.extend(str(tf) for tf in n["timeframes"] if tf)
                 raw_indicator_fields = []
                 for key in ("indicator", "indicators", "indicator_set"):
                     if key in n:
                         raw_indicator_fields.append(n[key])
-                # allow shorthand { "ema": [21,55] }
-                shorthand_fields = {k: v for k, v in n.items() if k.lower() in ("ema","sma","rsi","atr","stoch")}
+                shorthand_fields = {
+                    k: v for k, v in n.items()
+                    if isinstance(k, str) and k.lower() in ("ema", "sma", "rsi", "atr", "stoch")
+                }
                 for k, v in shorthand_fields.items():
                     raw_indicator_fields.append({"indicator": k, "length": v})
                 if not raw_indicator_fields and n.get("type") in ("indicator", "indicators"):
@@ -1784,9 +1777,9 @@ def ai_decision(
                 for field in raw_indicator_fields:
                     indicators_requested.extend(_expand_indicator_entries(field))
                 indicators_requested = [ind for ind in dict.fromkeys(indicators_requested) if ind]
+                if not tf_values:
+                    tf_values = [TIMEFRAME]
                 if indicators_requested:
-                    if not tf_values:
-                        tf_values = [TIMEFRAME]
                     indicator_extra = extra.setdefault(
                         "indicator_extra",
                         {"requests": [], "timeframes": {}, "errors": []}
@@ -1798,6 +1791,7 @@ def ai_decision(
                             "indicators": indicators_requested
                         }
                     )
+                    timeframe_store = extra.setdefault("timeframes", {})
                     for tf in tf_values:
                         try:
                             df_tf = fetch_df(exchange, symbol, tf)
@@ -1818,17 +1812,25 @@ def ai_decision(
                                     indicator_values[col] = None
                                 else:
                                     val = series.iloc[-1]
-                                    if isinstance(val, numbers.Number):
-                                        indicator_values[col] = float(val)
-                                    elif hasattr(val, "item"):
-                                        try:
-                                            indicator_values[col] = float(val.item())
-                                        except Exception:
-                                            indicator_values[col] = str(val)
-                                    else:
-                                        indicator_values[col] = str(val)
+                                    indicator_values[col] = float(val) if isinstance(val, numbers.Number) else val
                             tf_payload["indicators"] = indicator_values
+                        timeframe_store.setdefault(tf, tf_payload)
                         indicator_extra["timeframes"][tf] = tf_payload
+                else:
+                    needs_followup.append(n)
+                continue
+            if not isinstance(n, str):
+                needs_followup.append(n)
+                continue
+            if n.startswith("higher_tf"):
+                tf = n.split(":",1)[1] if ":" in n else "4h"
+                extra.setdefault("higher_tf", {})[tf] = get_higher_tf(exchange, symbol, tf)
+            elif n == "funding":
+                extra["funding"] = get_funding_rate(exchange, symbol)
+            elif n == "open_interest":
+                extra["open_interest"] = get_open_interest(exchange, symbol)
+            elif n == "news":
+                extra["news"] = get_news(symbol)
 
         stats_report = []
         for key,val in extra.items():
@@ -2337,4 +2339,3 @@ if __name__ == "__main__":
         if exit_code != 0:
             log(f"Fallback version exited with code {exit_code}", Fore.RED)
         sys.exit(exit_code)
-

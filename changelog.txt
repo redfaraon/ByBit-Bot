@@ -1,3 +1,8 @@
+2025.10.19.1
+- Rolled back bot implementation to backup 2025.10.16.12 after corrupted versions.
+- Fixed needs handling so dict entries from the model no longer break order opening.
+- Initialised git repo with .gitignore and removed tracked .env/__pycache__.
+
 2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
@@ -30,3 +35,6 @@
 - Selection parsing merges symbol_configs into targets and broadcasts the applied per-symbol parameters.
 - Execution layer combines base pair configs with per-decision overrides and logs the effective inputs used for orders.
 - Extra analysis timeout path now returns a safe skip decision immediately to avoid control flow bugs.
+
+
+
