@@ -99,7 +99,11 @@ def _iter_backups():
     if not backups_dir.exists():
         return []
     candidates = []
-    patterns = ["bybitbot_v*.py", "bybit_intraday_30m_5pairs_v*.py"]
+    patterns = [
+        "bybitbot_v*.py",
+        "bybit_intraday_30m_5pairs_v*.py",
+        "bybitbot_impl_v*.py",
+    ]
     seen = set()
     for pattern in patterns:
         for path in backups_dir.glob(pattern):

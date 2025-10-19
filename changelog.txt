@@ -43,6 +43,13 @@ Recent commits (last 8)
 - 2025-10-19 7f118eb Initial commit (recovered)
 
 2025.10.19.2
-- Protective stop orders now translate to Bybit trigger orders, ensuring SL/TP/trailing guards recover after failures.
-- Changelog broadcasts are de-duplicated in Telegram and version pings link back to the original announcement.
-- Bot detects new git commits during runtime and restarts automatically to load the latest codebase.
+Recent commits (last 8)
+- 2025-10-19 d742f19 feat: refactor imports and environment settings for improved organization and clarity
+- 2025-10-19 34da55e feat: update bot version to 2025.10.19.2 and enhance changelog with new features and automatic restart on commit detection
+- 2025-10-19 39f6df7 feat: enhance changelog management with state persistence and Telegram integration
+- 2025-10-19 10dd5fd feat: expand trading capabilities with additional pairs and indicators
+- 2025-10-19 a2e3d06 feat: implement dynamic changelog management and version tracking
+- 2025-10-19 29f2ec5 feat: highlight session boundaries and balance reports
+- 2025-10-19 322dcf0 19.1 refactor: update changelog management to source from recent git commits
+- 2025-10-19 e5df32c refactor: enhance runtime status management and default delay configuration
+
