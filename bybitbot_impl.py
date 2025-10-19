@@ -2026,6 +2026,12 @@ def run_cycle():
         equity = 64.0
     if available_margin <= 0:
         available_margin = equity
+    session_dt = _current_log_time()
+    session_stamp = session_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    session_separator = "=" * 56
+    start_banner = f"{session_separator} START SESSION {session_stamp} {session_separator}"
+    log(start_banner, Fore.MAGENTA)
+    send_tg(f"{session_separator}\nSTART SESSION {session_stamp}\n{session_separator}")
     last_equity = equity
     last_available_margin = available_margin
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
@@ -2476,6 +2482,21 @@ def run_cycle():
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
     send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
+    try:
+        equity_end, available_end, _ = fetch_usdt_equity(ex)
+    except Exception as exc_equity:
+        end_balance_text = f"⚠️ Не удалось обновить баланс: {exc_equity}"
+        log(end_balance_text, Fore.YELLOW)
+        send_tg(end_balance_text)
+    else:
+        end_balance_text = f"Баланс: {equity_end:.2f} USDT, доступно {available_end:.2f} USDT"
+        log(f"🏁 Завершение сессии. {end_balance_text}", Fore.GREEN)
+        send_tg(f"🏁 Завершение сессии. {end_balance_text}")
+    end_dt = _current_log_time()
+    end_stamp = end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    end_banner = f"{session_separator} END SESSION {end_stamp} {session_separator}"
+    log(end_banner, Fore.MAGENTA)
+    send_tg(f"{session_separator}\nEND SESSION {end_stamp}\n{session_separator}")
     return next_delay_minutes
 
 def main():
