@@ -1325,6 +1325,44 @@ ORDER_TYPE_MAP = {
     "stop_loss": "stopLoss",
     "trailing_stop": "trailingStop",
 }
+ORDER_TYPE_ALIASES = {
+    "l": "limit",
+    "m": "market",
+    "stoplimit": "stop_limit",
+    "stop_limit_order": "stop_limit",
+    "stopmarket": "stop",
+    "stop_market": "stop",
+    "stop_market_order": "stop",
+    "market_if_touched": "stop",
+    "mit": "stop",
+    "limit_if_touched": "limit",
+    "lit": "limit",
+    "takeprofit": "take_profit",
+    "take_profit_order": "take_profit",
+    "tp": "take_profit",
+    "tp_order": "take_profit",
+    "stoploss": "stop_loss",
+    "stop_loss_order": "stop_loss",
+    "sl": "stop_loss",
+    "sl_order": "stop_loss",
+    "trailingstop": "trailing_stop",
+    "trailing": "trailing_stop",
+    "trailing_stop_market": "trailing_stop",
+    "trailing_stop_order": "trailing_stop",
+    "partialclose": "partial_close",
+    "partial_close_order": "partial_close",
+}
+VALID_ORDER_TYPES = set(ORDER_TYPE_MAP.values())
+
+
+def normalize_order_type_key(raw_type):
+    text = "" if raw_type is None else str(raw_type)
+    if not text:
+        return "limit"
+    key = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    if not key:
+        return "limit"
+    return ORDER_TYPE_ALIASES.get(key, key)
 
 
 def execute_extra_orders(exchange, symbol, orders, current_position=None, open_orders=None):
@@ -1348,7 +1386,14 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
         if not isinstance(order, dict):
             log(f"⚠️ Пропуск order #{idx} для {symbol}: ожидается объект", Fore.YELLOW)
             continue
-        order_type_key = (order.get("type") or "limit").lower()
+        raw_type = order.get("type")
+        if not raw_type:
+            raw_type = (
+                order.get("orderType")
+                or order.get("order_type")
+                or order.get("ccxt_type")
+            )
+        order_type_key = normalize_order_type_key(raw_type)
         params = dict(order.get("params") or {})
         note = order.get("note") or order.get("comment") or ""
         reduce_only = order.get("reduceOnly")
@@ -1365,13 +1410,26 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
             continue
 
         if order_type_key == "partial_close":
-            base_order_type = (order.get("orderType") or order.get("order_type") or order.get("ccxt_type") or "market").lower()
-            ccxt_type = ORDER_TYPE_MAP.get(base_order_type, base_order_type)
+            base_order_type_raw = (
+                order.get("orderType")
+                or order.get("order_type")
+                or order.get("ccxt_type")
+                or order.get("baseType")
+            )
+            base_order_type_key = normalize_order_type_key(base_order_type_raw or "market")
+            ccxt_type = ORDER_TYPE_MAP.get(base_order_type_key, base_order_type_key)
             params.setdefault("reduceOnly", True)
             if not side and current_position:
                 side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
         else:
             ccxt_type = ORDER_TYPE_MAP.get(order_type_key, order_type_key)
+        if ccxt_type not in VALID_ORDER_TYPES:
+            fallback_type = "limit" if price is not None else "market"
+            log(
+                f"[WARN] Unsupported order type '{raw_type}' for extra order #{idx} {symbol}, falling back to {fallback_type}",
+                Fore.YELLOW,
+            )
+            ccxt_type = fallback_type
 
         if not side:
             log(f"⚠️ Не указан side в order #{idx} для {symbol}", Fore.YELLOW)
