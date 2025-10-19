@@ -10,6 +10,9 @@ BOT_VERSION = "2025.10.19.1"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
+SCRIPT_DIR = Path(__file__).resolve().parent
+CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
+_LAST_COMMIT_HASH: Optional[str] = None
 
 # --- Безопасные настройки OpenBLAS (исключаем падения из-за многопоточности) ---
 import os
@@ -81,6 +84,93 @@ def ensure_version_backup() -> None:
         print(f"[INFO] Created backup {backup_path.name}")
     except Exception as exc:
         print(f"[WARN] Failed to create backup '{backup_path.name}': {exc}")
+
+
+def _read_change_log_entry() -> Tuple[str, str]:
+    version = BOT_VERSION
+    changelog_text = BOT_CHANGELOG
+    try:
+        raw = CHANGELOG_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return version, changelog_text
+    if not raw:
+        return version, changelog_text
+    blocks = [block.strip() for block in raw.split("\n\n") if block.strip()]
+    if not blocks:
+        return version, changelog_text
+    latest_block = blocks[-1]
+    lines = [line.strip() for line in latest_block.splitlines() if line.strip()]
+    if not lines:
+        return version, changelog_text
+    new_version = lines[0]
+    body = "\n".join(lines[1:]).strip()
+    if not body:
+        body = _build_commit_changelog()
+    return new_version, body
+
+
+def _build_commit_changelog(limit: int = 8) -> str:
+    limit = max(1, limit)
+    try:
+        result = subprocess.run(
+            ["git", "log", "-n", str(limit), "--pretty=format:%cs %h %s"],
+            capture_output=True,
+            text=True,
+            cwd=SCRIPT_DIR,
+            check=True,
+        )
+    except Exception as exc:
+        return f"git log unavailable: {exc}"
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return "No recent commits available."
+    return "Recent commits:\n" + "\n".join(f"- {line}" for line in lines)
+
+
+def _current_git_head() -> Optional[str]:
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=SCRIPT_DIR,
+            check=True,
+        )
+        return head.stdout.strip()
+    except Exception:
+        return None
+
+
+def maybe_refresh_metadata() -> None:
+    global BOT_VERSION, BOT_CHANGELOG, _LAST_COMMIT_HASH
+
+    previous_hash = _LAST_COMMIT_HASH
+    head = _current_git_head()
+    commit_changed = head is not None and head != previous_hash
+    if head is not None:
+        _LAST_COMMIT_HASH = head
+
+    new_version, new_changelog = _read_change_log_entry()
+    metadata_changed = (new_version != BOT_VERSION) or (new_changelog != BOT_CHANGELOG)
+
+    if not commit_changed and not metadata_changed:
+        return
+
+    previous_version = BOT_VERSION
+    BOT_VERSION = new_version or BOT_VERSION
+    BOT_CHANGELOG = new_changelog or BOT_CHANGELOG
+    os.environ["BYBITBOT_CHANGELOG_VERSION"] = BOT_VERSION
+    os.environ["BYBITBOT_CHANGELOG_TEXT"] = BOT_CHANGELOG
+
+    if BOT_VERSION != previous_version:
+        ensure_version_backup()
+        log(f"🆕 Обнаружена новая версия: {previous_version} → {BOT_VERSION}", Fore.LIGHTBLUE_EX)
+        send_tg(f"🆕 Обновлена версия до {BOT_VERSION}")
+    elif metadata_changed:
+        log("ℹ️ Обновлён changelog без изменения версии.", Fore.LIGHTBLACK_EX)
+        send_tg("ℹ️ Обновлён changelog без изменения версии.")
+    elif commit_changed and previous_hash is not None:
+        log("ℹ️ Обновлена HEAD коммита без изменения changelog.", Fore.LIGHTBLACK_EX)
 
 
 def _parse_version_tuple(version: str) -> Tuple[int, ...]:
@@ -2014,6 +2104,7 @@ def ai_decision(
 def run_cycle():
     _write_runtime_status(None, None, "running")
     refresh_settings()
+    maybe_refresh_metadata()
     ex = init_exchange()
     ex.load_markets()
     ensure_position_mode(ex)
@@ -2074,6 +2165,7 @@ def run_cycle():
 
     decisions_total = 0
     counts = {"open":0,"close":0,"skip":0}
+    decisions_details: list[str] = []
 
     for i,sym in enumerate(symbols_sequence,1):
         log(f"[{i}/{len(symbols_sequence)}] {sym}", Fore.LIGHTBLUE_EX)
@@ -2154,6 +2246,9 @@ def run_cycle():
             reason = dec.get("reason") or ""
             counts[action] = counts.get(action,0)+1
             decisions_total += 1
+            side_text = side.lower()
+            detail_entry: str | None = None
+            orders_activity = False
 
             extra_orders_raw = dec.get("orders") or dec.get("adjustments") or dec.get("extra_orders") or []
             if isinstance(extra_orders_raw, dict):
@@ -2199,8 +2294,10 @@ def run_cycle():
             cancelled_ids = set()
             cancelled_success = []
             cancel_failures = []
+            orders_activity = False
 
             def try_cancel(order_id: str, source: str):
+                nonlocal orders_activity
                 oid = str(order_id)
                 if not oid or oid in cancelled_ids:
                     return
@@ -2208,6 +2305,7 @@ def run_cycle():
                 if success:
                     cancelled_ids.add(oid)
                     cancelled_success.append((oid, source))
+                    orders_activity = True
                     log(f"🗑️ Отменён ордер {oid} для {sym} (источник {source})", Fore.LIGHTBLUE_EX)
                 else:
                     cancel_failures.append((oid, err))
@@ -2239,6 +2337,7 @@ def run_cycle():
                         replacement_orders.extend([x for x in new_spec if isinstance(x, dict)])
 
             if replacement_orders:
+                orders_activity = True
                 extra_orders.extend(replacement_orders)
 
             if cancelled_success:
@@ -2418,22 +2517,46 @@ def run_cycle():
                     open_orders=open_orders_symbol
                 )
                 if executed:
+                    orders_activity = True
                     send_tg("🛠️ " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
                 if actions_performed:
+                    orders_activity = True
                     positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_LIST)
                     current_position = positions_map.get(sym)
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+
+            if detail_entry is None:
+                if action == "open":
+                    direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
+                    detail_entry = f"[{sym}] - открыт {direction or 'позиция'}"
+                elif action == "close":
+                    direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
+                    detail_entry = f"[{sym}] - закрыт {direction or 'позиция'}"
+                elif action == "manage":
+                    detail_entry = f"[{sym}] - держим позицию ({'меняли ордера' if orders_activity else 'ордера без изменений'})"
+                elif action in ("hold", "none"):
+                    detail_entry = f"[{sym}] - держим позицию (без изменений)"
+                elif action == "skip":
+                    detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
+                else:
+                    detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
+            if detail_entry:
+                decisions_details.append(detail_entry)
 
         except Exception as e:
             log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
 
     if decisions_total>0:
         pct={k:(v/decisions_total)*100 for k,v in counts.items()}
-        summary=f"📈 Статистика: открыто {counts['open']} ({pct['open']:.1f}%), " \
+        summary=f"📈 Итоги: открыто {counts['open']} ({pct['open']:.1f}%), " \
                 f"закрыто {counts['close']} ({pct['close']:.1f}%), " \
                 f"пропуск {counts['skip']} ({pct['skip']:.1f}%) — всего {decisions_total}"
         log(summary, Fore.CYAN)
         send_tg(summary)
+        if decisions_details:
+            detail_msg = "\n".join(decisions_details)
+            log(detail_msg, Fore.LIGHTBLACK_EX)
+            send_tg(detail_msg)
 
     next_delay_minutes = None
     next_run_dt = None
@@ -2513,8 +2636,49 @@ def main():
             raise
         if not delay_minutes or delay_minutes <= 0:
             delay_minutes = DEFAULT_NEXT_RUN_MINUTES
+
         try:
-            time.sleep(delay_minutes * 60)
+            remaining_seconds = max(0.0, float(delay_minutes) * 60.0)
+        except (TypeError, ValueError):
+            remaining_seconds = float(DEFAULT_NEXT_RUN_MINUTES) * 60.0
+
+        if remaining_seconds <= 0:
+            continue
+
+        next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
+        local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+        next_local = next_run_dt.astimezone(local_tz)
+        eta_msg = (
+            f"🕒 Следующая сессия запланирована на {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"(~{delay_minutes:.1f} мин)"
+        )
+        log(eta_msg, Fore.LIGHTBLACK_EX)
+        send_tg(eta_msg)
+
+        progress_enabled = remaining_seconds >= 180
+        if progress_enabled:
+            progress_interval = min(300.0, max(90.0, remaining_seconds / 4.0))
+        else:
+            progress_interval = remaining_seconds
+
+        try:
+            while remaining_seconds > 0:
+                step = min(progress_interval, remaining_seconds)
+                time.sleep(step)
+                remaining_seconds -= step
+                if remaining_seconds <= 0:
+                    break
+                if not progress_enabled:
+                    continue
+                minutes_left = remaining_seconds / 60.0
+                eta_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
+                eta_local = eta_dt.astimezone(local_tz)
+                progress_msg = (
+                    f"⏳ Осталось ~{minutes_left:.1f} мин до следующей сессии "
+                    f"({eta_local.strftime('%H:%M:%S %Z')})"
+                )
+                log(progress_msg, Fore.LIGHTBLACK_EX)
+                send_tg(progress_msg)
         except KeyboardInterrupt:
             log("Interrupted during sleep.", Fore.YELLOW)
             _write_runtime_status(None, None, "stopped")
