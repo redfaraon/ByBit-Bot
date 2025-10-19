@@ -2580,6 +2580,7 @@ def run_cycle():
         return target_list
 
     available_pairs: list[str] = []
+    selected_symbols: list[str] = []
     seen_available: set[str] = set()
     _append_unique(available_pairs, selected_symbols, seen_available)
     _append_unique(available_pairs, sorted(position_symbols), seen_available)
