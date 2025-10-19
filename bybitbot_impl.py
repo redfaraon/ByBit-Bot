@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
-# Version: 2025.10.19.1
+﻿# -*- coding: utf-8 -*-
+# Version: 2025.10.19.2
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
 """
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.19.1"
+BOT_VERSION = "2025.10.19.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -106,7 +106,7 @@ LOG_TZINFO = None
 LOG_TIMEZONE = ""
 _LOG_TZ_WARNING_EMITTED = False
 
-DEFAULT_NEXT_RUN_MINUTES = 28.0
+DEFAULT_NEXT_RUN_MINUTES = 28.5
 RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
 CHANGELOG_STATE_FILE = Path(__file__).with_name("changelog_state.json")
 
@@ -223,12 +223,12 @@ def _current_git_head() -> Optional[str]:
         return None
 
 
-def maybe_refresh_metadata() -> None:
+def maybe_refresh_metadata() -> dict[str, Any]:
     global BOT_VERSION, BOT_CHANGELOG, _LAST_COMMIT_HASH
 
     previous_hash = _LAST_COMMIT_HASH
     head = _current_git_head()
-    commit_changed = head is not None and head != previous_hash
+    commit_changed = previous_hash is not None and head is not None and head != previous_hash
     if head is not None:
         _LAST_COMMIT_HASH = head
 
@@ -236,7 +236,14 @@ def maybe_refresh_metadata() -> None:
     metadata_changed = (new_version != BOT_VERSION) or (new_changelog != BOT_CHANGELOG)
 
     if not commit_changed and not metadata_changed:
-        return
+        return {
+            "commit_changed": False,
+            "metadata_changed": False,
+            "version_changed": False,
+            "reload_required": False,
+            "current_hash": head,
+            "previous_hash": previous_hash,
+        }
 
     previous_version = BOT_VERSION
     BOT_VERSION = new_version or BOT_VERSION
@@ -244,7 +251,8 @@ def maybe_refresh_metadata() -> None:
     os.environ["BYBITBOT_CHANGELOG_VERSION"] = BOT_VERSION
     os.environ["BYBITBOT_CHANGELOG_TEXT"] = BOT_CHANGELOG
 
-    if BOT_VERSION != previous_version:
+    version_changed = BOT_VERSION != previous_version
+    if version_changed:
         ensure_version_backup()
         log(f"🆕 Обнаружена новая версия: {previous_version} → {BOT_VERSION}", Fore.LIGHTBLUE_EX)
         send_tg(f"🆕 Обновлена версия до {BOT_VERSION}")
@@ -253,6 +261,15 @@ def maybe_refresh_metadata() -> None:
         send_tg("ℹ️ Обновлён changelog без изменения версии.")
     elif commit_changed and previous_hash is not None:
         log("ℹ️ Обновлена HEAD коммита без изменения changelog.", Fore.LIGHTBLACK_EX)
+
+    return {
+        "commit_changed": bool(commit_changed),
+        "metadata_changed": bool(metadata_changed),
+        "version_changed": bool(version_changed),
+        "reload_required": bool(commit_changed),
+        "current_hash": head,
+        "previous_hash": previous_hash,
+    }
 
 
 def _parse_version_tuple(version: str) -> Tuple[int, ...]:
@@ -1169,6 +1186,26 @@ def ensure_changelog_announcement() -> dict:
     }
     _save_changelog_state(new_state)
     return new_state
+
+
+def _restart_with_latest_code(reason: str) -> None:
+    log(reason, Fore.LIGHTBLUE_EX)
+    send_tg(reason)
+    _write_runtime_status(None, None, "restarting")
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    python_exec = sys.executable or "python"
+    args = [python_exec, *sys.argv]
+    try:
+        os.execv(python_exec, args)
+    except Exception as exc:
+        err_msg = f"❌ Не удалось перезапустить процесс автоматически: {exc}"
+        log(err_msg, Fore.RED)
+        send_tg(err_msg)
+        raise
 
 
 def save_json_line(path, data):
@@ -2456,7 +2493,12 @@ def ai_decision(
 def run_cycle():
     _write_runtime_status(None, None, "running")
     refresh_settings()
-    maybe_refresh_metadata()
+    metadata_state = maybe_refresh_metadata()
+    if isinstance(metadata_state, dict) and metadata_state.get("reload_required"):
+        new_hash = metadata_state.get("current_hash")
+        short_hash = (new_hash or "")[:8] if isinstance(new_hash, str) else "?"
+        reason = f"♻️ Обнаружен новый коммит {short_hash}, перезапускаем бота для загрузки обновлений."
+        _restart_with_latest_code(reason)
     ex = init_exchange()
     ex.load_markets()
     ensure_position_mode(ex)

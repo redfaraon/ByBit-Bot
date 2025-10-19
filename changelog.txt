@@ -42,3 +42,7 @@ Recent commits (last 8)
 - 2025-10-19 d05355f 2025.10.19.1: rollback and fix needs handling
 - 2025-10-19 7f118eb Initial commit (recovered)
 
+2025.10.19.2
+- Protective stop orders now translate to Bybit trigger orders, ensuring SL/TP/trailing guards recover after failures.
+- Changelog broadcasts are de-duplicated in Telegram and version pings link back to the original announcement.
+- Bot detects new git commits during runtime and restarts automatically to load the latest codebase.
