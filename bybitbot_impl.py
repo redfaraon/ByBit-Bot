@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.19.2
+# Version: 2025.10.20.1
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.19.2"
+BOT_VERSION = "2025.10.20.1"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -978,7 +978,7 @@ def resolve_timezone(value: str):
 
 def refresh_settings():
     load_environment()
-    global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR
+    global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR, TRAILING_ATR_MULT
     global DEFAULT_NEXT_RUN_MINUTES
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
@@ -994,6 +994,7 @@ def refresh_settings():
     RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.015)))
     SL_ATR = float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
     TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
+    TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", 0.0)))
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
     MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
@@ -2707,7 +2708,6 @@ def run_cycle():
     _append_unique(available_pairs, remaining_pairs, seen_available)
 
     if not available_pairs:
-    if not available_pairs:
         available_pairs = normalized_pair_list[:PAIR_CANDIDATE_LIMIT]
         if not available_pairs:
             available_pairs = list(sorted(markets_set))[:PAIR_CANDIDATE_LIMIT]
@@ -2723,12 +2723,34 @@ def run_cycle():
         symbol_alias_hits.clear()
 
     log("[INFO] Candidates for analysis: " + ", ".join(available_pairs), Fore.LIGHTBLACK_EX)
+
+    selection = ai_select_portfolio(ex, available_pairs, positions_map, equity, available_margin)
+    global_timeframes = []
+    global_indicators = []
+    news_cache = {}
+    target_map = {}
+    selected_symbols = []
+    selection_missing_symbols: list[str] = []
+    selection_next_run = None
+    selection_next_time = None
+    if selection:
+        global_timeframes = selection.get("global_timeframes") or []
+        global_indicators = selection.get("global_indicators") or []
+        news_cache = selection.get("_news_digest") or {}
         for target in selection.get("targets") or []:
-            sym_sel = target.get("symbol")
-            if not sym_sel:
+            raw_symbol = target.get("symbol")
+            if not raw_symbol:
                 continue
-            target_map[sym_sel] = target
-            selected_symbols.append(sym_sel)
+            sym_sel = normalize_symbol(raw_symbol)
+            if not sym_sel:
+                selection_missing_symbols.append(raw_symbol)
+                continue
+            target_copy = dict(target)
+            target_copy["symbol"] = sym_sel
+            target_copy.setdefault("raw_symbol", raw_symbol)
+            target_map[sym_sel] = target_copy
+            if sym_sel not in selected_symbols:
+                selected_symbols.append(sym_sel)
         selection_reason = selection.get("reason")
         if selection_reason:
             log(f"[INFO] Portfolio rationale: {selection_reason}", Fore.CYAN)

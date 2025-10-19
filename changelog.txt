@@ -57,3 +57,8 @@ Recent commits (last 8)
 - Boot loader now treats the first successful run of a commit as stable and avoids reusing failed fallbacks.
 - Added alias handling for Bybit symbol changes (e.g., POL replaces MATIC) and normalized pair checks.
 
+2025.10.20.1
+- Validate model/portfolio symbols against live Bybit markets, auto-alias MATIC→POL, and warn on delistings.
+- At cycle end, re-establish missing SL/TP protection or close the position if safeguards cannot be restored.
+- Loader marks new commits stable only after a successful protected run and preserves readable English logs.
+
