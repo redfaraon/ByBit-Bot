@@ -75,9 +75,9 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
-import math, time, json, traceback, datetime, random, warnings, re, numbers
+import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import pandas as pd
 import ccxt
 import requests
@@ -108,6 +108,7 @@ _LOG_TZ_WARNING_EMITTED = False
 
 DEFAULT_NEXT_RUN_MINUTES = 28.0
 RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
+CHANGELOG_STATE_FILE = Path(__file__).with_name("changelog_state.json")
 
 
 def ensure_version_backup() -> None:
@@ -1058,14 +1059,117 @@ def log(msg: str, color=Fore.WHITE):
         stamp = f"{stamp} {tz_suffix}"
     print(color + f"[{stamp}] {msg}" + Style.RESET_ALL)
 
-def send_tg(msg: str):
+def send_tg(msg: str, **extra):
     if not TG_TOKEN or not TG_CHAT:
-        return
+        return None
+    payload = {"chat_id": TG_CHAT, "text": msg}
+    if extra:
+        payload.update(extra)
     try:
-        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                      json={"chat_id": TG_CHAT, "text": msg}, timeout=5)
-    except Exception as e:
-        log(f"Ошибка Telegram: {e}", Fore.YELLOW)
+        response = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            json=payload,
+            timeout=5,
+        )
+    except Exception as exc:
+        log(f"⚠️ Ошибка Telegram: {exc}", Fore.YELLOW)
+        return None
+    try:
+        data = response.json()
+    except Exception:
+        log(f"⚠️ Telegram: неожиданный ответ {response.status_code} {response.text}", Fore.YELLOW)
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        log(f"⚠️ Telegram API вернул ошибку: {data}", Fore.YELLOW)
+        return None
+    result = data.get("result") or {}
+    message_id = result.get("message_id")
+    return message_id
+
+
+def _load_changelog_state() -> dict:
+    try:
+        raw = CHANGELOG_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log(f"⚠️ Не удалось прочитать состояние changelog: {exc}", Fore.YELLOW)
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log("⚠️ Повреждён файл changelog_state.json, начинаем заново.", Fore.YELLOW)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_changelog_state(state: dict) -> None:
+    try:
+        CHANGELOG_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"⚠️ Не удалось сохранить состояние changelog: {exc}", Fore.YELLOW)
+
+
+def _build_tg_message_link(chat_id: str, message_id: int | None) -> Optional[str]:
+    if not chat_id or not message_id:
+        return None
+    chat_id = str(chat_id).strip()
+    if not chat_id:
+        return None
+    if chat_id.startswith("@"):
+        username = chat_id.lstrip("@")
+        if username:
+            return f"https://t.me/{username}/{message_id}"
+        return None
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        return None
+    if numeric_id >= 0:
+        return None
+    channel_id = abs(numeric_id)
+    if channel_id > 1000000000000:
+        channel_id -= 1000000000000
+    return f"https://t.me/c/{channel_id}/{message_id}"
+
+
+def _current_changelog_signature() -> dict:
+    digest = hashlib.sha256((BOT_CHANGELOG or "").encode("utf-8")).hexdigest()
+    return {
+        "version": BOT_VERSION,
+        "commit": _LAST_COMMIT_HASH or "",
+        "digest": digest,
+    }
+
+
+def ensure_changelog_announcement() -> dict:
+    signature = _current_changelog_signature()
+    state = _load_changelog_state()
+    if (
+        state.get("version") == signature["version"]
+        and state.get("commit") == signature["commit"]
+        and state.get("digest") == signature["digest"]
+        and state.get("message_id")
+    ):
+        return state
+
+    lines = [f"ℹ️ Версия {BOT_VERSION}"]
+    if BOT_CHANGELOG:
+        lines.append(BOT_CHANGELOG)
+    message_text = "\n".join(lines)
+    message_id = send_tg(message_text, disable_web_page_preview=True)
+    if not message_id:
+        return state
+    link = _build_tg_message_link(TG_CHAT, message_id)
+    new_state = {
+        **signature,
+        "message_id": message_id,
+        "link": link,
+        "sent_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    _save_changelog_state(new_state)
+    return new_state
+
 
 def save_json_line(path, data):
     try:
@@ -2964,7 +3068,21 @@ def run_cycle():
         next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=next_delay_minutes)
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
-    send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
+    changelog_state = ensure_changelog_announcement()
+    version_display = BOT_VERSION
+    send_kwargs: dict[str, Any] = {}
+    link = changelog_state.get("link") if isinstance(changelog_state, dict) else None
+    changelog_message_id = changelog_state.get("message_id") if isinstance(changelog_state, dict) else None
+    if link:
+        version_display = f'<a href="{link}">{BOT_VERSION}</a>'
+        send_kwargs["parse_mode"] = "HTML"
+        send_kwargs["disable_web_page_preview"] = True
+    if changelog_message_id:
+        send_kwargs["reply_to_message_id"] = changelog_message_id
+    if changelog_message_id or link:
+        send_tg(f"ℹ️ Версия {version_display}", **send_kwargs)
+    else:
+        send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
     try:
         equity_end, available_end, _ = fetch_usdt_equity(ex)
     except Exception as exc_equity:
