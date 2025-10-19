@@ -5,6 +5,40 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
 """
 
+import os
+import shutil
+import subprocess
+import sys
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
+# --- Импорты ---
+import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
+from pathlib import Path
+from typing import Optional, Tuple, Any
+import pandas as pd
+import ccxt
+import requests
+from colorama import Fore, Style, init
+from openai import OpenAI
+from dotenv import load_dotenv
+try:
+    from zoneinfo import ZoneInfo  # type: ignore
+except ImportError:
+    ZoneInfo = None  # type: ignore
+
+try:
+    import tiktoken  # type: ignore
+except ImportError:
+    tiktoken = None
+try:
+    import feedparser  # type: ignore
+except ImportError:
+    feedparser = None
+
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
 BOT_VERSION = "2025.10.19.2"
 BOT_CHANGELOG = (
@@ -59,44 +93,9 @@ BASE_INDICATOR_CANDIDATES = [
 BASE_TIMEFRAME_CANDIDATES = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"]
 PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BASE_PAIR_CANDIDATES}
 
-PAIR_CANDIDATE_LIMIT = int(os.getenv('PAIR_CANDIDATE_LIMIT', '25'))
-PAIR_PREFETCH_LIMIT = int(os.getenv('PAIR_PREFETCH_LIMIT', '30'))
+PAIR_CANDIDATE_LIMIT = int(os.getenv("PAIR_CANDIDATE_LIMIT", "25"))
+PAIR_PREFETCH_LIMIT = int(os.getenv("PAIR_PREFETCH_LIMIT", "30"))
 
-
-# --- Безопасные настройки OpenBLAS (исключаем падения из-за многопоточности) ---
-import os
-import shutil
-import subprocess
-import sys
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("MALLOC_ARENA_MAX", "2")
-
-# --- Импорты ---
-import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
-from pathlib import Path
-from typing import Optional, Tuple, Any
-import pandas as pd
-import ccxt
-import requests
-from colorama import Fore, Style, init
-from openai import OpenAI
-from dotenv import load_dotenv
-try:
-    from zoneinfo import ZoneInfo  # type: ignore
-except ImportError:
-    ZoneInfo = None  # type: ignore
-
-try:
-    import tiktoken  # type: ignore
-except ImportError:
-    tiktoken = None
-try:
-    import feedparser  # type: ignore
-except ImportError:
-    feedparser = None
 
 # Подавляем FutureWarning от pandas
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -106,7 +105,7 @@ LOG_TZINFO = None
 LOG_TIMEZONE = ""
 _LOG_TZ_WARNING_EMITTED = False
 
-DEFAULT_NEXT_RUN_MINUTES = 28.5
+DEFAULT_NEXT_RUN_MINUTES = 28.0
 RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
 CHANGELOG_STATE_FILE = Path(__file__).with_name("changelog_state.json")
 
