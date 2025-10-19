@@ -58,7 +58,7 @@ BASE_PAIR_CANDIDATES = [
     "LTC/USDT:USDT",
     "ADA/USDT:USDT",
     "TRX/USDT:USDT",
-    "MATIC/USDT:USDT",
+    "POL/USDT:USDT",
     "LINK/USDT:USDT",
     "AVAX/USDT:USDT",
     "APT/USDT:USDT",
@@ -96,6 +96,14 @@ PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BA
 PAIR_CANDIDATE_LIMIT = int(os.getenv("PAIR_CANDIDATE_LIMIT", "25"))
 PAIR_PREFETCH_LIMIT = int(os.getenv("PAIR_PREFETCH_LIMIT", "30"))
 
+SYMBOL_ALIASES = {
+    "MATIC/USDT:USDT": "POL/USDT:USDT",
+}
+
+for alias, target in SYMBOL_ALIASES.items():
+    PAIR_TICKER_MAP.setdefault(alias, alias.split("/")[0].split(":")[0].upper())
+    PAIR_TICKER_MAP.setdefault(target, target.split("/")[0].split(":")[0].upper())
+
 
 # Подавляем FutureWarning от pandas
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -108,6 +116,38 @@ _LOG_TZ_WARNING_EMITTED = False
 DEFAULT_NEXT_RUN_MINUTES = 28.0
 RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
 CHANGELOG_STATE_FILE = Path(__file__).with_name("changelog_state.json")
+
+
+class ProtectionMissingError(RuntimeError):
+    """Raised when open positions remain without mandatory protective orders."""
+
+
+def _is_reduce_only(order) -> bool:
+    try:
+        value = order.get("reduceOnly")
+    except AttributeError:
+        return False
+    return value in (True, "true", "1", 1)
+
+
+def _has_stop_flag(order) -> bool:
+    order_type = (order.get("type") or "").lower()
+    stop_price = safe_float(order.get("stopPrice") or order.get("triggerPrice") or order.get("stopLoss"))
+    if order_type in ("stop", "stoploss", "stop_limit", "stoplimit"):
+        return True
+    return stop_price is not None
+
+
+def _has_trailing_flag(order) -> bool:
+    order_type = (order.get("type") or "").lower()
+    trailing_val = order.get("trailingStop")
+    try:
+        if trailing_val not in (None, ""):
+            float(trailing_val)
+            return True
+    except (TypeError, ValueError):
+        pass
+    return order_type == "trailingstop"
 
 
 def ensure_version_backup() -> None:
@@ -147,6 +187,32 @@ def safe_float(val):
     except (ValueError, TypeError):
         return None
     return None
+
+
+def detect_unprotected_positions(exchange, positions_map) -> list[tuple[str, str]]:
+    missing: list[tuple[str, str]] = []
+    for symbol, position in (positions_map or {}).items():
+        amount = safe_float((position or {}).get("amount") or (position or {}).get("contracts"))
+        if amount is None or not math.isfinite(amount) or abs(amount) == 0:
+            continue
+        try:
+            orders = fetch_open_orders_for_symbol(exchange, symbol)
+        except Exception as exc:
+            missing.append((symbol, f"orders unavailable: {exc}"))
+            continue
+        has_stop = False
+        has_trailing = False
+        for order in orders or []:
+            if not isinstance(order, dict):
+                continue
+            reduce_only = _is_reduce_only(order)
+            if reduce_only and _has_stop_flag(order):
+                has_stop = True
+            if _has_trailing_flag(order) and (reduce_only or order.get("reduceOnly") is None):
+                has_trailing = True
+        if not (has_stop or has_trailing):
+            missing.append((symbol, "no stop-loss or trailing-stop"))
+    return missing
 
 
 def _read_change_log_entry() -> Tuple[str, str]:
@@ -1602,15 +1668,30 @@ def fetch_df(exchange, symbol, tf):
 def ensure_position_mode(exchange):
     desired = "hedged" if HEDGE_MODE else "oneway"
     try:
-        if hasattr(exchange, "set_position_mode") and PAIR_LIST:
-            exchange.set_position_mode(HEDGE_MODE, PAIR_LIST[0])
-            log(f"⚙️ Режим позиций установлен: {desired}", Fore.LIGHTBLACK_EX)
+        if hasattr(exchange, "set_position_mode"):
+            symbols_available = set(getattr(exchange, "symbols", []) or [])
+            target_symbol = None
+            for raw_symbol in PAIR_LIST:
+                if not raw_symbol:
+                    continue
+                if raw_symbol in symbols_available:
+                    target_symbol = raw_symbol
+                    break
+                alias_symbol = SYMBOL_ALIASES.get(raw_symbol)
+                if alias_symbol and alias_symbol in symbols_available:
+                    target_symbol = alias_symbol
+                    break
+            if target_symbol is None and symbols_available:
+                target_symbol = next(iter(symbols_available))
+            if target_symbol:
+                exchange.set_position_mode(HEDGE_MODE, target_symbol)
+                log(f"⚙️ Position mode set: {desired}", Fore.LIGHTBLACK_EX)
     except Exception as e:
         code = get_bybit_retcode(e)
         if code == 110025:
-            log(f"ℹ️ Режим позиций уже установлен ({desired}, код {code})", Fore.LIGHTBLACK_EX)
+            log(f"ℹ️ Position mode already set ({desired}, code {code})", Fore.LIGHTBLACK_EX)
         else:
-            log(f"⚠️ Не удалось установить режим позиций ({desired}): {e}", Fore.YELLOW)
+            log(f"⚠️ Failed to set position mode ({desired}): {e}", Fore.YELLOW)
 
 
 def get_bybit_retcode(error) -> int | None:
@@ -2500,6 +2581,29 @@ def run_cycle():
         _restart_with_latest_code(reason)
     ex = init_exchange()
     ex.load_markets()
+    markets_set = set(ex.symbols or [])
+    if not markets_set:
+        markets_set = set((getattr(ex, "markets", {}) or {}).keys())
+
+    symbol_alias_hits: dict[str, str] = {}
+    missing_symbols: set[str] = set()
+
+    def normalize_symbol(symbol: str | None, *, record_missing: bool = True) -> Optional[str]:
+        if not symbol:
+            return None
+        sym = str(symbol).strip()
+        if not sym:
+            return None
+        if sym in markets_set:
+            return sym
+        alias_target = SYMBOL_ALIASES.get(sym)
+        if alias_target and alias_target in markets_set:
+            symbol_alias_hits[sym] = alias_target
+            return alias_target
+        if record_missing:
+            missing_symbols.add(sym)
+        return None
+
     ensure_position_mode(ex)
     positions_map, open_positions = fetch_positions_snapshot(ex)
     if MAX_OPEN_POSITIONS > 0 and open_positions is None:
@@ -2532,9 +2636,23 @@ def run_cycle():
         if math.isfinite(amt) and abs(amt) > 0:
             position_symbols.add(sym_pos)
 
-    candidate_pairs_set: set[str] = {pair for pair in PAIR_LIST if pair}
-    candidate_pairs_set.update(BASE_PAIR_CANDIDATES)
-    candidate_pairs_set.update(position_symbols)
+    normalized_pair_list: list[str] = []
+    for raw_pair in PAIR_LIST:
+        resolved_pair = normalize_symbol(raw_pair)
+        if resolved_pair and resolved_pair not in normalized_pair_list:
+            normalized_pair_list.append(resolved_pair)
+
+    candidate_pairs_set: set[str] = set()
+
+    def add_candidates(values, *, record_missing: bool = True):
+        for value in values:
+            resolved = normalize_symbol(value, record_missing=record_missing)
+            if resolved:
+                candidate_pairs_set.add(resolved)
+
+    add_candidates(PAIR_LIST)
+    add_candidates(BASE_PAIR_CANDIDATES)
+    add_candidates(position_symbols, record_missing=False)
 
     open_orders_prefetch: dict[str, list] = {}
     order_symbols: set[str] = set()
@@ -2550,10 +2668,10 @@ def run_cycle():
         if orders_snapshot:
             order_symbols.add(sym_candidate)
 
-    candidate_pairs_set.update(order_symbols)
+    add_candidates(order_symbols, record_missing=False)
     news_pairs = _collect_news_pairs()
     if news_pairs:
-        candidate_pairs_set.update(news_pairs)
+        add_candidates(news_pairs)
 
     for sym_candidate in sorted(candidate_pairs_set):
         if sym_candidate in open_orders_prefetch:
@@ -2589,22 +2707,22 @@ def run_cycle():
     _append_unique(available_pairs, remaining_pairs, seen_available)
 
     if not available_pairs:
-        available_pairs = list(PAIR_LIST)[:PAIR_CANDIDATE_LIMIT]
+    if not available_pairs:
+        available_pairs = normalized_pair_list[:PAIR_CANDIDATE_LIMIT]
+        if not available_pairs:
+            available_pairs = list(sorted(markets_set))[:PAIR_CANDIDATE_LIMIT]
 
-    log("🎯 Кандидаты для анализа: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
+    if missing_symbols:
+        missing_desc = ", ".join(sorted(missing_symbols))
+        log(f"[WARN] Removed pairs not listed on Bybit: {missing_desc}", Fore.YELLOW)
+        send_tg(f"[WARN] Pairs missing on Bybit: {missing_desc}")
+        missing_symbols.clear()
+    if symbol_alias_hits:
+        alias_desc = ", ".join(f"{src}->{dst}" for src, dst in sorted(symbol_alias_hits.items()))
+        log(f"[INFO] Using alias tickers: {alias_desc}", Fore.LIGHTBLACK_EX)
+        symbol_alias_hits.clear()
 
-    selection = ai_select_portfolio(ex, available_pairs, positions_map, equity, available_margin)
-    global_timeframes = []
-    global_indicators = []
-    news_cache = {}
-    target_map = {}
-    selected_symbols = []
-    selection_next_run = None
-    selection_next_time = None
-    if selection:
-        global_timeframes = selection.get("global_timeframes") or []
-        global_indicators = selection.get("global_indicators") or []
-        news_cache = selection.get("_news_digest") or {}
+    log("[INFO] Candidates for analysis: " + ", ".join(available_pairs), Fore.LIGHTBLACK_EX)
         for target in selection.get("targets") or []:
             sym_sel = target.get("symbol")
             if not sym_sel:
@@ -2613,11 +2731,11 @@ def run_cycle():
             selected_symbols.append(sym_sel)
         selection_reason = selection.get("reason")
         if selection_reason:
-            log(f"ℹ️ Обоснование портфеля: {selection_reason}", Fore.CYAN)
-            send_tg(f"ℹ️ Анализ портфеля: {selection_reason}")
+            log(f"[INFO] Portfolio rationale: {selection_reason}", Fore.CYAN)
+            send_tg(f"[INFO] Portfolio analysis: {selection_reason}")
         confidence = selection.get("confidence")
         if confidence:
-            log(f"🧠 Уверенность модели: {confidence}", Fore.LIGHTBLACK_EX)
+            log(f"[INFO] Model confidence: {confidence}", Fore.LIGHTBLACK_EX)
     if selection:
         raw_next_run = selection.get("next_run_minutes")
         if raw_next_run is not None:
@@ -2626,6 +2744,10 @@ def run_cycle():
             except (TypeError, ValueError):
                 selection_next_run = None
         selection_next_time = selection.get("next_run_time")
+
+    if selection_missing_symbols:
+        missing_from_ai = ', '.join(sorted(set(selection_missing_symbols)))
+        log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
 
     symbols_sequence: list[str] = []
     seen_symbols: set[str] = set()

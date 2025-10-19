@@ -1,4 +1,4 @@
-2025.10.16.16B
+﻿2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
 
@@ -52,4 +52,8 @@ Recent commits (last 8)
 - 2025-10-19 29f2ec5 feat: highlight session boundaries and balance reports
 - 2025-10-19 322dcf0 19.1 refactor: update changelog management to source from recent git commits
 - 2025-10-19 e5df32c refactor: enhance runtime status management and default delay configuration
+2025.10.19.3
+- Added automated protection validation so new builds only become stable when SL/trailing orders are present.
+- Boot loader now treats the first successful run of a commit as stable and avoids reusing failed fallbacks.
+- Added alias handling for Bybit symbol changes (e.g., POL replaces MATIC) and normalized pair checks.
 

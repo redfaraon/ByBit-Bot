@@ -5,4 +5,7 @@ __pycache__/
 venv/
 .envrc
 .DS_Store
-
+backups/
+runtime_status.json
+changelog_state.json
+fallback_history.json

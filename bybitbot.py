@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Entry point and fallback wrapper for bybitbot_impl."""
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -8,8 +9,10 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.19.2")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.19.3")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
+FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
+FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 
 
 def _resolve_commit_limit(raw_value: str | None) -> int:
@@ -94,6 +97,119 @@ def _parse_version_tuple(version: str) -> tuple:
     return tuple(parts) if parts else (0,)
 
 
+def _load_fallback_history() -> dict:
+    try:
+        raw = FALLBACK_HISTORY_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"commits": {}, "backups": {}}
+    except Exception:
+        return {"commits": {}, "backups": {}}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"commits": {}, "backups": {}}
+    if not isinstance(data, dict):
+        return {"commits": {}, "backups": {}}
+    data.setdefault("commits", {})
+    data.setdefault("backups", {})
+    if not isinstance(data["commits"], dict):
+        data["commits"] = {}
+    if not isinstance(data["backups"], dict):
+        data["backups"] = {}
+    return data
+
+
+def _save_fallback_history(history: dict) -> None:
+    try:
+        FALLBACK_HISTORY_FILE.write_text(
+            json.dumps(history, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _list_past_commits(limit: int = 5) -> list[str]:
+    cmd = [
+        "git",
+        "rev-list",
+        "--max-count",
+        str(max(0, limit)),
+        "--skip",
+        "1",
+        "HEAD",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _current_head() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return None
+    head = result.stdout.strip()
+    return head or None
+
+
+def _materialize_commit_script(commit_hash: str) -> Path | None:
+    target = commit_hash.strip()
+    if not target:
+        return None
+    cmd = ["git", "show", f"{target}:bybitbot_impl.py"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return None
+    content = result.stdout
+    if not content:
+        return None
+    backups_dir = REPO_ROOT / "backups"
+    backups_dir.mkdir(exist_ok=True)
+    script_path = backups_dir / f"bybitbot_impl_commit_{target}.py"
+    try:
+        script_path.write_text(content, encoding="utf-8")
+    except Exception:
+        return None
+    return script_path
+
+
+def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str) -> bool:
+    _, fb_header, fb_lines = _build_commit_changelog()
+    fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
+    print(
+        f"[BOOT] Falling back to {source} due to {reason}",
+        file=sys.stderr,
+    )
+    env = os.environ.copy()
+    env["BYBITBOT_CHANGELOG_VERSION"] = version_label
+    env["BYBITBOT_CHANGELOG_TEXT"] = fallback_changelog
+    env["BYBITBOT_EXPECTED_VERSION"] = LATEST_VERSION
+    result = subprocess.run([sys.executable, str(script_path)], env=env)
+    return result.returncode == 0
+
+
 def _iter_backups():
     backups_dir = Path(__file__).with_name("backups")
     if not backups_dir.exists():
@@ -115,9 +231,9 @@ def _iter_backups():
             if key in seen:
                 continue
             seen.add(key)
-            candidates.append((_parse_version_tuple(version_str), path))
+            candidates.append((_parse_version_tuple(version_str), version_str, path))
     candidates.sort(reverse=True)
-    return [p for _, p in candidates]
+    return [p for _, _, p in candidates]
 
 
 def _run_current():
@@ -139,35 +255,111 @@ def _run_current():
 
 
 def _run_backups(reason: str) -> bool:
+    history = _load_fallback_history()
+    commit_history = history.setdefault("commits", {})
+    backup_history = history.setdefault("backups", {})
+    stable_commit = history.get("stable_commit")
+    stable_backup = history.get("stable_backup")
+    head_hash = _current_head()
+
+    if stable_commit and stable_commit != head_hash:
+        script_path = _materialize_commit_script(stable_commit)
+        if script_path:
+            version_label = f"commit.{stable_commit[:8]}"
+            source_label = f"stable commit {stable_commit[:8]}"
+            success = _run_script_candidate(script_path, version_label, reason, source_label)
+            commit_history[stable_commit] = "success" if success else "failed"
+            if success:
+                history["stable_commit"] = stable_commit
+                history.pop("stable_backup", None)
+            else:
+                history["stable_commit"] = None
+            _save_fallback_history(history)
+            if success:
+                return True
+
+    if stable_backup:
+        backup_path = REPO_ROOT / "backups" / stable_backup
+        if backup_path.exists():
+            success = _run_script_candidate(backup_path, stable_backup, reason, stable_backup)
+            backup_history[stable_backup] = "success" if success else "failed"
+            if success:
+                history["stable_backup"] = stable_backup
+                history["stable_commit"] = None
+                _save_fallback_history(history)
+                return True
+            else:
+                history["stable_backup"] = None
+                _save_fallback_history(history)
+
+    commit_hashes = _list_past_commits(limit=5)
+    for commit_hash in commit_hashes:
+        if commit_hash == head_hash:
+            continue
+        if commit_history.get(commit_hash) == "failed":
+            continue
+        script_path = _materialize_commit_script(commit_hash)
+        if not script_path:
+            continue
+        version_label = f"commit.{commit_hash[:8]}"
+        source_label = f"commit {commit_hash[:8]}"
+        success = _run_script_candidate(script_path, version_label, reason, source_label)
+        commit_history[commit_hash] = "success" if success else "failed"
+        if success:
+            history["stable_commit"] = commit_hash
+            history.pop("stable_backup", None)
+        _save_fallback_history(history)
+        if success:
+            return True
+
     backups = _iter_backups()
     if not backups:
         print("[BOOT] No backups available.", file=sys.stderr)
         return False
     for candidate in backups:
-        candidate_version = candidate.stem.split('_v', 1)[-1]
-        if candidate_version.endswith('B'):
+        backup_key = candidate.name
+        if backup_history.get(backup_key) == "failed":
             continue
-        _, fb_header, fb_lines = _build_commit_changelog()
-        fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
-        print(f"[BOOT] Falling back to {candidate.name} due to {reason}", file=sys.stderr)
-        env = os.environ.copy()
-        env['BYBITBOT_CHANGELOG_VERSION'] = candidate_version
-        env['BYBITBOT_CHANGELOG_TEXT'] = fallback_changelog
-        env['BYBITBOT_EXPECTED_VERSION'] = LATEST_VERSION
-        result = subprocess.run([sys.executable, str(candidate)], env=env)
-        if result.returncode == 0:
+        candidate_version = candidate.stem.split('_v', 1)[-1]
+        success = _run_script_candidate(candidate, candidate_version, reason, candidate.name)
+        backup_history[backup_key] = "success" if success else "failed"
+        if success:
+            history["stable_commit"] = None
+            history["stable_backup"] = backup_key
+        _save_fallback_history(history)
+        if success:
             return True
     print("[BOOT] All backups failed.", file=sys.stderr)
     return False
 
 
 def main():
+    history = _load_fallback_history()
+    head_hash = _current_head()
+    head_status = None
+    if head_hash:
+        head_status = history.setdefault("commits", {}).get(head_hash)
+    if head_hash and head_status == "failed":
+        reason = f"HEAD {head_hash[:8]} previously failed"
+        if not _run_backups(reason):
+            raise RuntimeError("No viable fallback available")
+        return
+
     try:
         _run_current()
     except Exception as exc:
         traceback.print_exc()
+        if head_hash:
+            history.setdefault("commits", {})[head_hash] = "failed"
+            _save_fallback_history(history)
         if not _run_backups(str(exc)):
             raise
+    else:
+        if head_hash:
+            history.setdefault("commits", {})[head_hash] = "success"
+            history["stable_commit"] = head_hash
+            history.pop("stable_backup", None)
+            _save_fallback_history(history)
 
 
 if __name__ == "__main__":
