@@ -54,6 +54,9 @@ LOG_TZINFO = None
 LOG_TIMEZONE = ""
 _LOG_TZ_WARNING_EMITTED = False
 
+DEFAULT_NEXT_RUN_MINUTES = 29.0
+RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
+
 
 def ensure_version_backup() -> None:
     """Create a versioned backup of this script if it does not already exist."""
@@ -717,6 +720,7 @@ def resolve_timezone(value: str):
 def refresh_settings():
     load_environment()
     global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR
+    global DEFAULT_NEXT_RUN_MINUTES
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
@@ -733,6 +737,15 @@ def refresh_settings():
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
     MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
+    env_default_next = os.getenv("DEFAULT_NEXT_RUN_MINUTES")
+    if env_default_next:
+        try:
+            default_val = float(env_default_next)
+            if math.isfinite(default_val) and default_val > 0:
+                DEFAULT_NEXT_RUN_MINUTES = default_val
+        except (TypeError, ValueError):
+            pass
+    DEFAULT_NEXT_RUN_MINUTES = max(1.0, DEFAULT_NEXT_RUN_MINUTES)
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
@@ -804,6 +817,40 @@ def _current_log_time():
     if LOG_TZINFO is not None:
         return base.astimezone(LOG_TZINFO)
     return base.astimezone()
+
+
+def _current_local_tz():
+    try:
+        return LOG_TZINFO or datetime.datetime.now().astimezone().tzinfo
+    except Exception:
+        return None
+
+
+def _write_runtime_status(next_delay_minutes: Optional[float], next_run_dt: Optional[datetime.datetime], status: str) -> None:
+    payload = {
+        "status": status,
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "pid": os.getpid(),
+    }
+    if next_delay_minutes is not None:
+        try:
+            payload["next_run_minutes"] = round(float(next_delay_minutes), 2)
+        except (TypeError, ValueError):
+            pass
+    if next_run_dt is not None:
+        try:
+            payload["next_run_utc"] = next_run_dt.astimezone(datetime.timezone.utc).isoformat()
+        except Exception:
+            payload["next_run_utc"] = next_run_dt.isoformat()
+        try:
+            local_tz = _current_local_tz()
+            payload["next_run_local"] = next_run_dt.astimezone(local_tz).isoformat() if local_tz else next_run_dt.isoformat()
+        except Exception:
+            pass
+    try:
+        RUNTIME_STATUS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _format_tz_suffix(dt: datetime.datetime) -> str:
@@ -1964,7 +2011,8 @@ def ai_decision(
     return decision
 
 # --- Основная логика ---
-def main():
+def run_cycle():
+    _write_runtime_status(None, None, "running")
     refresh_settings()
     ex = init_exchange()
     ex.load_markets()
@@ -1989,6 +2037,8 @@ def main():
     news_cache = {}
     target_map = {}
     selected_symbols = []
+    selection_next_run = None
+    selection_next_time = None
     if selection:
         global_timeframes = selection.get("global_timeframes") or []
         global_indicators = selection.get("global_indicators") or []
@@ -2006,6 +2056,14 @@ def main():
         confidence = selection.get("confidence")
         if confidence:
             log(f"🤖 Уверенность модели: {confidence}", Fore.LIGHTBLACK_EX)
+    if selection:
+        raw_next_run = selection.get("next_run_minutes")
+        if raw_next_run is not None:
+            try:
+                selection_next_run = float(raw_next_run)
+            except (TypeError, ValueError):
+                selection_next_run = None
+        selection_next_time = selection.get("next_run_time")
     symbols_sequence = selected_symbols if selected_symbols else list(PAIR_LIST)
 
     decisions_total = 0
@@ -2370,8 +2428,77 @@ def main():
                 f"пропуск {counts['skip']} ({pct['skip']:.1f}%) — всего {decisions_total}"
         log(summary, Fore.CYAN)
         send_tg(summary)
+
+    next_delay_minutes = None
+    next_run_dt = None
+    if selection_next_run is not None:
+        try:
+            minutes_val = float(selection_next_run)
+        except (TypeError, ValueError):
+            minutes_val = None
+        if minutes_val and minutes_val > 0:
+            next_delay_minutes = minutes_val
+            next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes_val)
+            next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+            msg = f"Next cycle in {minutes_val:.1f} min (~{next_local.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+            log(msg, Fore.CYAN)
+            send_tg(msg)
+        else:
+            log('Invalid next_run_minutes from model.', Fore.YELLOW)
+    elif selection_next_time:
+        candidate = selection_next_time.strip() if isinstance(selection_next_time, str) else ""
+        if candidate:
+            iso_candidate = candidate.replace("Z", "+00:00")
+            try:
+                target_dt = datetime.datetime.fromisoformat(iso_candidate)
+                if target_dt.tzinfo is None:
+                    target_dt = target_dt.replace(tzinfo=datetime.timezone.utc)
+                delta = (target_dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0
+                if delta > 0:
+                    next_delay_minutes = delta
+                    next_run_dt = target_dt
+                    next_local = target_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+                    msg = f"Next run scheduled for {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                    log(msg, Fore.CYAN)
+                    send_tg(msg)
+                else:
+                    log('next_run_time from model is in the past.', Fore.YELLOW)
+            except Exception as exc:
+                log(f"Failed to parse next_run_time '{selection_next_time}': {exc}", Fore.YELLOW)
+    if next_delay_minutes is None:
+        next_delay_minutes = DEFAULT_NEXT_RUN_MINUTES
+        fallback_msg = f"Next cycle defaulting to {next_delay_minutes:.0f} minutes."
+        log(fallback_msg, Fore.LIGHTBLACK_EX)
+        send_tg(fallback_msg)
+        next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=next_delay_minutes)
+    elif next_run_dt is None:
+        next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=next_delay_minutes)
+    _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
     send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
+    return next_delay_minutes
+
+def main():
+    ensure_version_backup()
+    while True:
+        try:
+            delay_minutes = run_cycle()
+        except KeyboardInterrupt:
+            log("Interrupted by user.", Fore.YELLOW)
+            _write_runtime_status(None, None, "stopped")
+            break
+        except Exception:
+            _write_runtime_status(None, None, "error")
+            raise
+        if not delay_minutes or delay_minutes <= 0:
+            delay_minutes = DEFAULT_NEXT_RUN_MINUTES
+        try:
+            time.sleep(delay_minutes * 60)
+        except KeyboardInterrupt:
+            log("Interrupted during sleep.", Fore.YELLOW)
+            _write_runtime_status(None, None, "stopped")
+            break
+    _write_runtime_status(None, None, "stopped")
 
 if __name__ == "__main__":
     ensure_version_backup()
@@ -2380,6 +2507,7 @@ if __name__ == "__main__":
     except Exception as exc:
         log(f"Startup failed for version {BOT_VERSION}: {exc}", Fore.RED)
         traceback.print_exc()
+        _write_runtime_status(None, None, "error")
         try:
             current_script = Path(__file__).resolve()
         except (NameError, OSError):
