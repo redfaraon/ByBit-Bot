@@ -1,0 +1,2619 @@
+# -*- coding: utf-8 -*-
+BOT_VERSION = "2025.10.16.16"
+__doc__ = f"""
+Bybit Intraday AI Trading Bot � 30m, 5 ��� USDT Perpetual
+Version: {BOT_VERSION}
+���������������� ��������-��� � ���������� OpenAI GPT, Telegram � ����������� ����������.
+"""
+
+
+# Версия бота: обновляйте при каждом релизе/значимых изменениях
+BOT_CHANGELOG = (
+ "   bybitbot.py:20-24 теперь объявляет заготовки PAIR_UNIVERSE, INDICATOR_POOL, DEFAULT_TIMEFRAMES, которые заполняются в refresh_settings() (см. bybitbot.py:768-806). Эти списки объединяются с настройками из .env, так что портфельная стадия может выбрать ",
+"пары ",
+"и индикаторы, даже если их нет в исходном PAIR_LIST.",
+"Добавил safe_float() (bybitbot.py:95) и перевёл критические места на его использование, чтобы избавиться от ошибок приведения типа и корректно работать с минимальными объёмами/ценою.",
+"После выбора портфеля формируются множества forced_symbols и предварительно загружается полный список открытых ордеров (bybitbot.py:2183-2204). Пары с активной позицией и/или ордером автоматически добавляются в набор, передаваемый на следующий этап ",
+"(bybitbot.py:2205-2208), даже если модель их не выбрала.",
+"При обработке каждой пары мы используем кэш preloaded_open_orders (bybitbot.py:2266-2270), а затем уже вызываем ai_decision, так что по принудительно добавленным инструментам модель тоже сообщает, что делать с текущими позициями/ордерами (закрыть, ",
+"модифицировать или оставить).",
+"Tests: python -m py_compile bybitbot.py",
+
+"Теперь, если у инструмента осталась позиция или висит ордер, он снова попадёт в цикл принятия решений, независимо от initial-подбора."
+)
+
+TELEGRAM_MENTION = ""
+TELEGRAM_MENTION_PREFIX = ""
+IS_REAL_ACCOUNT = True
+PAIR_LIST = []
+PAIR_UNIVERSE = []
+INDICATOR_POOL = []
+DEFAULT_TIMEFRAMES = []
+
+
+# --- Безопасные настройки OpenBLAS (исключаем падения из-за многопоточности) ---
+import os
+import shutil
+import subprocess
+import sys
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
+# --- Импорты ---
+import math, time, json, traceback, datetime, random, warnings, re, numbers
+from decimal import InvalidOperation
+from pathlib import Path
+from typing import Optional, Tuple
+import pandas as pd
+import ccxt
+import requests
+from colorama import Fore, Style, init
+from openai import OpenAI
+from dotenv import load_dotenv
+try:
+    from zoneinfo import ZoneInfo  # type: ignore
+except ImportError:
+    ZoneInfo = None  # type: ignore
+
+try:
+    import tiktoken  # type: ignore
+except ImportError:
+    tiktoken = None
+try:
+    import feedparser  # type: ignore
+except ImportError:
+    feedparser = None
+
+# Подавляем FutureWarning от pandas
+warnings.filterwarnings("ignore", category=FutureWarning)
+init(autoreset=True)
+
+LOG_TZINFO = None
+LOG_TIMEZONE = ""
+_LOG_TZ_WARNING_EMITTED = False
+
+
+def ensure_version_backup() -> None:
+    """Create a versioned backup of this script if it does not already exist."""
+    try:
+        script_path = Path(__file__).resolve()
+    except (NameError, OSError):
+        return
+
+    backup_dir = script_path.parent / "backups"
+    try:
+        backup_dir.mkdir(exist_ok=True)
+    except Exception:
+        return
+
+    backup_name = f"{script_path.stem}_v{BOT_VERSION}{script_path.suffix}"
+    backup_path = backup_dir / backup_name
+    if backup_path.exists():
+        return
+
+    try:
+        shutil.copy2(script_path, backup_path)
+        print(f"[INFO] Created backup {backup_path.name}")
+    except Exception as exc:
+        print(f"[WARN] Failed to create backup '{backup_path.name}': {exc}")
+
+
+def safe_float(val):
+    """Best-effort conversion to float, returns None on failure."""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_version_tuple(version: str) -> Tuple[int, ...]:
+    parts = []
+    for chunk in version.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            digits = "".join(ch for ch in chunk if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _find_previous_version_script(current_version: str, script_path: Path) -> Optional[Tuple[str, Path]]:
+    backup_dir = script_path.parent / "backups"
+    if not backup_dir.exists():
+        return None
+    current_tuple = _parse_version_tuple(current_version)
+    prefix = f"{script_path.stem}_v"
+    suffix = script_path.suffix
+    candidates = []
+    for backup_file in backup_dir.glob(f"{prefix}*{suffix}"):
+        name = backup_file.name
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        version_str = name[len(prefix):-len(suffix)]
+        if not version_str:
+            continue
+        version_tuple = _parse_version_tuple(version_str)
+        if version_tuple < current_tuple:
+            candidates.append((version_tuple, version_str, backup_file))
+    if not candidates:
+        return None
+    _, version_str, backup_path = max(candidates, key=lambda item: item[0])
+    return version_str, backup_path
+
+
+def _run_previous_version_script(script_path: Path) -> int:
+    python_executable = sys.executable or "python"
+    result = subprocess.run([python_executable, str(script_path)], check=False)
+    return result.returncode
+
+
+def _build_news_digest(symbols):
+    digest = {}
+    for sym in symbols:
+        try:
+            news_payload = get_news(sym)
+            if not isinstance(news_payload, dict):
+                continue
+            summary = news_payload.get("summary") or ""
+            items = news_payload.get("items") or []
+            digest[sym] = {
+                "summary": summary,
+                "items": items[: max(1, min(len(items), 3))]
+            }
+        except Exception as exc:
+            log(f"?? ��?���?�>�?���?��'�?�? �����?�?�?�? news ��� {sym}: {exc}", Fore.YELLOW)
+    return digest
+
+
+def _parse_indicator_name(name: str) -> Tuple[str, Optional[int]]:
+    base = "".join(ch for ch in name if ch.isalpha()).lower()
+    digits = "".join(ch for ch in name if ch.isdigit())
+    length = int(digits) if digits else None
+    return base, length
+
+
+def _expand_indicator_entries(entry) -> list:
+    result = []
+    if entry is None:
+        return result
+    if isinstance(entry, str):
+        val = entry.strip()
+        if val:
+            result.append(val)
+        return result
+    if isinstance(entry, (list, tuple, set)):
+        for item in entry:
+            result.extend(_expand_indicator_entries(item))
+        return result
+    if isinstance(entry, dict):
+        name = entry.get("indicator") or entry.get("name")
+        if name:
+            lengths = (
+                entry.get("length")
+                or entry.get("period")
+                or entry.get("window")
+                or entry.get("n")
+                or entry.get("size")
+            )
+            if isinstance(lengths, (list, tuple, set)):
+                for length in lengths:
+                    try:
+                        val = int(length)
+                        result.append(f"{name}{val}")
+                    except (TypeError, ValueError):
+                        continue
+            elif lengths is not None:
+                try:
+                    val = int(lengths)
+                    result.append(f"{name}{val}")
+                except (TypeError, ValueError):
+                    result.append(str(name))
+            else:
+                result.append(str(name))
+        nested = entry.get("indicators") or entry.get("names")
+        if nested:
+            result.extend(_expand_indicator_entries(nested))
+        for key, value in entry.items():
+            if key in ("indicator", "name", "indicators", "names", "length", "period", "window", "n", "size"):
+                continue
+            if isinstance(value, (list, tuple, set)):
+                for val in value:
+                    result.extend(_expand_indicator_entries({"indicator": key, "length": val}))
+            elif isinstance(value, (int, float)):
+                result.extend(_expand_indicator_entries({"indicator": key, "length": value}))
+        return result
+    return result
+
+
+def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[str]:
+    if df.empty:
+        return None
+    base, length = _parse_indicator_name(indicator_name)
+    try:
+        if base == "ema" and length:
+            col = f"ema{length}"
+            df[col] = ema(df["close"], length)
+            return col
+        if base == "sma" and length:
+            col = f"sma{length}"
+            df[col] = df["close"].rolling(length).mean()
+            return col
+        if base == "rsi":
+            period = length or 14
+            col = f"rsi{period}"
+            df[col] = rsi(df["close"], period)
+            return col
+        if base == "atr":
+            period = length or 14
+            col = f"atr{period}"
+            df[col] = atr(df, period)
+            return col
+        if base == "stoch":
+            period = length or 14
+            col = f"stoch{period}"
+            low_min = df["low"].rolling(period).min()
+            high_max = df["high"].rolling(period).max()
+            df[col] = 100 * (df["close"] - low_min) / (high_max - low_min).replace(0, pd.NA)
+            return col
+        if base == "macd":
+            if length:
+                slow = max(3, length)
+                fast = max(2, slow // 2)
+                signal = max(3, slow // 3)
+            else:
+                fast, slow, signal = 12, 26, 9
+            ema_fast = df["close"].ewm(span=fast, adjust=False).mean()
+            ema_slow = df["close"].ewm(span=slow, adjust=False).mean()
+            macd_series = ema_fast - ema_slow
+            signal_series = macd_series.ewm(span=signal, adjust=False).mean()
+            hist_series = macd_series - signal_series
+            col = f"macd{slow}"
+            df[col] = macd_series
+            df[f"{col}_signal"] = signal_series
+            df[f"{col}_hist"] = hist_series
+            return col
+        if base in ("bbands", "bb", "boll"):
+            period = length or 20
+            ma = df["close"].rolling(period).mean()
+            std = df["close"].rolling(period).std()
+            upper = ma + 2 * std
+            lower = ma - 2 * std
+            mid_col = f"bbands{period}_mid"
+            df[mid_col] = ma
+            df[f"bbands{period}_upper"] = upper
+            df[f"bbands{period}_lower"] = lower
+            return mid_col
+    except Exception as exc:
+        log(f"?? ��?���?�>�?���?��'�?�? �����?�?�?�? indicator {indicator_name}: {exc}", Fore.YELLOW)
+    return None
+
+
+def _serialize_df(df: pd.DataFrame, limit: int = 80):
+    if df.empty:
+        return []
+    slice_df = df.tail(limit)
+    result = []
+    for row in slice_df.to_dict("records"):
+        clean_row = {}
+        for key, value in row.items():
+            if isinstance(value, (pd.Timestamp, datetime.datetime)):
+                clean_row[key] = value.isoformat()
+            elif isinstance(value, (pd.Series, pd.DataFrame)):
+                continue
+            else:
+                if pd.isna(value):
+                    continue
+                clean_row[key] = float(value) if isinstance(value, (int, float)) else value
+        result.append(clean_row)
+    return result
+
+
+def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: list, news_cache=None):
+    dataset = {"symbol": symbol, "timeframes": {}, "indicators": [], "errors": []}
+    base_indicators = INDICATOR_POOL or []
+    indicator_candidates = indicators or []
+    indicator_candidates = [ind.strip().lower() for ind in indicator_candidates if ind]
+    indicator_candidates = list(dict.fromkeys(indicator_candidates + base_indicators))
+    base_timeframes = DEFAULT_TIMEFRAMES or [TIMEFRAME, "4h"]
+    requested_timeframes = [tf.strip() for tf in (timeframes or []) if tf]
+    timeframes = list(dict.fromkeys(requested_timeframes + base_timeframes))
+    seen_cols = set()
+    for tf in timeframes:
+        try:
+            df_tf = fetch_df(exchange, symbol, tf)
+        except Exception as exc:
+            err = f"fetch_df({tf}) failed: {exc}"
+            dataset["errors"].append(err)
+            log(f"?? {symbol}: {err}", Fore.YELLOW)
+            continue
+        applied = []
+        for ind in indicator_candidates:
+            col = _apply_indicator_to_df(df_tf, ind)
+            if col:
+                applied.append(col)
+                seen_cols.add(col)
+        dataset["timeframes"][tf] = {
+            "bars": _serialize_df(df_tf)
+        }
+        if applied:
+            dataset["timeframes"][tf]["indicators"] = applied
+    dataset["indicators"] = sorted(seen_cols)
+    dataset["position"] = None
+    dataset["open_orders"] = []
+    if news_cache and symbol in news_cache:
+        dataset["news"] = news_cache[symbol]
+    return dataset
+
+
+def ai_select_portfolio(exchange, symbols, positions_map, equity, available_margin):
+    if not AI_KEY:
+        log("?? �?�� �?��������? OPENAI_API_KEY (stage select)", Fore.RED)
+        return None
+    client = OpenAI(api_key=AI_KEY, timeout=15)
+    news_digest = _build_news_digest(symbols)
+    positions_compact = []
+    for sym in symbols:
+        pos = positions_map.get(sym)
+        if not pos:
+            continue
+        positions_compact.append(
+            {
+                "symbol": sym,
+                "side": pos.get("side"),
+                "amount": pos.get("amount"),
+                "entryPrice": pos.get("entryPrice"),
+                "leverage": pos.get("leverage"),
+                "unrealizedPnl": pos.get("unrealizedPnl"),
+            }
+        )
+    request_payload = {
+        "available_pairs": symbols,
+        "equity_usdt": equity,
+        "available_margin_usdt": available_margin,
+        "positions": positions_compact,
+        "news_digest": news_digest,
+        "indicator_pool": INDICATOR_POOL,
+        "timeframe_pool": DEFAULT_TIMEFRAMES,
+    }
+    system_msg = """You act as a risk-neutral intraday portfolio manager for Bybit USDT perpetual swaps. Use available_pairs (and you may propose other USDT contracts if they seem attractive; the bot will attempt to gather data). indicator_pool and 
+timeframe_pool list the default metrics; request any extra indicators or timeframes via the needs field when required. Respond strictly in JSON of the form:
+{
+  "targets": [
+    {
+      "symbol": "PAIR",
+      "notional_pct": float,  # 0..1, total <= 1
+      "timeframes": ["30m","4h"],
+      "indicators": ["ema20","rsi14"],
+      "notes": "short justification"
+    }
+  ],
+  "global_timeframes": ["30m","4h"],
+  "global_indicators": ["atr14"],
+  "confidence": "low|medium|high",
+  "reason": "summary of the news/market backdrop"
+}
+If you cannot decide, return {\"targets\": [], \"needs\": [\"news\"...], \"reason\": \"...\"}."""
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": json.dumps(request_payload, ensure_ascii=False)},
+    ]
+    token_estimate = estimate_tokens(messages, AI_MODEL)
+    hard_limit = TOKEN_LIMIT if TOKEN_LIMIT > 0 else None
+    if hard_limit and token_estimate > hard_limit:
+        # обрежем новости до короткой сводки
+        for sym, payload in list(news_digest.items()):
+            summary = payload.get("summary") or ""
+            payload["items"] = payload.get("items", [])[:1]
+            if len(summary) > 160:
+                news_digest[sym]["summary"] = summary[:157] + "..."
+        messages[1]["content"] = json.dumps(request_payload, ensure_ascii=False)
+    try:
+        res = client.chat.completions.create(
+            model=AI_MODEL,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=messages,
+        )
+    except Exception as exc:
+        log(f"?? OpenAI portfolio select error: {exc}", Fore.RED)
+        return None
+    try:
+        payload = res.choices[0].message.content
+    except Exception:
+        return None
+    try:
+        result = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        log(f"?? JSON decode (portfolio select): {exc}", Fore.YELLOW)
+        return None
+    result["_news_digest"] = news_digest
+    return result
+
+
+def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None):
+    targets = (selection_result or {}).get("targets") or []
+    global_timeframes = set((selection_result or {}).get("global_timeframes") or [])
+    global_indicators = set((selection_result or {}).get("global_indicators") or [])
+    bundle = {"symbols": [], "meta": {}}
+    open_orders_cache = {}
+    for target in targets:
+        symbol = target.get("symbol")
+        if not symbol:
+            continue
+        timeframes = list(set((target.get("timeframes") or []) + list(global_timeframes)))
+        indicators = list(set((target.get("indicators") or []) + list(global_indicators)))
+        dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
+        dataset["target"] = {
+            "notional_pct": target.get("notional_pct"),
+            "timeframes": timeframes,
+            "indicators": indicators,
+            "notes": target.get("notes"),
+        }
+        position_payload = positions_map.get(symbol)
+        if position_payload:
+            dataset["position"] = position_payload
+        try:
+            open_orders = fetch_open_orders_for_symbol(exchange, symbol)
+        except Exception as exc:
+            log(f"?? fetch_open_orders {symbol}: {exc}", Fore.YELLOW)
+            open_orders = []
+        dataset["open_orders"] = open_orders
+        open_orders_cache[symbol] = open_orders
+        bundle["symbols"].append(dataset)
+    bundle["meta"] = {
+        "global_timeframes": list(global_timeframes),
+        "global_indicators": list(global_indicators),
+        "confidence": (selection_result or {}).get("confidence"),
+        "reason": (selection_result or {}).get("reason"),
+    }
+    return bundle, open_orders_cache
+
+
+def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None):
+    if not needs:
+        return bundle
+    symbol_map = {entry["symbol"]: entry for entry in bundle.get("symbols", []) if entry.get("symbol")}
+    for need in needs:
+        if isinstance(need, dict):
+            symbol = need.get("symbol")
+            if symbol not in symbol_map:
+                continue
+            dataset = symbol_map[symbol]
+            requested_timeframes = need.get("timeframes") or []
+            requested_indicators = need.get("indicators") or []
+            for tf in requested_timeframes:
+                try:
+                    df_tf = fetch_df(exchange, symbol, tf)
+                except Exception as exc:
+                    dataset.setdefault("errors", []).append(f"needs fetch_df({tf}): {exc}")
+                    continue
+                applied = []
+                for ind in requested_indicators:
+                    col = _apply_indicator_to_df(df_tf, ind)
+                    if col:
+                        applied.append(col)
+                dataset["timeframes"][tf] = {
+                    "bars": _serialize_df(df_tf),
+                }
+                if applied:
+                    dataset["timeframes"][tf]["indicators"] = applied
+            if need.get("news") and news_cache:
+                dataset["news"] = news_cache.get(symbol) or dataset.get("news")
+        elif isinstance(need, str):
+            bundle.setdefault("meta", {}).setdefault("extra_requests", []).append(need)
+    return bundle
+
+
+def _shrink_bundle_for_tokens(bundle, max_bars=60):
+    for entry in bundle.get("symbols", []):
+        for tf_data in entry.get("timeframes", {}).values():
+            bars = tf_data.get("bars") or []
+            if len(bars) > max_bars:
+                tf_data["bars"] = bars[-max_bars:]
+
+
+def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
+    if not AI_KEY:
+        log("?? �?�� �?��������? OPENAI_API_KEY (stage plan)", Fore.RED)
+        return None
+    client = OpenAI(api_key=AI_KEY, timeout=20)
+    payload = {
+        "stage": stage,
+        "equity_usdt": equity,
+        "available_margin_usdt": available_margin,
+        "data": bundle,
+    }
+    system_msg = (
+        "Ты выступаешь как трейдер-аналитик Bybit. По каждому symbol оцени позиции, ордера, свечи и индикаторы, "
+        "верни JSON: {\n"
+        '  "decisions": [\n'
+        '    {\n'
+        '      "symbol": "PAIR",\n'
+        '      "action": "open|close|manage|reduce|skip",\n'
+        '      "side": "buy|sell",\n'
+        '      "notional_pct": float,\n'
+        '      "reason": "краткое обоснование",\n'
+        '      "tp_atr": float,\n'
+        '      "sl_atr": float,\n'
+        '      "orders": [ {...} ],\n'
+        '      "cancel_orders": [...],\n'
+        '      "replace_orders": [ {...} ]\n'
+        "    }\n"
+        "  ],\n"
+        '  "needs": [ {"symbol":"PAIR","timeframes":["1h"],"indicators":["ema100"]}, "news" ],\n'
+        '  "notes": "опционально"\n'
+        "}\n"
+        "Если требуется дополнительная информация, заполни поле needs и сделай decisions пустым."
+    )
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    hard_limit = TOKEN_LIMIT if TOKEN_LIMIT > 0 else None
+    soft_limit = TOKEN_SOFT_LIMIT if TOKEN_SOFT_LIMIT > 0 else None
+    attempt = 0
+    while True:
+        token_estimate = estimate_tokens(messages, AI_MODEL)
+        if hard_limit and token_estimate > hard_limit and attempt < 3:
+            _shrink_bundle_for_tokens(payload["data"], max_bars=max(20, 60 - attempt * 15))
+            messages[1]["content"] = json.dumps(payload, ensure_ascii=False)
+            attempt += 1
+            continue
+        if soft_limit and token_estimate > soft_limit and attempt < 3:
+            _shrink_bundle_for_tokens(payload["data"], max_bars=max(30, 80 - attempt * 10))
+            messages[1]["content"] = json.dumps(payload, ensure_ascii=False)
+            attempt += 1
+            continue
+        break
+    try:
+        res = client.chat.completions.create(
+            model=AI_MODEL,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=messages,
+        )
+    except Exception as exc:
+        log(f"?? OpenAI trade plan error: {exc}", Fore.RED)
+        return None
+    content = res.choices[0].message.content
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        log(f"?? JSON decode (trade plan): {exc}", Fore.YELLOW)
+        return None
+
+
+def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache, counts):
+    if not decision:
+        return 0, positions_map, open_orders_cache
+    sym = decision.get("symbol")
+    if not sym:
+        return 0, positions_map, open_orders_cache
+    action = (decision.get("action") or "skip").lower()
+    counts[action] = counts.get(action, 0) + 1
+    side = decision.get("side") or ""
+    reason = decision.get("reason") or ""
+    notional_pct = decision.get("notional_pct")
+    log(f"{sym}: action={action} side={side} reason={reason}", Fore.LIGHTBLUE_EX)
+    if notional_pct is not None:
+        log(f"{sym}: notional_pct={notional_pct:.3f}", Fore.LIGHTBLACK_EX)
+    current_position = positions_map.get(sym)
+    open_orders_symbol = open_orders_cache.get(sym)
+    if open_orders_symbol is None:
+        try:
+            open_orders_symbol = fetch_open_orders_for_symbol(exchange, sym)
+        except Exception as exc:
+            log(f"?? fetch_open_orders {sym}: {exc}", Fore.YELLOW)
+            open_orders_symbol = []
+        open_orders_cache[sym] = open_orders_symbol
+
+    extra_orders_raw = (
+        decision.get("orders")
+        or decision.get("adjustments")
+        or decision.get("extra_orders")
+        or []
+    )
+    if isinstance(extra_orders_raw, dict):
+        extra_orders = [extra_orders_raw]
+    elif isinstance(extra_orders_raw, list):
+        extra_orders = list(extra_orders_raw)
+    else:
+        extra_orders = []
+
+    def normalize_order_ids(value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+        else:
+            items = [value]
+        result = []
+        for item in items:
+            if item in (None, ""):
+                continue
+            if isinstance(item, dict):
+                oid = (
+                    item.get("id")
+                    or item.get("orderId")
+                    or item.get("order_id")
+                    or item.get("cancel")
+                    or item.get("old")
+                )
+                if oid:
+                    result.append(str(oid))
+            else:
+                result.append(str(item))
+        return result
+
+    cancel_candidates = normalize_order_ids(
+        decision.get("cancel_orders")
+        or decision.get("cancelOrders")
+        or decision.get("cancel_order_ids")
+    )
+    replace_raw = (
+        decision.get("replace_orders")
+        or decision.get("replaceOrders")
+        or decision.get("order_replacements")
+    )
+    replace_list = (
+        replace_raw
+        if isinstance(replace_raw, list)
+        else ([replace_raw] if isinstance(replace_raw, dict) else [])
+    )
+    replacement_orders = []
+    cancelled_ids = set()
+    cancelled_success = []
+    cancel_failures = []
+
+    def try_cancel(order_id: str, source: str):
+        oid = str(order_id)
+        if not oid or oid in cancelled_ids:
+            return
+        success, err = cancel_order_by_id(exchange, sym, oid)
+        if success:
+            cancelled_ids.add(oid)
+            cancelled_success.append((oid, source))
+            log(f"?? �?'�?�?�?�?�? ��?��?�< {oid} {sym} (source={source})", Fore.LIGHTBLUE_EX)
+        else:
+            cancel_failures.append((oid, err))
+            log(f"?? �� ��?���?�>�?���?��'�?�? ��?��?�< {oid} {sym}: {err}", Fore.YELLOW)
+
+    for oid in cancel_candidates:
+        try_cancel(oid, "cancel_orders")
+
+    for entry in replace_list:
+        if not isinstance(entry, dict):
+            continue
+        cancel_id = (
+            entry.get("cancel")
+            or entry.get("cancel_id")
+            or entry.get("old")
+            or entry.get("order_id")
+        )
+        if cancel_id:
+            try_cancel(cancel_id, "replace_orders")
+        new_order = entry.get("new") or entry.get("order") or entry.get("replacement")
+        if new_order:
+            replacement_orders.append(new_order)
+
+    if cancel_failures:
+        errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_failures)
+        send_tg(f"{sym}: �� ��?���?�>�?���?��'�?�? ��?��?�< {errs}")
+
+    if replacement_orders:
+        extra_orders.extend(replacement_orders)
+
+    if extra_orders:
+        executed, actions_performed = execute_extra_orders(
+            exchange,
+            sym,
+            extra_orders,
+            current_position=current_position,
+            open_orders=open_orders_symbol,
+        )
+        if executed:
+            send_trade_update(f"{sym}: �?�?�?��? выполнил:\n- " + "\n- ".join(executed))
+        if actions_performed:
+            positions_map, _ = fetch_positions_snapshot(exchange, symbols_filter=PAIR_UNIVERSE or None)
+            current_position = positions_map.get(sym)
+            try:
+                open_orders_symbol = fetch_open_orders_for_symbol(exchange, sym)
+            except Exception as exc:
+                log(f"?? fetch_open_orders {sym}: {exc}", Fore.YELLOW)
+                open_orders_symbol = []
+            open_orders_cache[sym] = open_orders_symbol
+
+    return 1, positions_map, open_orders_cache
+
+
+def load_environment():
+    load_dotenv(".env")
+    if os.path.exists(".env.local"):
+        load_dotenv(".env.local", override=True)
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return int(default)
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return int(float(value))
+        except ValueError:
+            return int(default)
+
+
+def resolve_timezone(value: str):
+    if not value:
+        return None
+    val = value.strip()
+    if not val or val.lower() in ("local", "system"):
+        return None
+    if val.upper() == "UTC":
+        return datetime.timezone.utc
+    offset_match = re.fullmatch(r"(?:UTC)?([+-])(\d{1,2})(?::?(\d{2}))?", val, re.IGNORECASE)
+    if not offset_match:
+        offset_match = re.fullmatch(r"([+-])(\d{1,2})(?::?(\d{2}))?", val)
+    if offset_match:
+        sign = 1 if offset_match.group(1) == "+" else -1
+        hours = int(offset_match.group(2))
+        minutes = int(offset_match.group(3) or 0)
+        delta = datetime.timedelta(hours=hours, minutes=minutes)
+        delta *= sign
+        name = f"UTC{offset_match.group(1)}{hours:02d}:{minutes:02d}"
+        return datetime.timezone(delta, name=name)
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(val)
+        except Exception:
+            return None
+    return None
+
+
+def refresh_settings():
+    load_environment()
+    global PAIR_LIST, PAIR_UNIVERSE, INDICATOR_POOL, DEFAULT_TIMEFRAMES
+    global TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR
+    global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
+    global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
+    global CONTEXT_STEP_30M, CONTEXT_STEP_4H
+    global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY
+    global TELEGRAM_MENTION, TELEGRAM_MENTION_PREFIX, IS_REAL_ACCOUNT
+    global NEWS_API_TOKEN, NEWS_API_ENDPOINT, NEWS_API_KINDS, NEWS_API_FILTER, NEWS_ITEMS_LIMIT
+    global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
+    global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
+    raw_pairs = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT")
+    PAIR_LIST = [p.strip() for p in raw_pairs.split(",") if p.strip()]
+    TIMEFRAME = os.getenv("TIMEFRAME", "30m")
+    LEVERAGE = int(os.getenv("LEVERAGE", 10))
+    RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.015)))
+    SL_ATR = float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
+    TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
+    MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
+    MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
+
+    TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
+    TELEGRAM_MENTION = (os.getenv("TELEGRAM_MENTION") or os.getenv("TG_MENTION") or "").strip()
+    account_mode = (os.getenv("BYBIT_ACCOUNT_MODE") or os.getenv("BYBIT_ACCOUNT") or os.getenv("BYBIT_ENV") or "").strip().lower()
+    explicit_real_flag = (os.getenv("BYBIT_IS_MAIN") or os.getenv("BYBIT_LIVE") or "").strip().lower()
+    testnet_flag = (os.getenv("BYBIT_TESTNET") or os.getenv("BYBIT_USE_TESTNET") or os.getenv("BYBIT_SANDBOX") or os.getenv("BYBIT_PAPER") or os.getenv("BYBIT_DEMO") or "").strip().lower()
+    paper_keywords = {"test", "testnet", "paper", "demo", "sandbox", "sim", "simulation", "practice"}
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+    IS_REAL_ACCOUNT = True
+    if account_mode in paper_keywords:
+        IS_REAL_ACCOUNT = False
+    if testnet_flag in truthy or testnet_flag in paper_keywords:
+        IS_REAL_ACCOUNT = False
+    if explicit_real_flag in falsy:
+        IS_REAL_ACCOUNT = False
+    if explicit_real_flag in truthy:
+        IS_REAL_ACCOUNT = True
+    TELEGRAM_MENTION_PREFIX = TELEGRAM_MENTION if (TELEGRAM_MENTION and IS_REAL_ACCOUNT) else ""
+
+    universe_env = (
+        os.getenv("PAIR_UNIVERSE")
+        or os.getenv("PAIR_POOL")
+        or os.getenv("PAIR_LIST_UNIVERSE")
+        or ""
+    )
+    if universe_env:
+        base_universe = [p.strip() for p in universe_env.split(",") if p.strip()]
+    else:
+        base_universe = [
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT",
+            "SOL/USDT:USDT",
+            "XRP/USDT:USDT",
+            "DOGE/USDT:USDT",
+            "ADA/USDT:USDT",
+            "BNB/USDT:USDT",
+            "LINK/USDT:USDT",
+            "AVAX/USDT:USDT",
+            "LTC/USDT:USDT",
+            "TRX/USDT:USDT",
+            "DOT/USDT:USDT",
+            "MATIC/USDT:USDT",
+            "ATOM/USDT:USDT",
+            "NEAR/USDT:USDT",
+            "APT/USDT:USDT",
+            "ARB/USDT:USDT",
+            "OP/USDT:USDT",
+            "XLM/USDT:USDT",
+            "PEPE/USDT:USDT",
+        ]
+    PAIR_UNIVERSE = list(dict.fromkeys([p for p in PAIR_LIST + base_universe if p]))
+
+    indicator_pool_env = (
+        os.getenv("INDICATOR_POOL")
+        or os.getenv("AI_INDICATOR_POOL")
+        or os.getenv("DEFAULT_INDICATORS")
+        or ""
+    )
+    if indicator_pool_env:
+        indicator_base = [s.strip().lower() for s in indicator_pool_env.split(",") if s.strip()]
+    else:
+        indicator_base = [
+            "ema20",
+            "ema50",
+            "ema100",
+            "ema200",
+            "sma50",
+            "sma200",
+            "rsi14",
+            "atr14",
+            "adx14",
+            "macd",
+            "stoch14",
+            "bbands20",
+        ]
+    INDICATOR_POOL = list(dict.fromkeys(indicator_base))
+
+    timeframes_env = (
+        os.getenv("DEFAULT_TIMEFRAMES")
+        or os.getenv("TIMEFRAME_POOL")
+        or os.getenv("AI_TIMEFRAMES")
+        or ""
+    )
+    if timeframes_env:
+        tf_base = [tf.strip() for tf in timeframes_env.split(",") if tf.strip()]
+    else:
+        tf_base = [TIMEFRAME, "15m", "1h", "4h", "1d"]
+    if TIMEFRAME not in tf_base:
+        tf_base.insert(0, TIMEFRAME)
+    DEFAULT_TIMEFRAMES = list(dict.fromkeys(tf_base))
+
+    AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+    AI_KEY = os.getenv("OPENAI_API_KEY")
+
+    global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
+    TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
+    TOKEN_SOFT_LIMIT = env_int("OPENAI_REQUEST_TOKEN_SOFT_LIMIT", 8000)
+
+    MIN_CONTEXT_30M = env_int("AI_CONTEXT_30M_MIN", 16)
+    MIN_CONTEXT_4H = env_int("AI_CONTEXT_4H_MIN", 12)
+    DEFAULT_CONTEXT_30M = max(MIN_CONTEXT_30M, env_int("AI_CONTEXT_30M", 40))
+    DEFAULT_CONTEXT_4H = max(MIN_CONTEXT_4H, env_int("AI_CONTEXT_4H", 40))
+    CONTEXT_STEP_30M = max(1, env_int("AI_CONTEXT_30M_STEP", 4))
+    CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
+
+    NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
+    NEWS_API_ENDPOINT = os.getenv("CRYPTO_NEWS_ENDPOINT", "https://cryptopanic.com/api/v1/posts/")
+    NEWS_API_KINDS = os.getenv("CRYPTO_NEWS_KIND", "news,media")
+    NEWS_API_FILTER = os.getenv("CRYPTO_NEWS_FILTER", "important")
+    NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
+    POSITION_MODE = (os.getenv("BYBIT_POSITION_MODE") or "oneway").strip().lower()
+    HEDGE_MODE = POSITION_MODE in ("hedge", "hedged", "dual", "dual_side", "dual-side")
+    try:
+        ORDER_MARGIN_UTILIZATION = float(os.getenv("ORDER_MARGIN_UTILIZATION", 0.95))
+    except (TypeError, ValueError):
+        ORDER_MARGIN_UTILIZATION = 0.95
+    ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
+    LOG_TIMEZONE = (os.getenv("LOG_TIMEZONE") or "").strip()
+    parsed_tz = resolve_timezone(LOG_TIMEZONE)
+    if LOG_TIMEZONE and parsed_tz is None:
+        if not _LOG_TZ_WARNING_EMITTED:
+            print(f"[WARN] LOG_TIMEZONE '{LOG_TIMEZONE}' не распознан, используется системное время.")
+            _LOG_TZ_WARNING_EMITTED = True
+        LOG_TZINFO = None
+    else:
+        LOG_TZINFO = parsed_tz
+        _LOG_TZ_WARNING_EMITTED = False
+
+RSS_FEEDS = [
+    "https://cointelegraph.com/rss",
+    "https://news.bitcoin.com/feed/",
+    "https://decrypt.co/feed",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://u.today/rss",
+]
+
+
+refresh_settings()
+
+# --- Конфигурация ---
+MIN_CONTEXT_30M = env_int("AI_CONTEXT_30M_MIN", 16)
+MIN_CONTEXT_4H = env_int("AI_CONTEXT_4H_MIN", 12)
+DEFAULT_CONTEXT_30M = max(MIN_CONTEXT_30M, env_int("AI_CONTEXT_30M", 40))
+DEFAULT_CONTEXT_4H = max(MIN_CONTEXT_4H, env_int("AI_CONTEXT_4H", 40))
+CONTEXT_STEP_30M = max(1, env_int("AI_CONTEXT_30M_STEP", 4))
+CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
+AI_LOG_FILE = "ai_decisions.log"
+AI_ARCHIVE_FILE = "ai_decisions_archive.log"
+AI_REQUESTS_LOG = "ai_requests.log"
+if "ORDER_MARGIN_UTILIZATION" not in globals():
+    ORDER_MARGIN_UTILIZATION = 0.95
+ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
+
+# --- Вспомогательные функции ---
+def _current_log_time():
+    base = datetime.datetime.now(datetime.timezone.utc)
+    if LOG_TZINFO is not None:
+        return base.astimezone(LOG_TZINFO)
+    return base.astimezone()
+
+
+def _format_tz_suffix(dt: datetime.datetime) -> str:
+    parts = []
+    tz_name = (dt.tzname() or "").strip()
+    if tz_name and tz_name.upper() != "UTC":
+        parts.append(tz_name)
+    offset = dt.utcoffset()
+    if offset is not None:
+        total_minutes = int(offset.total_seconds() // 60)
+        sign = "+" if total_minutes >= 0 else "-"
+        total_minutes = abs(total_minutes)
+        hours, minutes = divmod(total_minutes, 60)
+        offset_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
+        if offset_str not in parts:
+            parts.append(offset_str)
+    return " ".join(parts).strip()
+
+
+def log(msg: str, color=Fore.WHITE):
+    now = _current_log_time()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    tz_suffix = _format_tz_suffix(now)
+    if tz_suffix:
+        stamp = f"{stamp} {tz_suffix}"
+    print(color + f"[{stamp}] {msg}" + Style.RESET_ALL)
+
+def send_tg(msg: str):
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      json={"chat_id": TG_CHAT, "text": msg}, timeout=5)
+    except Exception as e:
+        log(f"Ошибка Telegram: {e}", Fore.YELLOW)
+
+def send_trade_update(msg: str, mention: bool = True):
+    prefix = ""
+    if mention and TELEGRAM_MENTION_PREFIX:
+        prefix = f"{TELEGRAM_MENTION_PREFIX} "
+    payload = f"{prefix}{msg}" if prefix else msg
+    send_tg(payload)
+
+
+def save_json_line(path, data):
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"⚠️ Ошибка записи в {path}: {e}", Fore.YELLOW)
+
+def extract_position_amount(position) -> float:
+    candidates = [
+        position.get("contracts"),
+        position.get("contractSize"),
+        position.get("positionAmt"),
+        position.get("positionAmount"),
+        position.get("size"),
+        position.get("amount"),
+    ]
+    info = position.get("info") or {}
+    candidates.extend([
+        info.get("size"),
+        info.get("position_q"),
+        info.get("positionAmt"),
+        info.get("position_value"),
+    ])
+    for val in candidates:
+        if val in (None, "", 0):
+            continue
+        try:
+            amount = float(val)
+            if abs(amount) > 0:
+                return amount
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+def simplify_position(position):
+    amount = extract_position_amount(position)
+    if amount == 0:
+        return None
+    info = position.get("info") or {}
+    side = position.get("side")
+    if not side and amount != 0:
+        side = "long" if amount > 0 else "short"
+    entry_price = position.get("entryPrice") or position.get("average") or info.get("avgPrice")
+    leverage = position.get("leverage") or info.get("leverage")
+    unrealized = position.get("unrealizedPnl") or info.get("unrealisedPnl")
+    liq_price = position.get("liquidationPrice") or info.get("liqPrice")
+    return {
+        "side": side,
+        "amount": amount,
+        "entryPrice": entry_price,
+        "leverage": leverage,
+        "unrealizedPnl": unrealized,
+        "liquidationPrice": liq_price,
+        "raw": info,
+    }
+
+def fetch_positions_snapshot(exchange, symbols_filter=None):
+    try:
+        positions = exchange.fetch_positions()
+    except Exception as e:
+        log(f"⚠️ Не удалось получить список позиций: {e}", Fore.YELLOW)
+        return {}, None
+    count = 0
+    simplified = {}
+    symbols_filter = set(symbols_filter) if symbols_filter else None
+    for pos in positions or []:
+        symbol = pos.get("symbol")
+        if symbols_filter and symbol not in symbols_filter:
+            continue
+        simp = simplify_position(pos)
+        if simp:
+            simplified[symbol] = simp
+            count += 1
+    return simplified, count
+
+
+def simplify_order(order):
+    info = order.get("info") or {}
+
+    return {
+        "id": order.get("id") or info.get("orderId"),
+        "type": order.get("type") or info.get("orderType"),
+        "side": order.get("side"),
+        "price": safe_float(order.get("price") or info.get("price")),
+        "stopPrice": safe_float(order.get("stopPrice") or info.get("triggerPrice")),
+        "amount": safe_float(order.get("amount") or info.get("qty")),
+        "filled": safe_float(order.get("filled") or info.get("cumExecQty")),
+        "remaining": safe_float(order.get("remaining") or info.get("leavesQty")),
+        "reduceOnly": order.get("reduceOnly") or info.get("reduceOnly"),
+        "status": order.get("status") or info.get("orderStatus"),
+        "timestamp": to_iso_utc(order.get("timestamp") or order.get("datetime") or info.get("createdTime")),
+    }
+
+
+def fetch_open_orders_for_symbol(exchange, symbol, limit=10):
+    has_attr = getattr(exchange, "has", {})
+    if isinstance(has_attr, dict) and not has_attr.get("fetchOpenOrders", False):
+        return []
+    try:
+        raw_orders = exchange.fetch_open_orders(symbol)
+    except Exception as e:
+        log(f"⚠️ Не удалось получить открытые ордера для {symbol}: {e}", Fore.YELLOW)
+        return []
+    simplified = []
+    for order in raw_orders:
+        simplified.append(simplify_order(order))
+        if len(simplified) >= limit:
+            break
+    return simplified
+
+
+def cancel_order_by_id(exchange, symbol, order_id: str):
+    try:
+        exchange.cancel_order(order_id, symbol)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def get_position_idx(side: str | None) -> int | None:
+    if HEDGE_MODE:
+        if (side or "").lower() == "buy":
+            return 1  # long position
+        if (side or "").lower() == "sell":
+            return 2  # short position
+        return None
+    # One-way mode
+    return 0
+
+def to_iso_utc(ts_value):
+    if ts_value is None or ts_value == "":
+        return None
+    try:
+        if isinstance(ts_value, str):
+            ts_value = float(ts_value)
+        if ts_value > 1e12:
+            ts_value /= 1000.0
+        dt = datetime.datetime.fromtimestamp(ts_value, tz=datetime.timezone.utc)
+        return dt.isoformat()
+    except Exception:
+        try:
+            return pd.to_datetime(ts_value, utc=True).isoformat()
+        except Exception:
+            return str(ts_value)
+
+def estimate_tokens(messages, model) -> int:
+    payload = json.dumps(messages, ensure_ascii=False)
+    if tiktoken:
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        total = 0
+        for msg in messages:
+            total += 4  # chatml framing
+            content = msg.get("content") or ""
+            if content:
+                total += len(encoding.encode(content))
+            if msg.get("name"):
+                total -= 1
+        total += 2  # assistant priming
+        return total
+    # Fallback: rough estimate 4 chars per token
+    return max(1, math.ceil(len(payload) / 4))
+
+# --- Индикаторы ---
+def ema(series, n): return series.ewm(span=n, adjust=False).mean()
+def rsi(series, n=14):
+    delta = series.diff()
+    up, down = delta.clip(lower=0), -delta.clip(upper=0)
+    ma_up, ma_down = up.ewm(alpha=1/n, adjust=False).mean(), down.ewm(alpha=1/n, adjust=False).mean()
+    rs = ma_up / ma_down.replace(0, pd.NA)
+    return (100 - (100 / (1 + rs))).fillna(50)
+def atr(df, n=14):
+    prev = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev).abs(),
+        (df["low"] - prev).abs()
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/n, adjust=False).mean()
+
+# --- Получение контекста ---
+def get_higher_tf(exchange, symbol, tf="4h", limit=120):
+    try:
+        data = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
+        df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
+        df["timestamp"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        df.drop(columns=["ts"], inplace=True)
+        df["ema20"] = ema(df["close"],20)
+        df["ema50"] = ema(df["close"],50)
+        df["rsi"] = rsi(df["close"],14)
+        return df.tail(60).to_dict(orient="records")
+    except Exception as e:
+        log(f"⚠️ Не удалось получить higher_tf {tf}: {e}", Fore.YELLOW)
+        return []
+
+def get_funding_rate(exchange, symbol):
+    try:
+        if hasattr(exchange,"fetchFundingRate"):
+            fr = exchange.fetchFundingRate(symbol)
+            funding_rate = fr.get("fundingRate")
+            try:
+                funding_rate = float(funding_rate) if funding_rate is not None else None
+            except (TypeError, ValueError):
+                funding_rate = None
+            next_time = to_iso_utc(fr.get("nextFundingTime"))
+            ts_iso = to_iso_utc(fr.get("timestamp"))
+            mark_price = fr.get("markPrice")
+            index_price = fr.get("indexPrice")
+            summary_parts = []
+            if funding_rate is not None:
+                summary_parts.append(f"текущая ставка {funding_rate*100:.4f}%")
+            if next_time:
+                summary_parts.append(f"след. выплата {next_time}")
+            if not summary_parts:
+                summary_parts.append("данные получены, ставка отсутствует")
+            return {
+                "source": "fetchFundingRate",
+                "fundingRate": funding_rate,
+                "fundingRatePct": funding_rate*100 if funding_rate is not None else None,
+                "timestamp": ts_iso,
+                "nextFundingTime": next_time,
+                "markPrice": mark_price,
+                "indexPrice": index_price,
+                "summary": ", ".join(summary_parts)
+            }
+        if hasattr(exchange, "fetchFundingRateHistory"):
+            history = exchange.fetchFundingRateHistory(symbol, limit=1)
+            if history:
+                fr = history[-1]
+                rate = fr.get("fundingRate")
+                try:
+                    rate = float(rate) if rate is not None else None
+                except (TypeError, ValueError):
+                    rate = None
+                ts_iso = to_iso_utc(fr.get("timestamp") or fr.get("datetime"))
+                summary = (
+                    f"последняя ставка {rate*100:.4f}% на {ts_iso}"
+                    if rate is not None and ts_iso else
+                    f"последняя ставка {rate*100:.4f}%"
+                    if rate is not None else
+                    f"в истории найдена запись на {ts_iso}" if ts_iso else "история получена"
+                )
+                return {
+                    "source": "fetchFundingRateHistory",
+                    "fundingRate": rate,
+                    "fundingRatePct": rate*100 if rate is not None else None,
+                    "timestamp": ts_iso,
+                    "summary": summary
+                }
+    except Exception as e:
+        log(f"⚠️ Funding rate недоступен: {e}", Fore.YELLOW)
+    return {}
+
+def get_open_interest(exchange, symbol):
+    try:
+        if hasattr(exchange,"fetchOpenInterestHistory"):
+            hist = exchange.fetchOpenInterestHistory(symbol, timeframe="1h", limit=72)
+            cleaned = []
+            for row in (hist or [])[-24:]:
+                if isinstance(row, dict):
+                    ts = row.get("timestamp") or row.get("datetime")
+                    cleaned.append({
+                        "timestamp": to_iso_utc(ts),
+                        "openInterestAmount": row.get("openInterestAmount"),
+                        "openInterestValue": row.get("openInterestValue"),
+                        "symbol": row.get("symbol", symbol)
+                    })
+                else:
+                    cleaned.append(row)
+            return cleaned
+    except Exception as e:
+        log(f"⚠️ Open interest недоступен: {e}", Fore.YELLOW)
+    return []
+
+
+def get_news_from_rss(base_symbol: str, limit: int):
+    if not RSS_FEEDS:
+        return {"summary": "RSS источники не настроены", "items": []}
+    if feedparser is None:
+        return {"summary": "feedparser не установлен", "items": []}
+    base_upper = (base_symbol or "").upper()
+    symbol_articles = []
+    general_articles = []
+    for url in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+        except Exception as e:
+            log(f"⚠️ RSS источник недоступен ({url}): {e}", Fore.YELLOW)
+            continue
+        for entry in feed.entries[:10]:
+            title = entry.get("title", "")
+            link = entry.get("link")
+            item = {
+                "title": title,
+                "url": link,
+                "source": entry.get("source", {}).get("title") if isinstance(entry.get("source"), dict) else entry.get("source"),
+                "published_at": entry.get("published", entry.get("updated"))
+            }
+            general_articles.append(item)
+            if base_upper and base_upper in title.upper():
+                symbol_articles.append(item)
+            if len(symbol_articles) >= limit and len(general_articles) >= limit:
+                break
+        if len(symbol_articles) >= limit and len(general_articles) >= limit:
+            break
+    if symbol_articles:
+        selected = symbol_articles[:limit]
+        summary = f"RSS {len(selected)} записей по {base_upper}"
+    else:
+        selected = general_articles[:limit]
+        summary = (
+            f"RSS {len(selected)} общих новостей" if selected else "новости не найдены (RSS)"
+        )
+    return {"summary": summary, "items": selected, "asset": base_upper, "source": "rss"}
+
+
+def get_news(symbol):
+    base = symbol.split("/")[0].split(":")[0].upper()
+    limit = max(1, NEWS_ITEMS_LIMIT)
+    if NEWS_API_TOKEN:
+        params = {
+            "auth_token": NEWS_API_TOKEN,
+            "currencies": base,
+            "kind": NEWS_API_KINDS,
+            "filter": NEWS_API_FILTER,
+            "public": "true"
+        }
+        try:
+            resp = requests.get(NEWS_API_ENDPOINT, params=params, timeout=6)
+            resp.raise_for_status()
+            payload = resp.json()
+            entries = payload.get("results") or payload.get("data") or []
+            news_items = []
+            for entry in entries:
+                if len(news_items) >= limit:
+                    break
+                title = entry.get("title") or entry.get("headline")
+                url = entry.get("url")
+                source = (entry.get("source") or {}).get("title") if isinstance(entry.get("source"), dict) else entry.get("source")
+                published = entry.get("published_at") or entry.get("created_at") or entry.get("timestamp")
+                news_items.append({
+                    "title": title,
+                    "url": url,
+                    "source": source,
+                    "kind": entry.get("kind"),
+                    "published_at": to_iso_utc(published)
+                })
+            if news_items:
+                latest = news_items[0].get("published_at")
+                summary = f"{len(news_items)} новостей CryptoPanic, последняя {latest}"
+                return {"summary": summary, "items": news_items, "asset": base, "source": "cryptopanic"}
+            log(f"ℹ️ CryptoPanic не вернул новости для {symbol}, используем RSS", Fore.LIGHTBLACK_EX)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response else None
+            color = Fore.LIGHTBLACK_EX if status and status >= 500 else Fore.YELLOW
+            status_text = f"HTTP {status}" if status else "HTTP error"
+            log(f"⚠️ CryptoPanic недоступен для {symbol}: {status_text} — {e}", color)
+        except Exception as e:
+            log(f"⚠️ CryptoPanic недоступен для {symbol}: {e}", Fore.YELLOW)
+    # Fallback to RSS
+    return get_news_from_rss(base, limit)
+
+# --- Подключение к бирже ---
+def init_exchange():
+    exchange = ccxt.bybit({
+        "apiKey": os.getenv("BYBIT_API_KEY",""),
+        "secret": os.getenv("BYBIT_API_SECRET",""),
+        "enableRateLimit": True,
+        "options": {
+            "defaultType": "swap",
+            "recvWindow": 5000,
+            "hedgeMode": HEDGE_MODE
+        }
+    })
+    exchange.options["recvWindow"] = 5000
+    return exchange
+
+def fetch_df(exchange, symbol, tf):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=200)
+    df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df.set_index("timestamp", inplace=True)
+    return df
+
+def ensure_position_mode(exchange):
+    desired = "hedged" if HEDGE_MODE else "oneway"
+    try:
+        if hasattr(exchange, "set_position_mode") and PAIR_LIST:
+            exchange.set_position_mode(HEDGE_MODE, PAIR_LIST[0])
+            log(f"⚙️ Режим позиций установлен: {desired}", Fore.LIGHTBLACK_EX)
+    except Exception as e:
+        code = get_bybit_retcode(e)
+        if code == 110025:
+            log(f"ℹ️ Режим позиций уже установлен ({desired}, код {code})", Fore.LIGHTBLACK_EX)
+        else:
+            log(f"⚠️ Не удалось установить режим позиций ({desired}): {e}", Fore.YELLOW)
+
+
+def get_bybit_retcode(error) -> int | None:
+    text = str(error)
+    match = re.search(r'"retCode"\s*:\s*(-?\d+)', text)
+    if not match:
+        match = re.search(r"'retCode'\s*:\s*(-?\d+)", text)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def fetch_usdt_equity(exchange):
+    try:
+        balance = exchange.fetch_balance()
+    except Exception as e:
+        log(f"⚠️ Не удалось получить баланс: {e}", Fore.YELLOW)
+        return 0.0, 0.0, {}
+    usdt = balance.get("USDT") or balance.get("USDT:USDT") or {}
+
+    total_val = safe_float(usdt.get("total") or usdt.get("equity") or usdt.get("walletBalance"))
+    free_val = safe_float(usdt.get("free") or usdt.get("available") or usdt.get("availableBalance"))
+    if free_val is None:
+        used_val = safe_float(usdt.get("used"))
+        if used_val is not None and total_val is not None:
+            free_val = total_val - used_val
+    if total_val is None and free_val is not None:
+        total_val = free_val
+    if free_val is None and total_val is not None:
+        free_val = total_val
+    total_val = float(total_val) if total_val is not None else 0.0
+    free_val = float(free_val) if free_val is not None else 0.0
+    if total_val < 0:
+        total_val = 0.0
+    if free_val < 0:
+        free_val = 0.0
+    return total_val, free_val, balance
+
+
+def compute_order_amount(order, current_position):
+    amount = order.get("amount") or order.get("qty") or order.get("quantity")
+    if amount not in (None, "", 0):
+        try:
+            val = float(amount)
+            if abs(val) > 0:
+                return abs(val)
+        except (TypeError, ValueError):
+            pass
+    percent = order.get("amountPercent") or order.get("percent")
+    if percent and current_position:
+        try:
+            pct = float(percent)
+            if pct <= 0:
+                return None
+            base = abs(float(current_position.get("amount") or 0))
+            if base <= 0:
+                return None
+            return base * pct / 100.0
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+ORDER_TYPE_MAP = {
+    "limit": "limit",
+    "market": "market",
+    "stop": "stop",
+    "stop_limit": "stopLimit",
+    "take_profit": "takeProfit",
+    "stop_loss": "stopLoss",
+    "trailing_stop": "trailingStop",
+}
+
+
+
+def execute_extra_orders(exchange, symbol, orders, current_position=None, open_orders=None):
+    executed = []
+    open_orders = open_orders or []
+    reduce_only_map = {}
+    try:
+        market = exchange.market(symbol)
+    except Exception:
+        market = {}
+    precision = market.get("precision") if isinstance(market, dict) else {}
+    amount_precision = precision.get("amount") if isinstance(precision, dict) else None
+    price_precision = precision.get("price") if isinstance(precision, dict) else None
+    limits = market.get("limits") if isinstance(market, dict) else {}
+    amount_limits = limits.get("amount") if isinstance(limits, dict) else {}
+    cost_limits = limits.get("cost") if isinstance(limits, dict) else {}
+    amount_min = safe_float(amount_limits.get("min")) if isinstance(amount_limits, dict) else None
+    amount_max = safe_float(amount_limits.get("max")) if isinstance(amount_limits, dict) else None
+    min_cost = safe_float(cost_limits.get("min")) if isinstance(cost_limits, dict) else None
+    ticker_cache = None
+
+    for existing in open_orders:
+        try:
+            reduce_flag = existing.get("reduceOnly")
+        except AttributeError:
+            continue
+        if reduce_flag in (True, "true", "1", 1):
+            side_key = (existing.get("side") or "").lower()
+            reduce_only_map.setdefault(side_key, []).append(existing)
+    if not isinstance(orders, (list, tuple)):
+        log(f"⚠️ Некорректный формат orders для {symbol}: ожидается список", Fore.YELLOW)
+        return executed, False
+    cancelled_success = []
+    cancel_errors = []
+    for idx, order in enumerate(orders, 1):
+        if not isinstance(order, dict):
+            log(f"⚠️ Пропуск order #{idx} для {symbol}: ожидается объект", Fore.YELLOW)
+            continue
+        order_type_key = (order.get("type") or "limit").lower()
+        raw_params = order.get("params") or {}
+        params = {k: v for k, v in dict(raw_params).items() if v not in (None, "", [], {}, ())}
+        note = order.get("note") or order.get("comment") or ""
+        reduce_only = order.get("reduceOnly")
+        if reduce_only is not None:
+            params["reduceOnly"] = bool(reduce_only)
+        side = (order.get("side") or "").lower()
+        amount = compute_order_amount(order, current_position)
+        price = order.get("price")
+        if price is not None:
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                log(f"⚠️ Некорректная цена в order #{idx} для {symbol}", Fore.YELLOW)
+                continue
+
+        if order_type_key == "partial_close":
+            base_order_type = (order.get("orderType") or order.get("order_type") or order.get("ccxt_type") or "market").lower()
+            ccxt_type = ORDER_TYPE_MAP.get(base_order_type, base_order_type)
+            params.setdefault("reduceOnly", True)
+            if not side and current_position:
+                side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
+        else:
+            ccxt_type = ORDER_TYPE_MAP.get(order_type_key, order_type_key)
+
+        if not side:
+            log(f"⚠️ Не указан side в order #{idx} для {symbol}", Fore.YELLOW)
+            continue
+        if amount is None:
+            log(f"⚠️ Не удалось определить объём ордера #{idx} для {symbol}", Fore.YELLOW)
+            continue
+        position_idx = order.get("positionIdx")
+        if position_idx is None:
+            params.setdefault("positionIdx", get_position_idx(side))
+        else:
+            params["positionIdx"] = position_idx
+
+        if ccxt_type in ("limit", "stopLimit", "takeProfit", "stopLoss") and price is None:
+            log(f"⚠️ Нужна цена для ордера #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
+            continue
+
+        if params.get("reduceOnly"):
+            existing_list = reduce_only_map.get(side)
+            if existing_list:
+                for existing_order in existing_list:
+                    oid = existing_order.get("id")
+                    if not oid:
+                        continue
+                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
+                    if success:
+                        cancelled_success.append(str(oid))
+                        log(f"🗑️ Отменён существующий reduce-only ордер {oid} для {symbol} перед заменой", Fore.LIGHTBLUE_EX)
+                    else:
+                        cancel_errors.append((oid, err))
+                        log(f"⚠️ Не удалось отменить reduce-only ордер {oid} для {symbol}: {err}", Fore.YELLOW)
+                reduce_only_map[side] = []
+
+        position_amount = safe_float(current_position.get("amount")) if current_position else 0.0
+        if params.get("reduceOnly"):
+            if not current_position or abs(position_amount) == 0:
+                log(f"⚠️ Пропуск reduce-only ордера #{idx} для {symbol}: позиция отсутствует", Fore.YELLOW)
+                continue
+            amount = min(amount, abs(position_amount))
+            if amount <= 0:
+                log(f"⚠️ Пропуск reduce-only ордера #{idx} для {symbol}: объём = 0", Fore.YELLOW)
+                continue
+
+        if amount_min and amount < amount_min:
+            if params.get("reduceOnly") and abs(position_amount) >= amount_min:
+                amount = amount_min
+            else:
+                log(f"⚠️ Ордер #{idx} для {symbol}: объём {amount} < минимального {amount_min}", Fore.YELLOW)
+                continue
+        if amount_max and amount > amount_max:
+            amount = amount_max
+        if amount_precision is not None:
+            try:
+                amount = float(exchange.amount_to_precision(symbol, amount))
+            except (InvalidOperation, ValueError, TypeError) as exc:
+                log(f"⚠️ Ордер #{idx} для {symbol}: ошибка округления объёма: {exc}", Fore.YELLOW)
+                continue
+        if amount <= 0:
+            log(f"⚠️ Пропуск ордера #{idx} для {symbol}: итоговый объём = 0", Fore.YELLOW)
+            continue
+
+        if price is not None:
+            if price_precision is not None:
+                try:
+                    price = float(exchange.price_to_precision(symbol, price))
+                except (InvalidOperation, ValueError, TypeError) as exc:
+                    log(f"⚠️ Некорректная цена {price} в ордере #{idx} для {symbol}: {exc}", Fore.YELLOW)
+                    continue
+            if min_cost and amount * price < min_cost:
+                log(f"⚠️ Ордер #{idx} для {symbol}: notional {amount * price:.4f} < min cost {min_cost}", Fore.YELLOW)
+                continue
+
+        if ccxt_type in ("stop", "stoplimit", "stopLimit", "takeProfit", "stopLoss", "trailingStop"):
+            trigger_dir = params.get("triggerDirection") or order.get("triggerDirection") or order.get("trigger_direction")
+            if not trigger_dir:
+                last_price = None
+                if ticker_cache is None:
+                    try:
+                        ticker_cache = exchange.fetch_ticker(symbol)
+                    except Exception:
+                        ticker_cache = {}
+                if isinstance(ticker_cache, dict):
+                    last_price = safe_float(ticker_cache.get("last") or ticker_cache.get("close"))
+                if last_price is None and current_position:
+                    last_price = safe_float(current_position.get("entryPrice"))
+                if last_price is not None and price is not None:
+                    trigger_dir = 1 if price >= last_price else 2
+                else:
+                    trigger_dir = 1 if side == "buy" else 2
+            params["triggerDirection"] = trigger_dir
+
+        try:
+            exchange.create_order(symbol, ccxt_type, side, amount, price, params)
+            desc = f"{ccxt_type.upper()} {side.upper()} {amount}"
+            if price:
+                desc += f" @ {price}"
+            if note:
+                desc += f" — {note}"
+            executed.append(desc)
+            log(f"🛠️ Доп. ордер для {symbol}: {desc}", Fore.LIGHTBLUE_EX)
+        except Exception as e:
+            log(f"❌ Ошибка доп. ордера #{idx} для {symbol}: {e}", Fore.RED)
+    if cancelled_success:
+        send_trade_update(f"🗑️ {symbol}: отменены ордера {', '.join(cancelled_success)} перед заменой")
+    if cancel_errors:
+        errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_errors)
+        send_tg(f"⚠️ {symbol}: ошибки отмены ордеров — {errs}")
+    actions_performed = bool(executed or cancelled_success or cancel_errors)
+    return executed, actions_performed
+def ai_decision(
+    symbol,
+    df_primary,
+    equity,
+    available_margin,
+    exchange,
+    current_position=None,
+    open_orders=None,
+    extra_context=None,
+    target_meta=None,
+    news_payload=None
+):
+    if not AI_KEY:
+        log("❌ Не указан OPENAI_API_KEY", Fore.RED)
+        return None
+
+    df_30m = df_primary
+    extra_context = extra_context or {}
+    target_meta = target_meta or {}
+    client = OpenAI(api_key=AI_KEY, timeout=15)
+    df_30m["ema20"] = ema(df_30m["close"],20)
+    df_30m["ema50"] = ema(df_30m["close"],50)
+    df_30m["rsi"] = rsi(df_30m["close"],14)
+    df_30m["atr"] = atr(df_30m,14)
+    portfolio_guidance = dict(target_meta) if isinstance(target_meta, dict) else {}
+    extra_context_payload = extra_context if isinstance(extra_context, dict) else {}
+    news_payload_payload = news_payload if isinstance(news_payload, dict) else None
+    higher_tf = get_higher_tf(exchange, symbol, "4h")
+
+    higher_trend_bias = None
+    higher_trend_label = "неопределён"
+    if higher_tf:
+        last_higher = higher_tf[-1]
+        ema20_ht = last_higher.get("ema20")
+        ema50_ht = last_higher.get("ema50")
+        if ema20_ht is not None and ema50_ht is not None:
+            if ema20_ht > ema50_ht:
+                higher_trend_bias = "buy"
+                higher_trend_label = "восходящий"
+            elif ema20_ht < ema50_ht:
+                higher_trend_bias = "sell"
+                higher_trend_label = "нисходящий"
+
+    context_counts = {
+        "30m": min(DEFAULT_CONTEXT_30M, len(df_30m)),
+        "4h": min(DEFAULT_CONTEXT_4H, len(higher_tf))
+    }
+    current_context = {}
+    position_payload = None
+    if current_position:
+        position_payload = {
+            "side": current_position.get("side"),
+            "amount": current_position.get("amount"),
+            "entryPrice": current_position.get("entryPrice"),
+            "leverage": current_position.get("leverage"),
+            "unrealizedPnl": current_position.get("unrealizedPnl"),
+            "liquidationPrice": current_position.get("liquidationPrice")
+        }
+    open_orders = open_orders or []
+
+    # >>>>>>>>>>>> ИСПРАВЛЕНО: system_msg как тройная строка без \u-escape <<<<<<<<<<<<
+    system_msg = """Ты — ИИ-помощник по трейдингу в сбалансированном интрадей стиле. 
+Работаешь по сценарию: (1) если тренды 30m и 4h совпадают и RSI не в экстремумах — входи по тренду; 
+(2) если 30m показывает зарождающийся разворот против слабого тренда на 4h — допускается контртренд с короткой целью; 
+(3) skip используется только при реальном конфликте сигналов или явной неопределённости. 
+Обязательно анализируй EMA20/EMA50, RSI(14), ATR(14) на 30m и 4h, формируй понятный риск/идею. 
+Если уверенность < 70% или сигналы расходятся — сначала запроси дополнительные данные через поле 'needs' 
+(доступно: higher_tf:<tf>, funding, open_interest, news, а также {"timeframes":["1h"],"indicators":[{"indicator":"ema","length":55}, "atr14"]}), и только после доп. проверки выбирай конечное действие. 
+Если позиция уже открыта, не открывай её заново: оцени необходимость частичного сокращения, закрытия или удержания. 
+Если по символу есть активные лимитные/стоп-ордера (open_orders), не дублируй их без пересмотра. 
+Для отмены/замены ордеров передавай cancel_orders и replace_orders. 
+Для частичных закрытий, дополнительных лимитов/стопов, трейлингов и других операций используй массив 'orders', 
+описывая ордера в стиле CCXT (type, side, amount/percent, price, params). 
+Если выбираешь action="skip", обязательно укажи причину, опираясь на показания этих индикаторов. 
+Ответ строго в формате JSON без текста."""
+    # >>>>>>>>>>>> конец исправления <<<<<<<<<<<<
+
+    ema_trend_bias = None
+    ema_trend_label = "неопределён"
+    ema_slope = None
+    if not df_30m.empty:
+        last_row = df_30m.iloc[-1]
+        ema20_last = last_row.get("ema20")
+        ema50_last = last_row.get("ema50")
+        if pd.notna(ema20_last) and pd.notna(ema50_last):
+            if ema20_last > ema50_last:
+                ema_trend_bias = "buy"
+                ema_trend_label = "восходящий"
+            elif ema20_last < ema50_last:
+                ema_trend_bias = "sell"
+                ema_trend_label = "нисходящий"
+        if len(df_30m) >= 3 and pd.notna(df_30m.iloc[-1].get("ema20")) and pd.notna(df_30m.iloc[-3].get("ema20")):
+            ema_slope = df_30m.iloc[-1]["ema20"] - df_30m.iloc[-3]["ema20"]
+
+    def build_context():
+        tail_30m = df_30m.tail(context_counts["30m"]).reset_index()
+        if not tail_30m.empty:
+            tail_30m["timestamp"] = pd.to_datetime(tail_30m["timestamp"], utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            tf_30m = tail_30m[["timestamp","open","high","low","close","volume","ema20","ema50","rsi","atr"]].to_dict(orient="records")
+        else:
+            tf_30m = []
+        count_4h = min(context_counts["4h"], len(higher_tf))
+        tf_4h = higher_tf[-count_4h:] if count_4h else []
+        context = {"tf_30m": tf_30m, "tf_4h": tf_4h}
+        if position_payload:
+            context["position"] = position_payload
+        if open_orders:
+            context["open_orders"] = open_orders
+        return context
+
+    def build_prompt(extra=None, bias=False):
+        news_desc = "CryptoPanic API (fallback: RSS крипто-ленты)" if NEWS_API_TOKEN else "RSS новости по ключевому активу"
+        prompt = {
+            "символ": symbol,
+            "финансы": {
+                "equity_total": equity,
+                "available_margin": available_margin,
+                "risk_pct": RISK_PCT,
+                "configured_leverage": LEVERAGE,
+                "min_notional_usdt": MIN_NOTIONAL_USDT,
+                "sl_atr_mult": SL_ATR,
+                "tp_atr_mult": TP_ATR
+            },
+            "капитал": equity,
+            "индикаторы": current_context,
+            "текущая_позиция": position_payload or {"статус": "нет позиции"},
+            "открытые_ордера": open_orders,
+            "как_создавать_ордеры": [
+                "Возвращай массив 'orders', если нужно выставить дополнительные заявки.",
+                "Пример: orders=[{\"type\":\"limit\",\"side\":\"sell\",\"amount\":0.001,\"price\":111500,\"reduceOnly\":true,\"note\":\"частичный тейк\"}].",
+                "Для частичного закрытия можно указать amountPercent вместо amount; trailing_stop передавай через params (например, {'trailingStop':50}).",
+                "Учитывай open_orders (см. поле 'open_orders'): избегай дублирования существующих лимитов/стопов.",
+                "Для обновления тейков/стопов используй cancel_orders или replace_orders (сначала укажи id заявки, затем опиши новый ордер)."
+            ],
+            "сценарий": {
+                "алгоритм": [
+                    "1) Проверь тренды 30m/4h и RSI.",
+                    "2) Если уверенность <70% или сигналы расходятся — запроси needs (higher_tf:<tf>, funding, open_interest, news).",
+                    "3) После получения дополнительных данных выбери окончательное действие."
+                ],
+                "базовый_тренд": {
+                    "рекомендуемое_действие": "open" if ema_trend_bias else "skip",
+                    "сторона": ema_trend_bias,
+                    "описание": (
+                        f"Доминирующий тренд {ema_trend_label} по EMA20/EMA50 на 30m."
+                        f" На 4h тренд {higher_trend_label}. При их совпадении отдавай предпочтение входу."
+                    ),
+                    "наклон_ema20": ema_slope
+                },
+                "контртренд": {
+                    "условие": "RSI выходит из экстремума 30m, а ATR падает",
+                    "напоминание": "если 4h тренд сильный, уменьши размер и ставь плотный SL"
+                },
+                "пороговые_значения": {
+                    "long": {"rsi_30m": "<=55", "rsi_4h": "<=60"},
+                    "short": {"rsi_30m": ">=45", "rsi_4h": ">=40"},
+                    "atr": "избегай входа, если текущий ATR выше среднего за 14×1.8"
+                },
+                "skip": "используй только при конфликте трендов или резком росте ATR/новостях"
+            },
+            "доступные_данные": {
+                "higher_tf": ["higher_tf:4h", "higher_tf:1h", "higher_tf:30m"],
+                "funding": "fetchFundingRate",
+                "open_interest": "fetchOpenInterestHistory",
+                "news": news_desc
+            },
+            "если_неуверен": {
+                "action": "open" if ema_trend_bias else "skip",
+                "side": ema_trend_bias,
+                "reason": (
+                    "следуем доминирующему тренду с умеренным риском после запроса needs"
+                    if ema_trend_bias else "недостаточно уверенности — запроси needs"
+                ),
+                "до_решения": "обязательно запроси дополнительные данные через needs перед финальным выбором",
+                "sl_atr": SL_ATR,
+                "tp_atr": TP_ATR
+            }
+        }
+        if portfolio_guidance:
+            prompt["portfolio_guidance"] = portfolio_guidance
+        if extra_context_payload:
+            prompt["requested_context"] = extra_context_payload
+        if news_payload_payload:
+            prompt["news_focus"] = news_payload_payload
+        if extra: prompt["доп_контекст"] = extra
+        if bias: prompt["режим"] = "чуть более уверенный после допконтекста"
+        return json.dumps(prompt, ensure_ascii=False)
+
+    def prepare_messages(stage="initial", extra=None, bias=False):
+        nonlocal current_context
+        prev_counts = context_counts.copy()
+        trimmed = False
+        tokens = 0
+        attempts = 0
+        messages = []
+        user_payload = ""
+        trim_sources = []
+        hard_limit = TOKEN_LIMIT if TOKEN_LIMIT > 0 else None
+        soft_limit = TOKEN_SOFT_LIMIT if TOKEN_SOFT_LIMIT > 0 else None
+        while True:
+            current_context = build_context()
+            user_payload = build_prompt(extra, bias)
+            messages = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_payload}
+            ]
+            tokens = estimate_tokens(messages, AI_MODEL)
+            exceeded_hard = hard_limit is not None and tokens > hard_limit
+            exceeded_soft = soft_limit is not None and tokens > soft_limit
+            if not exceeded_hard and not exceeded_soft:
+                break
+            trimmed_step = False
+            trim_reason = "hard" if exceeded_hard else "soft"
+            if context_counts["30m"] > MIN_CONTEXT_30M:
+                new_val = max(MIN_CONTEXT_30M, context_counts["30m"] - CONTEXT_STEP_30M)
+                if new_val < context_counts["30m"]:
+                    context_counts["30m"] = new_val
+                    trimmed_step = True
+            if not trimmed_step and context_counts["4h"] > MIN_CONTEXT_4H:
+                new_val = max(MIN_CONTEXT_4H, context_counts["4h"] - CONTEXT_STEP_4H)
+                if new_val < context_counts["4h"]:
+                    context_counts["4h"] = new_val
+                    trimmed_step = True
+            if not trimmed_step:
+                break
+            trimmed = True
+            trim_sources.append(trim_reason)
+            attempts += 1
+            if attempts > 50:
+                log(f"⚠️ Обрезка контекста не укладывается в лимит ({stage}) для {symbol}", Fore.YELLOW)
+                break
+        trimmed = trimmed or (context_counts != prev_counts)
+        if trimmed:
+            reasons_text = "/".join(sorted(set(trim_sources))) if trim_sources else "unknown"
+            trim_text = (
+                f"✂️ контекст обрезан ({reasons_text}) до "
+                f"{context_counts['30m']}×30m и {context_counts['4h']}×4h "
+                f"из-за лимита ({tokens} токенов, этап: {stage}) для {symbol}"
+            )
+            log(trim_text, Fore.MAGENTA)
+            send_tg(trim_text)
+        if hard_limit and tokens > hard_limit:
+            log(f"⚠️ Лимит токенов превышен даже после обрезки ({tokens}>{TOKEN_LIMIT}, этап: {stage}) для {symbol}", Fore.YELLOW)
+        return messages, tokens, user_payload
+
+    def ensure_skip_reason(decision_obj):
+        action = (decision_obj.get("action") or "").lower()
+        if action != "skip":
+            return decision_obj
+        reason = (decision_obj.get("reason") or "").strip()
+        reason_lower = reason.lower()
+        if any(key in reason_lower for key in ("ema", "rsi", "atr")):
+            return decision_obj
+        if df_30m.empty:
+            details = "данные индикаторов отсутствуют"
+        else:
+            last_row = df_30m.iloc[-1]
+            parts = []
+            ema20_val = last_row.get("ema20")
+            ema50_val = last_row.get("ema50")
+            rsi_val = last_row.get("rsi")
+            atr_val = last_row.get("atr")
+            if pd.notna(ema20_val) and pd.notna(ema50_val):
+                relation = "ниже" if ema20_val < ema50_val else "выше"
+                parts.append(f"EMA20 {ema20_val:.2f} {relation} EMA50 {ema50_val:.2f}")
+            elif pd.notna(ema20_val) or pd.notna(ema50_val):
+                parts.append(f"EMA данные неполные (EMA20={ema20_val}, EMA50={ema50_val})")
+            if pd.notna(rsi_val):
+                parts.append(f"RSI14 {rsi_val:.1f}")
+            if pd.notna(atr_val):
+                parts.append(f"ATR14 {atr_val:.2f}")
+            details = "; ".join(parts) if parts else "нет валидных значений EMA/RSI/ATR"
+        decision_obj["reason"] = (reason + " — " if reason else "") + f"индикаторы: {details}"
+        log(f"ℹ️ Причина skip дополнена индикаторами для {symbol}", Fore.LIGHTBLACK_EX)
+        return decision_obj
+
+    messages_init, tokens_init, _ = prepare_messages(stage="initial")
+    log(f"ℹ️ Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
+
+    # --- Первый проход ---
+    start_init = time.perf_counter()
+    res = client.chat.completions.create(
+        model=AI_MODEL,
+        temperature=0,
+        response_format={"type":"json_object"},
+        messages=messages_init
+    )
+    duration_init = time.perf_counter() - start_init
+    log(f"⏱️ OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
+    msg = res.choices[0].message.content
+    decision = json.loads(msg)
+    needs = decision.get("needs", [])
+    auto_needs_triggered = False
+    action_initial = (decision.get("action") or "").lower()
+    if not needs and action_initial == "skip":
+        reason_text = (decision.get("reason") or "").lower()
+        keywords_auto_needs = ("запрос", "needs", "дополнитель", "подтвержден")
+        if any(word in reason_text for word in keywords_auto_needs):
+            auto_needs = ["funding", "open_interest", "news"]
+            decision["needs"] = auto_needs
+            needs = auto_needs
+            auto_needs_triggered = True
+    save_json_line(
+        AI_REQUESTS_LOG,
+        {
+            "symbol": symbol,
+            "stage": "initial",
+            "tokens": tokens_init,
+            "token_limit": TOKEN_LIMIT,
+            "token_soft_limit": TOKEN_SOFT_LIMIT,
+            "duration_sec": round(duration_init, 4),
+            "context_counts": context_counts.copy(),
+            "context": current_context,
+            "needs": needs,
+            "auto_needs": auto_needs_triggered
+        }
+    )
+
+    # --- Если запрошен контекст ---
+    if needs:
+        if auto_needs_triggered:
+            log(f"🤖 Автозапрос дополнительного контекста по причине низкой уверенности: {needs}", Fore.CYAN)
+            send_tg(f"🤖 Автозапрос данных для {symbol}: {needs}")
+        else:
+            log(f"🤖 Модель запросила дополнительный контекст: {needs}", Fore.CYAN)
+            send_tg(f"🤖 Модель запросила контекст для {symbol}: {needs}")
+        extra = {}
+        needs_followup = []
+        indicator_extra = None
+        for n in needs:
+            if n.startswith("higher_tf"):
+                tf = n.split(":",1)[1] if ":" in n else "4h"
+                extra.setdefault("higher_tf", {})[tf] = get_higher_tf(exchange, symbol, tf)
+            elif n == "funding":
+                extra["funding"] = get_funding_rate(exchange, symbol)
+            elif n == "open_interest":
+                extra["open_interest"] = get_open_interest(exchange, symbol)
+            elif n == "news":
+                extra["news"] = get_news(symbol)
+            elif isinstance(n, dict):
+                tf_values = []
+                indicators_requested = []
+                if "timeframe" in n:
+                    tf_values.append(str(n.get("timeframe")))
+                if "timeframes" in n and isinstance(n.get("timeframes"), (list, tuple, set)):
+                    tf_values.extend(str(tf) for tf in n["timeframes"] if tf)
+                raw_indicator_fields = []
+                for key in ("indicator", "indicators", "indicator_set"):
+                    if key in n:
+                        raw_indicator_fields.append(n[key])
+                shorthand_fields = {k: v for k, v in n.items() if k.lower() in ("ema", "sma", "rsi", "atr", "stoch")}
+                for k, v in shorthand_fields.items():
+                    raw_indicator_fields.append({"indicator": k, "length": v})
+                if not raw_indicator_fields and n.get("type") in ("indicator", "indicators"):
+                    raw_indicator_fields.append(n.get("config") or n.get("details"))
+                for field in raw_indicator_fields:
+                    indicators_requested.extend(_expand_indicator_entries(field))
+                indicators_requested = [ind for ind in dict.fromkeys(indicators_requested) if ind]
+                if not tf_values:
+                    tf_values = [TIMEFRAME]
+                timeframe_store = extra.setdefault("timeframes", {})
+                indicator_extra = None
+                if indicators_requested:
+                    indicator_extra = extra.setdefault(
+                        "indicator_extra",
+                        {"requests": [], "timeframes": {}, "errors": []}
+                    )
+                    indicator_extra["requests"].append(
+                        {
+                            "source": n,
+                            "timeframes": tf_values,
+                            "indicators": indicators_requested
+                        }
+                    )
+                for tf in tf_values:
+                    try:
+                        df_tf = fetch_df(exchange, symbol, tf)
+                    except Exception as tf_exc:
+                        if indicator_extra is not None:
+                            indicator_extra.setdefault("errors", []).append(f"{tf}: {tf_exc}")
+                        else:
+                            extra.setdefault("errors", []).append(f"needs fetch_df({tf}): {tf_exc}")
+                        continue
+                    applied_cols = []
+                    if indicators_requested:
+                        for ind_name in indicators_requested:
+                            col = _apply_indicator_to_df(df_tf, ind_name)
+                            if col:
+                                applied_cols.append(col)
+                    tf_payload = {"bars": _serialize_df(df_tf)}
+                    if applied_cols:
+                        indicator_values = {}
+                        for col in applied_cols:
+                            series = df_tf[col].dropna()
+                            if series.empty:
+                                indicator_values[col] = None
+                            else:
+                                val = series.iloc[-1]
+                                if isinstance(val, numbers.Number):
+                                    indicator_values[col] = float(val)
+                                elif hasattr(val, "item"):
+                                    try:
+                                        indicator_values[col] = float(val.item())
+                                    except Exception:
+                                        indicator_values[col] = str(val)
+                                else:
+                                    indicator_values[col] = str(val)
+                        tf_payload["indicators"] = indicator_values
+                    timeframe_store[tf] = tf_payload
+                    if indicator_extra is not None:
+                        indicator_extra.setdefault("timeframes", {})[tf] = tf_payload
+
+        stats_report = []
+        for key,val in extra.items():
+            if isinstance(val, list):
+                stats_report.append(f"{key}: {len(val)} записей")
+            elif isinstance(val, dict) and val:
+                if key == "higher_tf":
+                    inner = {k: len(v) for k,v in val.items()}
+                    stats_report.append(f"{key}: " + ", ".join(f"{tf}={cnt}" for tf,cnt in inner.items()))
+                elif key == "indicator_extra":
+                    tf_entries = []
+                    for tf_name, payload in (val.get("timeframes") or {}).items():
+                        indicators = payload.get("indicators") or {}
+                        tf_entries.append(
+                            f"{tf_name}: индикаторы {', '.join(indicators.keys()) or 'нет'}"
+                        )
+                    if tf_entries:
+                        stats_report.append(f"{key}: " + "; ".join(tf_entries))
+                    errors = val.get("errors") or []
+                    if errors:
+                        stats_report.append(f"{key}_errors: " + "; ".join(errors))
+                elif key == "timeframes":
+                    tf_summaries = []
+                    for tf_name, payload in val.items():
+                        bars = payload.get("bars") or []
+                        tf_summaries.append(f"{tf_name}:{len(bars)}")
+                    if tf_summaries:
+                        stats_report.append("timeframes: " + ", ".join(tf_summaries))
+                else:
+                    summary = val.get("summary")
+                    if summary:
+                        stats_report.append(f"{key}: {summary}")
+                    else:
+                        stats_report.append(f"{key}: найдено")
+            else:
+                stats_report.append(f"{key}: нет данных")
+
+        log("✅ Контекст собран: " + ", ".join(stats_report), Fore.LIGHTBLACK_EX)
+        send_tg("✅ Контекст собран для " + symbol + ":\n" + "\n".join(stats_report))
+
+        bias_flag = bool(AI_AFTER_NEEDS_BIAS)
+        messages_extra, tokens_extra, _ = prepare_messages(stage="extra", extra=extra, bias=bias_flag)
+        log(f"ℹ️ Токены запроса (extra) для {symbol}: {tokens_extra}", Fore.LIGHTBLACK_EX)
+        start_extra = time.perf_counter()
+        res2 = client.chat.completions.create(
+            model=AI_MODEL,
+            temperature=0,
+            response_format={"type":"json_object"},
+            messages=messages_extra
+        )
+        duration_extra = time.perf_counter() - start_extra
+        log(f"⏱️ OpenAI extra запрос для {symbol}: {duration_extra:.2f} c", Fore.LIGHTBLACK_EX)
+        msg2 = res2.choices[0].message.content
+        decision = json.loads(msg2)
+        needs_followup = decision.get("needs", [])
+        if needs_followup:
+            log(f"ℹ️ После допконтекста модель все ещё запрашивает {needs_followup} для {symbol}", Fore.LIGHTBLACK_EX)
+            decision["needs_followup"] = needs_followup
+            decision.pop("needs", None)
+        save_json_line(
+            AI_REQUESTS_LOG,
+            {
+                "symbol": symbol,
+                "stage": "extra",
+                "tokens": tokens_extra,
+                "token_limit": TOKEN_LIMIT,
+                "token_soft_limit": TOKEN_SOFT_LIMIT,
+                "duration_sec": round(duration_extra, 4),
+                "context_counts": context_counts.copy(),
+                "context": current_context,
+                "extra": extra,
+                "bias": bias_flag,
+                "needs_followup": needs_followup
+            }
+        )
+        log(f"🧩 Второй проход завершён для {symbol}", Fore.CYAN)
+        send_tg(f"🧩 Второй проход завершён для {symbol}")
+
+    decision = ensure_skip_reason(decision)
+    return decision
+
+# --- Основная логика ---
+def main():
+    refresh_settings()
+    ex = init_exchange()
+    ex.load_markets()
+    ensure_position_mode(ex)
+    positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_UNIVERSE or None)
+    if MAX_OPEN_POSITIONS > 0 and open_positions is None:
+        log("⚠️ Не удалось определить количество открытых позиций — лимит по позициям отключён на этот цикл", Fore.YELLOW)
+        open_positions = None
+    equity, available_margin, _ = fetch_usdt_equity(ex)
+    if equity <= 0:
+        equity = 64.0
+    if available_margin <= 0:
+        available_margin = equity
+    last_equity = equity
+    last_available_margin = available_margin
+    session_dt = _current_log_time()
+    session_start = session_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    start_balance_text = f"Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT"
+    session_banner = f"{'=' * 18} SESSION START {session_start} v{BOT_VERSION} {'=' * 18}"
+    log(session_banner, Fore.MAGENTA)
+    log(f"Changelog: {BOT_CHANGELOG}", Fore.MAGENTA)
+    log(f"🚀 Бот v{BOT_VERSION} запущен. {start_balance_text}", Fore.GREEN)
+    send_tg(f"═══════════ START SESSION {session_start} ═══════════")
+    send_tg(f"🚀 Бот v{BOT_VERSION} запущен. {start_balance_text}")
+
+    selection = ai_select_portfolio(ex, PAIR_UNIVERSE or PAIR_LIST, positions_map, equity, available_margin)
+    global_timeframes = []
+    global_indicators = []
+    news_cache = {}
+    target_map = {}
+    selected_symbols = []
+    if selection:
+        global_timeframes = selection.get("global_timeframes") or []
+        global_indicators = selection.get("global_indicators") or []
+        news_cache = selection.get("_news_digest") or {}
+        for target in selection.get("targets") or []:
+            sym_sel = target.get("symbol")
+            if not sym_sel:
+                continue
+            target_map[sym_sel] = target
+            selected_symbols.append(sym_sel)
+        selection_reason = selection.get("reason")
+        if selection_reason:
+            log(f"🎯 Портфельный фокус: {selection_reason}", Fore.CYAN)
+            send_tg(f"🎯 Портфель: {selection_reason}")
+        confidence = selection.get("confidence")
+        if confidence:
+            log(f"🤖 Уверенность модели: {confidence}", Fore.LIGHTBLACK_EX)
+    forced_symbols = set()
+    for sym, pos in positions_map.items():
+        amt = safe_float(pos.get("amount"))
+        if amt:
+            forced_symbols.add(sym)
+
+    preloaded_open_orders = {}
+    try:
+        raw_open_orders = ex.fetch_open_orders()
+        for order in raw_open_orders or []:
+            sym_order = order.get("symbol") or (order.get("info") or {}).get("symbol")
+            if not sym_order:
+                continue
+            forced_symbols.add(sym_order)
+            preloaded_open_orders.setdefault(sym_order, []).append(order)
+    except Exception as exc:
+        log(f"⚠️ Не удалось получить список всех открытых ордеров: {exc}", Fore.LIGHTBLACK_EX)
+        preloaded_open_orders = {}
+
+    base_sequence = selected_symbols if selected_symbols else list(PAIR_LIST or [])
+    if not base_sequence:
+        base_sequence = list(PAIR_UNIVERSE)
+    symbols_sequence = list(dict.fromkeys(base_sequence + [sym for sym in forced_symbols if sym not in base_sequence]))
+
+    decisions_total = 0
+    counts = {"open":0,"close":0,"skip":0}
+
+    for i,sym in enumerate(symbols_sequence,1):
+        log(f"[{i}/{len(symbols_sequence)}] {sym}", Fore.LIGHTBLUE_EX)
+        try:
+            equity, available_margin, _ = fetch_usdt_equity(ex)
+            if equity > 0:
+                last_equity = equity
+            else:
+                equity = last_equity
+            if available_margin > 0:
+                last_available_margin = available_margin
+            else:
+                available_margin = last_available_margin
+            symbol_meta = dict(target_map.get(sym, {}) or {})
+            requested_timeframes = list(dict.fromkeys(
+                list(DEFAULT_TIMEFRAMES or []) + list(global_timeframes) + list(symbol_meta.get("timeframes") or [])
+            ))
+            requested_indicators = list(dict.fromkeys(
+                list(INDICATOR_POOL or []) + list(global_indicators) + list(symbol_meta.get("indicators") or [])
+            ))
+            timeframe_dfs = {}
+            for tf in requested_timeframes:
+                try:
+                    tf_df = fetch_df(ex, sym, tf)
+                except Exception as exc_fetch:
+                    log(f"?? не удалось получить {tf} для {sym}: {exc_fetch}", Fore.YELLOW)
+                    continue
+                for ind_name in requested_indicators:
+                    _apply_indicator_to_df(tf_df, ind_name)
+                timeframe_dfs[tf] = tf_df
+            primary_tf = TIMEFRAME if TIMEFRAME in timeframe_dfs else (requested_timeframes[0] if requested_timeframes else TIMEFRAME)
+            if primary_tf not in timeframe_dfs:
+                try:
+                    tf_df = fetch_df(ex, sym, primary_tf)
+                    timeframe_dfs[primary_tf] = tf_df
+                except Exception as exc_fetch:
+                    log(f"?? не удалось получить базовый таймфрейм {primary_tf} для {sym}: {exc_fetch}", Fore.RED)
+                    continue
+            df = timeframe_dfs[primary_tf].copy()
+            extra_serialized = {
+                "timeframes": {
+                    tf: {"bars": _serialize_df(tf_df)}
+                    for tf, tf_df in timeframe_dfs.items()
+                },
+                "indicators": requested_indicators,
+                "primary": primary_tf,
+            }
+            if symbol_meta.get("notional_pct") is not None:
+                extra_serialized["recommended_notional_pct"] = symbol_meta.get("notional_pct")
+            news_payload_symbol = news_cache.get(sym) if news_cache else None
+            if not news_payload_symbol:
+                try:
+                    news_payload_symbol = get_news(sym)
+                except Exception as news_exc:
+                    log(f"?? не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
+                    news_payload_symbol = None
+            current_position = positions_map.get(sym)
+            preloaded_orders = preloaded_open_orders.pop(sym, None)
+            if preloaded_orders is not None:
+                open_orders_symbol = [simplify_order(o) for o in preloaded_orders]
+            else:
+                open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+            dec = ai_decision(
+                sym,
+                df,
+                equity,
+                available_margin,
+                ex,
+                current_position=current_position,
+                open_orders=open_orders_symbol,
+                extra_context=extra_serialized,
+                target_meta=symbol_meta,
+                news_payload=news_payload_symbol
+            )
+            if not dec: continue
+            if symbol_meta.get("notional_pct") is not None and dec.get("notional_pct") is None:
+                dec["notional_pct"] = symbol_meta.get("notional_pct")
+            save_json_line(AI_LOG_FILE, {"timestamp":datetime.datetime.now().isoformat(),
+                                         "symbol":sym,"decision":dec})
+            action = (dec.get("action") or "skip").lower()
+            side = dec.get("side") or ""
+            reason = dec.get("reason") or ""
+            counts[action] = counts.get(action,0)+1
+            decisions_total += 1
+
+            extra_orders_raw = dec.get("orders") or dec.get("adjustments") or dec.get("extra_orders") or []
+            if isinstance(extra_orders_raw, dict):
+                extra_orders = [extra_orders_raw]
+            elif isinstance(extra_orders_raw, list):
+                extra_orders = list(extra_orders_raw)
+            else:
+                extra_orders = []
+
+            def normalize_order_ids(value):
+                if value is None:
+                    return []
+                if isinstance(value, (list, tuple, set)):
+                    items = list(value)
+                else:
+                    items = [value]
+                result = []
+                for item in items:
+                    if item in (None, ""):
+                        continue
+                    if isinstance(item, dict):
+                        oid = (
+                            item.get("id")
+                            or item.get("orderId")
+                            or item.get("order_id")
+                            or item.get("cancel")
+                            or item.get("old")
+                        )
+                        if oid:
+                            result.append(str(oid))
+                    else:
+                        result.append(str(item))
+                return result
+
+            cancel_candidates = normalize_order_ids(
+                dec.get("cancel_orders")
+                or dec.get("cancelOrders")
+                or dec.get("cancel_order_ids")
+            )
+            replace_raw = dec.get("replace_orders") or dec.get("replaceOrders") or dec.get("order_replacements")
+            replace_list = replace_raw if isinstance(replace_raw, list) else ([replace_raw] if isinstance(replace_raw, dict) else [])
+            replacement_orders = []
+            cancelled_ids = set()
+            cancelled_success = []
+            cancel_failures = []
+
+            def try_cancel(order_id: str, source: str):
+                oid = str(order_id)
+                if not oid or oid in cancelled_ids:
+                    return
+                success, err = cancel_order_by_id(ex, sym, oid)
+                if success:
+                    cancelled_ids.add(oid)
+                    cancelled_success.append((oid, source))
+                    log(f"🗑️ Отменён ордер {oid} для {sym} (источник {source})", Fore.LIGHTBLUE_EX)
+                else:
+                    cancel_failures.append((oid, err))
+                    log(f"⚠️ Не удалось отменить ордер {oid} для {sym}: {err}", Fore.YELLOW)
+
+            for oid in cancel_candidates:
+                try_cancel(oid, "cancel_orders")
+
+            for entry in replace_list:
+                if not isinstance(entry, dict):
+                    continue
+                cancel_id = (
+                    entry.get("cancel")
+                    or entry.get("id")
+                    or entry.get("old")
+                    or entry.get("orderId")
+                )
+                if cancel_id:
+                    try_cancel(cancel_id, "replace_orders")
+                new_spec = (
+                    entry.get("order")
+                    or entry.get("new")
+                    or entry.get("replacement")
+                )
+                if new_spec:
+                    if isinstance(new_spec, dict):
+                        replacement_orders.append(new_spec)
+                    elif isinstance(new_spec, list):
+                        replacement_orders.extend([x for x in new_spec if isinstance(x, dict)])
+
+            if replacement_orders:
+                extra_orders.extend(replacement_orders)
+
+            if cancelled_success:
+                summary = ", ".join(oid for oid, _ in cancelled_success)
+                send_trade_update(f"🗑️ Отменены ордера по {sym}: {summary}")
+                # Обновляем список открытых ордеров после отмены
+                open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+            if cancel_failures:
+                errors = "; ".join(f"{oid}: {err}" for oid, err in cancel_failures)
+                send_tg(f"⚠️ Не удалось отменить ордера по {sym}: {errors}")
+
+            if action == "skip":
+                log(f"⏸ Пропуск {sym} ({reason})", Fore.WHITE)
+                send_tg(f"⏸ Пропуск {sym} — {reason or 'причина не указана'}")
+            elif action == "close":
+                if not current_position or abs(float(current_position.get("amount") or 0)) == 0:
+                    log(f"⚠️ Позиция по {sym} отсутствует, нечего закрывать ({reason})", Fore.YELLOW)
+                    send_tg(f"⚠️ {sym}: закрытие пропущено — нет открытой позиции")
+                else:
+                    close_side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
+                    qty = abs(float(current_position.get("amount") or 0))
+                    if qty == 0:
+                        log(f"⚠️ Объём позиции {sym} равен нулю, пропускаем закрытие", Fore.YELLOW)
+                    else:
+                        params = {"reduceOnly": True}
+                        position_idx = get_position_idx(close_side)
+                        if position_idx is not None:
+                            params["positionIdx"] = position_idx
+                        try:
+                            ex.create_order(sym, "market", close_side, qty, None, params)
+                            log(f"🔻 Закрыть позицию {sym} ({reason})", Fore.YELLOW)
+                            send_trade_update(f"🔻 Закрыт {sym} {close_side.upper()} {qty:.4f} — {reason or 'причина не указана'}")
+                            positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_UNIVERSE or None)
+                            current_position = positions_map.get(sym)
+                        except Exception as e:
+                            err_text = str(e)
+                            log(f"❌ Ошибка закрытия {sym}: {err_text}", Fore.RED)
+                            send_tg(f"❌ Ошибка закрытия для {sym}: {err_text}")
+            elif action == "hold":
+                log(f"⏳ Удерживаем {sym} ({reason})", Fore.BLUE)
+                send_tg(f"⏳ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
+            elif action == "open":
+                if current_position and abs(float(current_position.get("amount") or 0)) > 0:
+                    log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
+                    send_tg(f"⚠️ {sym}: позиция уже открыта, сигнал open пропущен")
+                elif MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS:
+                    log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{MAX_OPEN_POSITIONS}), пропускаем {sym}", Fore.YELLOW)
+                    send_tg(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{MAX_OPEN_POSITIONS}), {sym} пропущен")
+                else:
+                    log(f"🟢 Сигнал {side.upper()} ({reason})", Fore.GREEN)
+                    send_trade_update(f"🟢 {sym} {side.upper()} — {reason or 'причина не указана'}")
+                    if df.empty:
+                        log(f"⚠️ Нет данных 30m для {sym}, пропускаем открытие", Fore.YELLOW)
+                        send_tg(f"⚠️ {sym}: недостаточно данных для открытия позиции")
+                        continue
+                    df["atr"] = atr(df,14)
+                    last_row = df.iloc[-1]
+                    price = float(last_row.get("close") or 0)
+                    atrv = float(last_row.get("atr") or 0)
+                    if not (math.isfinite(price) and math.isfinite(atrv) and atrv > 0):
+                        log(f"⚠️ Не удалось рассчитать ATR/цену для {sym}, пропуск сигнала", Fore.YELLOW)
+                        send_tg(f"⚠️ {sym}: нет валидных значений ATR для расчёта размера")
+                        continue
+                    sl = price - SL_ATR * atrv if side == "buy" else price + SL_ATR * atrv
+                    tp = price + TP_ATR * atrv if side == "buy" else price - TP_ATR * atrv
+                    duplicate_order = None
+                    if price > 0:
+                        side_lower = side.lower()
+                        for existing in open_orders_symbol or []:
+                            try:
+                                existing_side = (existing.get("side") or "").lower()
+                                existing_type = (existing.get("type") or "").lower()
+                            except AttributeError:
+                                continue
+                            if existing_side != side_lower:
+                                continue
+                            if existing_type != "limit":
+                                continue
+                            if existing.get("reduceOnly") in (True, "true", "1", 1):
+                                continue
+                            existing_price = existing.get("price")
+                            if not (isinstance(existing_price, (int, float)) and math.isfinite(existing_price)):
+                                continue
+                            if abs(existing_price - price) / price <= 0.0005:
+                                duplicate_order = existing
+                                break
+                    if duplicate_order:
+                        dup_price = duplicate_order.get("price")
+                        log(f"ℹ️ Пропуск лимитного ордера {sym}: уже выставлен {side.upper()} @ {dup_price}", Fore.LIGHTBLACK_EX)
+                        send_tg(f"ℹ️ {sym}: лимит {side.upper()} @ {dup_price} уже активен, новый ордер не размещён")
+                        continue
+                    risk_distance = abs(price - sl)
+                    if risk_distance <= 0 or not math.isfinite(risk_distance):
+                        log(f"⚠️ Невалидная дистанция до SL для {sym}, пропуск сигнала", Fore.YELLOW)
+                        send_tg(f"⚠️ {sym}: не удалось вычислить расстояние до стопа")
+                        continue
+                    risk_budget_base = max(0.0, min(equity, available_margin))
+                    risk_capital = risk_budget_base * RISK_PCT
+                    if risk_capital <= 0:
+                        log(f"⛔ Недостаточно доступной маржи для {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
+                        send_tg(f"⛔ {sym}: недостаточно свободной маржи ({available_margin:.2f} USDT)")
+                        continue
+                    qty = risk_capital / risk_distance
+                    if not math.isfinite(qty) or qty <= 0:
+                        log(f"⚠️ Расчёт объёма дал некорректное значение для {sym}", Fore.YELLOW)
+                        continue
+                    notional = qty * price
+                    if not math.isfinite(notional) or notional <= 0:
+                        log(f"⚠️ Невозможно определить нотионал для {sym}", Fore.YELLOW)
+                        continue
+                    if notional < MIN_NOTIONAL_USDT:
+                        qty = MIN_NOTIONAL_USDT / price
+                        notional = qty * price
+                    effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
+                    max_notional = effective_margin * LEVERAGE
+                    if max_notional <= 0:
+                        log(f"⛔ Доступная маржа для {sym} исчерпана", Fore.YELLOW)
+                        send_tg(f"⛔ {sym}: доступная маржа исчерпана")
+                        continue
+                    if max_notional < MIN_NOTIONAL_USDT:
+                        log(f"⛔ Недостаточно маржи для минимального ордера {sym} (доступно {available_margin:.2f} USDT)", Fore.YELLOW)
+                        send_tg(f"⛔ {sym}: маржа меньше минимального объёма (доступно {available_margin:.2f} USDT)")
+                        continue
+                    if notional > max_notional:
+                        qty = max_notional / price
+                        notional = max_notional
+                        log(f"ℹ️ Объём {sym} уменьшен до {qty:.4f} (~{notional:.2f} USDT) из-за лимита маржи", Fore.LIGHTBLACK_EX)
+                    try:
+                        qty = float(ex.amount_to_precision(sym, qty))
+                    except Exception:
+                        qty = float(round(qty, 8))
+                    if qty <= 0:
+                        log(f"⚠️ После округления объём стал ≤ 0 для {sym}", Fore.YELLOW)
+                        continue
+                    notional = qty * price
+                    if notional < MIN_NOTIONAL_USDT:
+                        log(f"⛔ После округления объём {sym} ниже минимального ({notional:.2f} USDT)", Fore.YELLOW)
+                        send_tg(f"⛔ {sym}: объём после округления ниже минимума ({notional:.2f} USDT)")
+                        continue
+                    try:
+                        ex.set_leverage(LEVERAGE, sym)
+                    except Exception as e:
+                        code = get_bybit_retcode(e)
+                        if code == 110043:
+                            log(f"ℹ️ Плечо {LEVERAGE}x уже установлено для {sym} (код {code})", Fore.LIGHTBLACK_EX)
+                        else:
+                            log(f"⚠️ Ошибка установки плеча: {e}", Fore.YELLOW)
+                    try:
+                        position_idx = get_position_idx(side)
+                        params = {"takeProfit": tp, "stopLoss": sl, "tpSlMode": "Full", "reduceOnly": False}
+                        if position_idx is not None:
+                            params["positionIdx"] = position_idx
+                        margin_required = notional / LEVERAGE if LEVERAGE else notional
+                        ex.create_order(sym, "limit", side, qty, price, params)
+                        log(f"✅ Ордер {sym} {side.upper()} {qty:.4f}@{price:.2f} SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
+                        send_tg(
+                            f"✅ {sym} {side.upper()} @ {price:.2f}\n"
+                            f"SL {sl:.2f} TP {tp:.2f}\n"
+                            f"Объём {notional:.2f} USDT, маржа {margin_required:.2f} USDT"
+                        )
+                        positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_UNIVERSE or None)
+                        current_position = positions_map.get(sym)
+                    except Exception as e:
+                        err_text = str(e)
+                        log(f"❌ Ошибка ордера: {err_text}", Fore.RED)
+                        send_tg(f"❌ Ошибка ордера для {sym}: {err_text}")
+            else:
+                if action not in ("hold", "manage", "none", "", None):
+                    log(f"ℹ️ Неизвестное действие \"{action}\" для {sym}, обработка только дополнительных ордеров", Fore.YELLOW)
+
+            if extra_orders:
+                executed, actions_performed = execute_extra_orders(
+                    ex,
+                    sym,
+                    extra_orders,
+                    current_position=current_position,
+                    open_orders=open_orders_symbol
+                )
+                if executed:
+                    send_trade_update("🛠️ " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
+                if actions_performed:
+                    positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=PAIR_UNIVERSE or None)
+                    current_position = positions_map.get(sym)
+                    open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+
+        except Exception as e:
+            log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
+
+    if decisions_total>0:
+        pct={k:(v/decisions_total)*100 for k,v in counts.items()}
+        summary=f"📈 Статистика: открыто {counts['open']} ({pct['open']:.1f}%), " \
+                f"закрыто {counts['close']} ({pct['close']:.1f}%), " \
+                f"пропуск {counts['skip']} ({pct['skip']:.1f}%) — всего {decisions_total}"
+        log(summary, Fore.CYAN)
+        send_tg(summary)
+    send_tg("✅ Цикл завершён.")
+    equity_end, available_end, _ = fetch_usdt_equity(ex)
+    end_dt = _current_log_time()
+    end_stamp = end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    end_balance_text = f"Баланс: {equity_end:.2f} USDT, доступно {available_end:.2f} USDT"
+    end_banner = f"{'=' * 18} SESSION END {end_stamp} v{BOT_VERSION} {'=' * 18}"
+    log(end_banner, Fore.MAGENTA)
+    log(f"Changelog: {BOT_CHANGELOG}", Fore.MAGENTA)
+    send_tg(f"═══════════ END SESSION {end_stamp} ═══════════")
+    send_tg(f"🏁 {end_balance_text}")
+    send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
+
+if __name__ == "__main__":
+    ensure_version_backup()
+    try:
+        main()
+    except Exception as exc:
+        log(f"Startup failed for version {BOT_VERSION}: {exc}", Fore.RED)
+        traceback.print_exc()
+        try:
+            current_script = Path(__file__).resolve()
+        except (NameError, OSError):
+            raise
+        fallback = _find_previous_version_script(BOT_VERSION, current_script)
+        if not fallback:
+            log("No fallback version available. Exiting.", Fore.RED)
+            raise
+        fallback_version, fallback_path = fallback
+        log(
+            f"Attempting fallback version {fallback_version} from {fallback_path.name}",
+            Fore.YELLOW
+        )
+        exit_code = _run_previous_version_script(fallback_path)
+        if exit_code != 0:
+            log(f"Fallback version exited with code {exit_code}", Fore.RED)
+        sys.exit(exit_code)
+

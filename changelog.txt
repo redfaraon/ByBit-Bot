@@ -1,0 +1,32 @@
+2025.10.16.16B
+- Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
+- Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
+
+2025.10.16.17
+- Loader fallback skips backup builds with trailing "B" (beta).
+- Version value is maintained in CHANGELOG.txt and propagated by loader/impl.
+- Legacy backup files named bybit_intraday_30m_5pairs_v*.py are now detected alongside new bybitbot_v*.py snapshots.
+
+2025.10.16.18
+- Model must nominate symbols/timeframes/indicators directly from news; defaults removed and next_run_minutes requested.
+- Session banners and Telegram announcements now report Equity, Free margin, and unrealised PnL, noting fallback builds when used.
+
+2025.10.17.1
+- Portfolio prompt now shares default scheduling inputs and enforces next_run_minutes so the bot self-reschedules without cron.
+
+2025.10.17.2
+- Restored safe default pools for pairs/indicators/timeframes so the model always gets a tradeable universe with news context.
+- Fallback amount logic ensures model-provided protective orders place even when using percent sizing.
+- Runtime status file records the next scheduled wake-up for monitoring.
+- Automatic universe refresh asks the model for updated default pools using news context.
+- Protective SL/TP/trailing orders are enforced for existing positions if missing.
+- Added manage_update.py to automate scheduled or immediate updates aligned to HH:01 / HH:31 restarts.
+- README rewritten with quick start and cron instructions for manage_update.py workflow.
+- manage_update.py now reads runtime_status.json to restart at the model-planned next_run time when available.
+- Model now receives config_defaults (.env risk/leverage/ATR settings) and can recommend overrides; overrides are sanitized, logged, and applied per-cycle.
+
+2025.10.18.1
+- Portfolio prompt now includes a symbol_configs block so the model can define pair-specific risk and sizing settings.
+- Selection parsing merges symbol_configs into targets and broadcasts the applied per-symbol parameters.
+- Execution layer combines base pair configs with per-decision overrides and logs the effective inputs used for orders.
+- Extra analysis timeout path now returns a safe skip decision immediately to avoid control flow bugs.

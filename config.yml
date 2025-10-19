@@ -1,0 +1,12 @@
+risk_pct: 0.02
+sl_atr: 1.0
+tp_atr: 2.2
+leverage: 7
+reduce_gtt_min: 20
+overheat_rsi_mod: 70
+overheat_rsi_sev: 80
+overheat_atr_mod: 1.4
+overheat_atr_sev: 2.2
+overheat_reduce_mod: 0.2
+overheat_reduce_sev: 0.6
+min_notional_usdt: 5

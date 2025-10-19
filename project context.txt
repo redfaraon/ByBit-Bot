@@ -1,0 +1,9 @@
+Project Overview
+
+Python trading bot for Bybit perpetual futures on 30 m timeframe, optionally using higher TFs; core logic in bybitbot.py.
+Loads env-configured settings (pairs, leverage, risk, OpenAI/Telegram keys), initializes ccxt Bybit client, and fetches OHLCV data with pandas indicators (EMA20/EMA50, RSI14, ATR14).
+AI workflow (ai_decision) calls OpenAI twice (base + optional enriched pass), auto-trims 30 m/4 h contexts to stay under token caps, logs token usage/durations, timestamps each candle, and enriches skip reasons with indicator references.
+Additional data helpers gather higher timeframe candles, funding, open interest, or news stubs; results logged to ai_decisions.log and ai_requests.log with Telegram alerts for context trimming and decision outcomes.
+Run Cycle
+
+main() iterates configured symbols: fetches data, requests AI decision, persists logs, and executes open/close actions via ccxt with ATR-based SL/TP sizing; every action (open/close/skip) sends a Telegram message including the reason.

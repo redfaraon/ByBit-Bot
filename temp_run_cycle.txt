@@ -1,0 +1,16 @@
+def run_cycle():
+    _write_runtime_status(None, None, "running")
+    refresh_settings()
+    log(
+        f"Settings: LEVERAGE={LEVERAGE} RISK_PCT={RISK_PCT} SL_ATR={SL_ATR} TP_ATR={TP_ATR} MAX_OPEN_POSITIONS={MAX_OPEN_POSITIONS}",
+        Fore.LIGHTBLACK_EX
+    )
+    global CHANGELOG_BROADCASTED
+    if not CHANGELOG_BROADCASTED and CHANGELOG_TEXT:
+        changelog_lines = [line.strip() for line in CHANGELOG_TEXT.splitlines() if line.strip()]
+        if changelog_lines:
+            for line in changelog_lines:
+                log(f"Changelog: {line}", Fore.MAGENTA)
+            changelog_msg = "🆕 Changelog v{BOT_VERSION}:\n" + \n                "\n".join(f"- {line}" for line in changelog_lines)
+            send_tg(changelog_msg)
+        CHANGELOG_BROADCASTED = True

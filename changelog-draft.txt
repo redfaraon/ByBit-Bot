@@ -1,0 +1,322 @@
+16.7
+
+1. также добавь номер версии в первые 5 строк кода
+
+2. при вставке в терминал получается 1544 строки хотя в vsc у файла 1526 строк
+16.8
+
+3. при запуске скрипта он создаёт бекап файла (если нет бекапа с этой же версией)
+16.9
+
+4. если не запустилась текущая версия запускать предыдущую
+16.10N
+
+5/ может мы будем в одном запросе передавать несколько монет?
+тогда можно предоставить модели выбрать какие именно монеты ей отдать и сколько.
+16.11
+
+6/ также можно добавить ещё индикаторов и их параметры в допзапрос - пусть модель сама скажет какие
+16.12
+
+[2025-10-16 11:00:28 EDT UTC-04:00] ❌ Ошибка доп. ордера #1 для BTC/USDT:USDT: bybit {"retCode":110007,"retMsg":"ab not enough for new order","result":{},"retExtInfo":{},"time":1760626828418}
+[2025-10-16 11:00:28 EDT UTC-04:00] ❌ Ошибка доп. ордера #2 для BTC/USDT:USDT: [<class 'decimal.ConversionSyntax'>]
+[2025-10-16 11:00:28 EDT UTC-04:00] ❌ Ошибка доп. ордера #3 для BTC/USDT:USDT: [<class 'decimal.ConversionSyntax'>]
+[2025-10-16 11:01:07 EDT UTC-04:00] ❌ Ошибка доп. ордера #2 для XRP/USDT:USDT: bybit stop/trigger orders require a triggerDirection parameter, either "ascending" or "descending" to determine the direction of the trigger.
+[2025-10-16 20:00:37 UTC+03:00] ❌ Ошибка доп. ордера #1 для ETH/USDT:USDT: bybit amount of ETH/USDT:USDT must be greater than minimum amount precision of 0.01
+[2025-10-16 20:01:15 UTC+03:00] ❌ Ошибка ордера: bybit amount of BTC/USDT:USDT must be greater than minimum amount precision of 0.001
+[2025-10-16 20:01:16 UTC+03:00] ❌ Ошибка доп. ордера #1 для BTC/USDT:USDT: bybit {"retCode":110007,"retMsg":"ab not enough for new order","result":{},"retExtInfo":{},"time":1760634076249}
+[2025-10-16 20:01:16 UTC+03:00] ❌ Ошибка доп. ордера #2 для BTC/USDT:USDT: bybit stop/trigger orders require a triggerDirection parameter, either "ascending" or "descending" to determine the direction of the trigger.
+[2025-10-16 20:01:16 UTC+03:00] ❌ Ошибка доп. ордера #3 для BTC/USDT:USDT: bybit {"retCode":110017,"retMsg":"current position is zero, cannot fix reduce-only order qty","result":{},"retExtInfo":{},"time":1760634076449}
+
+не менять версию в двух местах
+
+показывать баланс в начале и конце тг сообщений
+16,13
+
+mention только когда меняется что-то в байбит (ордер, стоп, тп, трейлинг)
+
+сделать жирное разделение сессий в логах (в начале или конце, также выводить туда версию и чейнджлог)
+16.14
+
+больше торговых пар и индикаторов
+
+после допзапроса на 1ч тф данные не предоставлены
+
+START SESSION 2025-10-16 14:00:12 - UTC+3
+
+TG: ❌ Ошибка ордера для BTC/USDT:USDT: bybit amount of BTC/USDT:USDT must be greater than minimum amount precision of 0.001
+LOG: [2025-10-16 21:00:48 UTC+03:00] ❌ Ошибка ордера: bybit amount of BTC/USDT:USDT must be greater than minimum amount precision of 0.001
+[2025-10-16 21:00:48 UTC+03:00] Ошибка BTC/USDT:USDT: name 'to_float' is not defined
+Traceback (most recent call last):
+  File "/home/vhizqfra/bybitbot/bybit_intraday_30m_5pairs.py", line 2367, in main
+    executed, actions_performed = execute_extra_orders(
+                                  ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/bybitbot/bybit_intraday_30m_5pairs.py", line 1347, in execute_extra_orders
+    amount_min = to_float(amount_limits.get("min")) if isinstance(amount_limits, dict) else None
+                 ^^^^^^^^
+NameError: name 'to_float' is not defined
+16,15
+
+если бот пару не выбрал но у неё есть открытая позиция или ордер то по ней тоже надо запросить действие
+16,16B
+
+  File "/home/vhizqfra/bybitbot/bybit_intraday_30m_5pairs.py", line 12
+    "   bybitbot.py:20-24 теперь объявляет заготовки PAIR_UNIVERSE, INDICATOR_POOL, DEFAULT_TIMEFRAMES, которые заполняются в refresh_settings() (см. bybitbot.py:768-806). Эти списки объединяются с настройками из .env, так что портфельная стадия может выбрать пары
+    ^
+SyntaxError: unterminated string literal (detected at line 12)
+
+2/ если файл не запустился то должен был запуститься бекап предыдущей версии
+16.17HF
+
+баланс 64,86 но это не эквити (маржин баланс) - выводить эквити + текущий профит (нереализованный PnL)
+16.18R
+
+мы не должны предоставлять модели какие-то "дефолтные" пары или индикаторы или таймфреймы - мы должны попросить самой назначить их нам на основе новостей
+
+период следующего запуска определяет модель
+17.1R
+
+нет tp/sl у маркет ордера
+[2025-10-17 01:02:01 UTC+03:00] ⛔ Лимит открытых позиций достигнут (4/4), пропускаем XRP/USDT:USDT
+[2025-10-17 01:02:02 UTC+03:00] 🛠️ Доп. ордер для XRP/USDT:USDT: MARKET SELL 0.1
+[2025-10-17 01:02:02 UTC+03:00] ⚠️ Не удалось определить объём ордера #2 для XRP/USDT:USDT
+[2025-10-17 01:02:02 UTC+03:00] ⚠️ Не удалось определить объём ордера #3 для XRP/USDT:USDT
+{
+  "action": "open",
+  "side": "sell",
+  "confidence": 75,
+  "reason": "На 30m и 4h доминирует нисходящий тренд по EMA20/EMA50, RSI на 30m около 37-45, на 4h около 43, что не является экстремумом. ATR на 30m и 4h умеренный, без резких всплесков. Дополнительные данные funding и open_interest не противоречат нисходящему тренду. Новости нейтрально-слегка негативные, что поддерживает осторожный шорт. Риск умеренный, размер позиции около 15% от капитала с учетом плеча 7x.",
+  "orders": [
+    {
+      "type": "market",
+      "side": "sell",
+      "amount": 0.15,
+      "params": {
+        "leverage": 7
+      }
+    },
+    {
+      "type": "stop",
+      "side": "buy",
+      "amountPercent": 100,
+      "price": 2.4086,
+      "params": {
+        "reduceOnly": true
+      },
+      "note": "стоп-лосс по уровню EMA20 30m с ATR 1.0"
+    },
+    {
+      "type": "limit",
+      "side": "buy",
+      "amountPercent": 100,
+      "price": 2.3066,
+      "params": {
+        "reduceOnly": true
+      },
+      "note": "тейк-профит по уровню поддержки и TP ATR 2.2"
+    }
+  ]
+}
+если позиция активна и без tp/sl то они не добавляются
+
+плечо в настройках 5 но сделки открываются с плечом 7
+
+====17,2R
+
+индивидуальные настройки для каждой пары или позиции - их задаёт модель
+
+====================18,1Р
+
+changelog выводить только один раз, в дальнейшем при клике на номер версии переходить на сообщение с чейнджлогом
+
+[2025-10-16 23:11:26 UTC+03:00] Ошибка DOGE/USDT:USDT: Request timed out.
+Traceback (most recent call last):
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_transports/default.py", line 250, in handle_request
+    resp = self._pool.handle_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
+    raise exc from None
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
+    response = connection.handle_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/connection.py", line 103, in handle_request
+    return self._connection.handle_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/http11.py", line 136, in handle_request
+    raise exc
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/http11.py", line 106, in handle_request
+    ) = self._receive_response_headers(**kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/http11.py", line 177, in _receive_response_headers
+    event = self._receive_event(timeout=timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_sync/http11.py", line 217, in _receive_event
+    data = self._network_stream.read(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_backends/sync.py", line 126, in read
+    with map_exceptions(exc_map):
+  File "/opt/alt/python311/lib64/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadTimeout: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_base_client.py", line 982, in request
+    response = self._client.send(
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_client.py", line 914, in send
+    response = self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_transports/default.py", line 249, in handle_request
+    with map_httpcore_exceptions():
+  File "/opt/alt/python311/lib64/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadTimeout: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/vhizqfra/bybitbot/bybit_intraday_30m_5pairs.py", line 2281, in main
+    dec = ai_decision(
+          ^^^^^^^^^^^^
+  File "/home/vhizqfra/bybitbot/bybit_intraday_30m_5pairs.py", line 2106, in ai_decision
+    res2 = client.chat.completions.create(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_utils/_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/resources/chat/completions/completions.py", line 1156, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_base_client.py", line 1000, in request
+    raise APITimeoutError(request=request) from err
+openai.APITimeoutError: Request timed out.
+
+убери https://cryptopanic.com/ из вендоров, если надо добавь других
+
+[2025-10-16 22:31:41 UTC+03:00] ❌ Ошибка доп. ордера #1 для BTC/USDT:USDT: bybit {"retCode":110007,"retMsg":"ab not enough for new order","result":{},"retExtInfo":{},"time":1760643101066}
+[2025-10-16 22:31:41 UTC+03:00] ❌ Ошибка доп. ордера #2 для BTC/USDT:USDT: [<class 'decimal.ConversionSyntax'>]
+[2025-10-16 22:31:41 UTC+03:00] ❌ Ошибка доп. ордера #3 для BTC/USDT:USDT: [<class 'decimal.ConversionSyntax'>]
+
+102к токенов в запросе пар
+
+портфель на русском
+
+трейлинги? несколько ТП
+
+PnL0 Эквити не правильно?
+
+[2025-10-17 02:30:43 UTC+03:00] Ошибка BTC/USDT:USDT: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
+Traceback (most recent call last):
+  File "/home/vhizqfra/bybitbot/bybitbot_impl.py", line 2330, in main
+    dec = ai_decision(
+          ^^^^^^^^^^^^
+  File "/home/vhizqfra/bybitbot/bybitbot_impl.py", line 1964, in ai_decision
+    res = client.chat.completions.create(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_utils/_utils.py", line 286, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/resources/chat/completions/completions.py", line 1156, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/vhizqfra/.local/lib/python3.11/site-packages/openai/_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
+
+если лимит позиций достигнут то нечего мучить модель
+
+сделай обновление версии по крону или ручным скриптом
+если скрипт ручной он обновляет в ХХ:31 или XX:01 либо обновляет немедленно но следующая сессия проходит в уже запланированное время
+возможно эта же версия будет проверять обновление и обновляться сама в момент начала торговли
+
+проверить установку/замену доп ордеров - не закрывают ли они позицию
+
+модель запросила контекст но мы его не отдали
+{
+  "needs": [
+    "funding",
+    "open_interest",
+    "news",
+    {
+      "timeframes": [
+        "1h"
+      ],
+      "indicators": [
+        {
+          "indicator": "ema",
+          "length": 55
+        },
+        "atr14"
+      ]
+    }
+  ],
+  "action": "skip",
+  "reason": "Тренды 30m и 4h нисходящие по EMA20/EMA50, RSI 30m около 26-34 (низкий), RSI 4h около 30 (низкий), но ATR 4h резко вырос (0.1599), что указывает на высокую волатильность и неопределенность. Требуется дополнительный анализ по funding, open_interest, новостям и 1h таймфрейму с EMA55 и ATR14 для уточнения сигнала."
+}
+🤖 Модель запросила контекст для XRP/USDT:USDT: ['funding', 'open_interest', 'news', {'timeframes': ['1h'], 'indicators': [{'indicator': 'ema', 'length': 55}, 'atr14']}]
+✂️ контекст обрезан (hard/soft) до 16×30m и 12×4h из-за лимита (16933 токенов, этап: initial) для BTC/USDT:USDT
+
+доп ордера ставятся и сразу исполняются? -допордер слишком близко, профита нет (минимальный профит съедает комиссия)
+
+модель рекомендует удерживать позицию но при установке ордеров она закрывается
+🎯 Портфель: Market shows mixed signals: XRP supported by large treasury buy and near exhaustion; ETH positive developer and sentiment news; BTC under pressure with ETF outflows and volatility spike. Balanced exposure advised.
+✂️ контекст обрезан (hard/soft) до 16×30m и 12×4h из-за лимита (17460 токенов, этап: initial) для XRP/USDT:USDT
+⏳ XRP/USDT:USDT: удерживаем позицию — Позиция short уже открыта. Тренд на 30m и 4h нисходящий (EMA20 < EMA50), RSI на 30m около 30-50, на 4h около 29-38, что не в экстремумах. ATR на 30m и 4h не показывает резкого роста, но цена близка к поддержке. Есть открытые стоп-ордера на закрытие позиции по цене 2.1726 и 2.2654, что покрывает риск. Рекомендуется удерживать позицию, не открывать новую, не менять ордера без новых сигналов.
+🗑️ XRP/USDT:USDT: отменены ордера 927e911a-54a8-4c97-b3a3-4a649c7d9e32 перед заменой
+⚠️ XRP/USDT:USDT: ошибки отмены ордеров — 1485b98e-1c3c-426d-8293-1f1ba5b3104a: bybit {"retCode":110001,"retMsg":"order not exists or too late to cancel","result":{},"retExtInfo":{},"time":1760694587625}
+🛡️ XRP/USDT:USDT: авто-защита позиции
+- LIMIT BUY 38.3 @ 2.2986
++
+модель пытается открыть позицию но она тут же закрывается
+✂️ контекст обрезан (hard/soft) до 16×30m и 12×4h из-за лимита (16913 токенов, этап: initial) для BTC/USDT:USDT
+🤖 Модель запросила контекст для BTC/USDT:USDT: {'higher_tf': 'higher_tf:1h', 'funding': True, 'open_interest': True, 'news': True}
+✅ Контекст собран для BTC/USDT:USDT:
+higher_tf: 4h=60
+funding: текущая ставка 0.0021%
+open_interest: 24 записей
+news: RSS 3 записей по BTC
+🧩 Второй проход завершён для BTC/USDT:USDT
+🟢 BTC/USDT:USDT SELL — На 30m и 4h доминирует нисходящий тренд: EMA20 ниже EMA50, наклон EMA20 отрицательный. RSI на 30m около 24-29, на 4h около 27-37, не в экстремумах, что допускает вход по тренду. ATR на 30m и 4h не превышает средний уровень ×1.8, волатильность умеренная. Объемы и open interest стабильны, новости негативные (отток из ETF, рост волатильности), что поддерживает медвежий настрой. Следуем доминирующему тренду с умеренным риском, размер позиции около 20% от капитала с плечом 7. Стоп-лосс ставим на 1 ATR выше локального максимума, тейк-профит на 2.2 ATR ниже входа.
+✅ BTC/USDT:USDT SELL @ 104950.00
+SL 105638.50 TP 103435.29
+Объём 209.90 USDT, маржа 29.99 USDT
+🛠️ BTC/USDT:USDT доп. ордера:
+- LIMIT BUY 0.002 @ 107500.0 — тейк-профит на 2.2 ATR (около 1230) ниже входа
++
+при установке допордера позиция закрывается - из-за того что ордер противоположный
+
+проверить json input - свечи, индикаторы, пары, дефолты
+
+bybit.log перестал писаться
+
+ставить ордер в позицию а не отдельный лимит - чтобы не тратить маржу
+
+📈 Статистика: открыто 0 (0.0%), закрыто 0 (0.0%), пропуск 0 (0.0%) — всего 3
+пропуск это удержание? должно быть тогда 3, либо добавь удержание
+
+периодическое изменение дефолтных пар, индикаторов, таймфреймов и параметров
+
+разбить большие файлы на более мелкие
