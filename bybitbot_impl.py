@@ -1010,8 +1010,8 @@ def refresh_settings():
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
-    AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1")
-    AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4.1-mini"))
+    AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4o-mini"))
     try:
         AI_MODEL_THRESHOLD = int(os.getenv("OPENAI_MODEL_CHEAP_THRESHOLD", "5"))
     except (TypeError, ValueError):
@@ -1869,8 +1869,8 @@ def _safe_round(value: Optional[float], digits: int = 8) -> Optional[float]:
     return round(float(value), digits)
 
 
-def _protection_orders_signature(orders) -> tuple:
-    snapshot: list[tuple[Any, ...]] = []
+def _extract_protection_orders(orders) -> list[dict[str, Any]]:
+    extracted: list[dict[str, Any]] = []
     for order in orders or []:
         if not isinstance(order, dict):
             continue
@@ -1879,6 +1879,110 @@ def _protection_orders_signature(orders) -> tuple:
                 continue
         except AttributeError:
             continue
+        extracted.append(order)
+    return extracted
+
+
+def _categorize_protection_orders(orders) -> dict[str, list[tuple]]:
+    summary: dict[str, list[tuple]] = {"stop": [], "take_profit": [], "trailing": []}
+    for order in _extract_protection_orders(orders):
+        order_type = (order.get("type") or "").lower()
+        amount_val = safe_float(
+            order.get("remaining") or order.get("leavesQty") or order.get("amount")
+        )
+        amount_round = _safe_round(amount_val, 6)
+        trailing_val = safe_float(order.get("trailingStop"))
+        stop_price = safe_float(
+            order.get("stopPrice") or order.get("triggerPrice") or order.get("stopLoss")
+        )
+        take_price = safe_float(
+            order.get("price")
+            or order.get("takeProfit")
+            or order.get("tp")
+        )
+        if _has_trailing_flag(order):
+            summary["trailing"].append((_safe_round(trailing_val, 6), amount_round))
+        elif _has_stop_flag(order):
+            summary["stop"].append((_safe_round(stop_price, 6), amount_round))
+        else:
+            if take_price is None and order_type not in ("takeprofit", "take_profit"):
+                take_price = stop_price if stop_price is not None else trailing_val
+            summary["take_profit"].append((_safe_round(take_price, 6), amount_round))
+    for key in summary:
+        summary[key].sort()
+    return summary
+
+
+def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
+    changes: list[str] = []
+    initial_summary = _categorize_protection_orders(initial_orders)
+    final_summary = _categorize_protection_orders(final_orders)
+
+    spec = {
+        "stop": {
+            "label": "СЛ",
+            "changed": "изменены СЛ",
+            "added": "добавлено СЛ",
+            "removed": "убрано СЛ",
+        },
+        "take_profit": {
+            "label": "ТП",
+            "changed": "изменены ТП",
+            "added": "добавлено ТП",
+            "removed": "убрано ТП",
+        },
+        "trailing": {
+            "label": "трейлинг",
+            "changed": "изменён трейлинг",
+            "added": "добавлен трейлинг",
+            "removed": "убран трейлинг",
+            "added_plural": "добавлено трейлинг: {}",
+            "removed_plural": "убрано трейлинг: {}",
+            "changed_plural": "изменены трейлинги",
+        },
+    }
+
+    for key, meta in spec.items():
+        init_list = initial_summary.get(key, [])
+        final_list = final_summary.get(key, [])
+        diff = len(final_list) - len(init_list)
+        if diff > 0:
+            if key == "trailing":
+                if diff == 1:
+                    changes.append(meta["added"])
+                else:
+                    plural_text = meta.get("added_plural")
+                    if plural_text:
+                        changes.append(plural_text.format(diff))
+                    else:
+                        changes.append(f"добавлено {meta['label']}: {diff}")
+            else:
+                changes.append(f"{meta['added']}: {diff}")
+        elif diff < 0:
+            diff_abs = abs(diff)
+            if key == "trailing":
+                if diff_abs == 1:
+                    changes.append(meta["removed"])
+                else:
+                    plural_text = meta.get("removed_plural")
+                    if plural_text:
+                        changes.append(plural_text.format(diff_abs))
+                    else:
+                        changes.append(f"убрано {meta['label']}: {diff_abs}")
+            else:
+                changes.append(f"{meta['removed']}: {diff_abs}")
+        else:
+            if init_list != final_list and init_list and final_list:
+                if key == "trailing":
+                    changes.append(meta["changed"] if len(init_list) == 1 else meta.get("changed_plural", meta["changed"]))
+                else:
+                    changes.append(meta["changed"])
+    return changes
+
+
+def _protection_orders_signature(orders) -> tuple:
+    snapshot: list[tuple[Any, ...]] = []
+    for order in _extract_protection_orders(orders):
         side = (order.get("side") or "").lower()
         order_type = (order.get("type") or "").lower()
         price = _safe_round(safe_float(order.get("price")))
@@ -3163,6 +3267,7 @@ def run_cycle():
                     log(f"⚠️ Не удалось получить открытые ордера для {sym}: {fetch_exc}", Fore.YELLOW)
                     open_orders_symbol = []
                 open_orders_prefetch[sym] = open_orders_symbol
+            initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
             dec = ai_decision(
                 sym,
@@ -3492,6 +3597,7 @@ def run_cycle():
             )
             if final_position_amount is None or not math.isfinite(final_position_amount):
                 final_position_amount = 0.0
+            final_protection_orders = _extract_protection_orders(open_orders_symbol)
             final_protection_signature = _protection_orders_signature(open_orders_symbol)
             protection_changed = initial_protection_signature != final_protection_signature
             amount_diff = abs(final_position_amount - initial_position_amount)
@@ -3510,16 +3616,20 @@ def run_cycle():
                 elif action == "manage":
                     detail_entry = f"[{sym}] - держим позицию ({'меняли ордера' if orders_activity else 'ордера без изменений'})"
                 elif action in ("hold", "none"):
-                    if protection_changed or position_changed:
-                        change_parts: list[str] = []
-                        if protection_changed:
-                            change_parts.append("обновлены стоп/профит")
-                        if position_changed:
-                            change_parts.append("объём изменён")
-                        change_note = ", ".join(change_parts) if change_parts else "есть изменения"
-                        detail_entry = f"[{sym}] - держим позицию ({change_note})"
-                    else:
-                        detail_entry = None
+                    change_parts: list[str] = []
+                    if position_changed:
+                        if final_position_amount > initial_position_amount:
+                            change_parts.append("объём увеличен")
+                        elif final_position_amount < initial_position_amount:
+                            change_parts.append("объём уменьшен")
+                    protection_changes = _describe_protection_changes(
+                        initial_protection_orders,
+                        final_protection_orders,
+                    )
+                    change_parts.extend(protection_changes)
+                    if not change_parts:
+                        change_parts.append("без изменений")
+                    detail_entry = f"[{sym}] - держим позицию ({', '.join(change_parts)})"
                 elif action == "skip":
                     detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
                 else:
