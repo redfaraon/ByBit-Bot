@@ -1374,7 +1374,7 @@ def simplify_order(order):
     }
 
 
-def fetch_open_orders_for_symbol(exchange, symbol, limit=10):
+def fetch_open_orders_for_symbol(exchange, symbol, limit: int | None = 50):
     has_attr = getattr(exchange, "has", {})
     if isinstance(has_attr, dict) and not has_attr.get("fetchOpenOrders", False):
         return []
@@ -1386,7 +1386,7 @@ def fetch_open_orders_for_symbol(exchange, symbol, limit=10):
     simplified = []
     for order in raw_orders:
         simplified.append(simplify_order(order))
-        if len(simplified) >= limit:
+        if limit and len(simplified) >= limit:
             break
     return simplified
 
@@ -1922,7 +1922,10 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     sl_mult = cfg.get("sl_atr", SL_ATR)
     tp_mult = cfg.get("tp_atr", TP_ATR)
     trailing_mult = cfg.get("trailing_atr_mult", TRAILING_ATR_MULT)
-    reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
+    reduce_orders_source = open_orders or []
+    if not reduce_orders_source:
+        reduce_orders_source = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
+    reduce_orders = [order for order in reduce_orders_source if isinstance(order, dict)]
     position_qty = abs(position_amount)
     cancelled_stop_ids, cancel_stop_errors = _cleanup_redundant_stop_orders(
         exchange,
@@ -1941,7 +1944,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         log(f"⚠️ {symbol}: не удалось удалить часть стоп-ордеров: {details}", Fore.YELLOW)
         send_tg(f"⚠️ {symbol}: ошибка при удалении стоп-ордеров: {details}")
     if cancelled_stop_ids or cancel_stop_errors:
-        open_orders = fetch_open_orders_for_symbol(exchange, symbol)
+        open_orders = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
         reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
 
     has_stop = False
@@ -3407,7 +3410,7 @@ def run_cycle():
             )
             if amount_val is not None and math.isfinite(amount_val) and abs(amount_val) > 0:
                 continue
-            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_cleanup)
+            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_cleanup, limit=200)
             if not orders_snapshot:
                 continue
             to_cancel_ids = []
@@ -3415,8 +3418,6 @@ def run_cycle():
                 if not isinstance(order, dict):
                     continue
                 if not _is_reduce_only(order):
-                    continue
-                if not (_has_stop_flag(order) or _has_trailing_flag(order)):
                     continue
                 oid = order.get("id")
                 if oid:
@@ -3432,7 +3433,7 @@ def run_cycle():
                     cleanup_failures.append((sym_cleanup, oid, err))
             if cancelled_here:
                 cleanup_cancelled[sym_cleanup] = cancelled_here
-                open_orders_cache[sym_cleanup] = fetch_open_orders_for_symbol(ex, sym_cleanup)
+                open_orders_cache[sym_cleanup] = fetch_open_orders_for_symbol(ex, sym_cleanup, limit=200)
     if cleanup_cancelled:
         for sym_cleanup, ids in cleanup_cancelled.items():
             summary = ", ".join(ids)
