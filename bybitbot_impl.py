@@ -1732,47 +1732,7 @@ def get_news_from_rss(base_symbol: str, limit: int):
 def get_news(symbol):
     base = symbol.split("/")[0].split(":")[0].upper()
     limit = max(1, NEWS_ITEMS_LIMIT)
-    if NEWS_API_TOKEN:
-        params = {
-            "auth_token": NEWS_API_TOKEN,
-            "currencies": base,
-            "kind": NEWS_API_KINDS,
-            "filter": NEWS_API_FILTER,
-            "public": "true"
-        }
-        try:
-            resp = requests.get(NEWS_API_ENDPOINT, params=params, timeout=6)
-            resp.raise_for_status()
-            payload = resp.json()
-            entries = payload.get("results") or payload.get("data") or []
-            news_items = []
-            for entry in entries:
-                if len(news_items) >= limit:
-                    break
-                title = entry.get("title") or entry.get("headline")
-                url = entry.get("url")
-                source = (entry.get("source") or {}).get("title") if isinstance(entry.get("source"), dict) else entry.get("source")
-                published = entry.get("published_at") or entry.get("created_at") or entry.get("timestamp")
-                news_items.append({
-                    "title": title,
-                    "url": url,
-                    "source": source,
-                    "kind": entry.get("kind"),
-                    "published_at": to_iso_utc(published)
-                })
-            if news_items:
-                latest = news_items[0].get("published_at")
-                summary = f"{len(news_items)} новостей CryptoPanic, последняя {latest}"
-                return {"summary": summary, "items": news_items, "asset": base, "source": "cryptopanic"}
-            log(f"ℹ️ CryptoPanic не вернул новости для {symbol}, используем RSS", Fore.LIGHTBLACK_EX)
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response else None
-            color = Fore.LIGHTBLACK_EX if status and status >= 500 else Fore.YELLOW
-            status_text = f"HTTP {status}" if status else "HTTP error"
-            log(f"⚠️ CryptoPanic недоступен для {symbol}: {status_text} — {e}", color)
-        except Exception as e:
-            log(f"⚠️ CryptoPanic недоступен для {symbol}: {e}", Fore.YELLOW)
-    # Fallback to RSS
+    log("[INFO] Using RSS feeds only for news.", Fore.LIGHTBLACK_EX)
     return get_news_from_rss(base, limit)
 
 # --- Подключение к бирже ---
