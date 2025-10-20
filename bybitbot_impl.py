@@ -393,7 +393,7 @@ def _build_news_digest(symbols):
                 "items": items[: max(1, min(len(items), 3))]
             }
         except Exception as exc:
-            log(f"?? ��?���?�>�?���?��'�?�? �����?�?�?�? news ��� {sym}: {exc}", Fore.YELLOW)
+            log(f"[WARN] Failed to fetch news headlines for {sym}: {exc}", Fore.YELLOW)
     return digest
 
 
@@ -488,7 +488,7 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
             df[col] = 100 * (df["close"] - low_min) / (high_max - low_min).replace(0, pd.NA)
             return col
     except Exception as exc:
-        log(f"?? ��?���?�>�?���?��'�?�? �����?�?�?�? indicator {indicator_name}: {exc}", Fore.YELLOW)
+        log(f"[WARN] Failed to apply indicator {indicator_name}: {exc}", Fore.YELLOW)
     return None
 
 
@@ -760,7 +760,7 @@ def _shrink_bundle_for_tokens(bundle, max_bars=60):
 
 def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
     if not AI_KEY:
-        log("?? �?�� �?��������? OPENAI_API_KEY (stage plan)", Fore.RED)
+        log("⚠️ Не указан OPENAI_API_KEY (stage plan)", Fore.RED)
         return None
     client = OpenAI(api_key=AI_KEY, timeout=20)
     payload = {
@@ -935,10 +935,10 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         if success:
             cancelled_ids.add(oid)
             cancelled_success.append((oid, source))
-            log(f"?? �?'�?�?�?�?�? ��?��?�< {oid} {sym} (source={source})", Fore.LIGHTBLUE_EX)
+            log(f"?? —?'—?—?—?—?—? ——?——?—< {oid} {sym} (source={source})", Fore.LIGHTBLUE_EX)
         else:
             cancel_failures.append((oid, err))
-            log(f"?? �� ��?���?�>�?���?��'�?�? ��?��?�< {oid} {sym}: {err}", Fore.YELLOW)
+            log(f"⚠️ Не удалось отменить ордер {oid} {sym}: {err}", Fore.YELLOW)
 
     for oid in cancel_candidates:
         try_cancel(oid, "cancel_orders")
@@ -960,7 +960,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
 
     if cancel_failures:
         errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_failures)
-        send_tg(f"{sym}: �� ��?���?�>�?���?��'�?�? ��?��?�< {errs}")
+        send_tg(f"{sym}: не удалось отменить ордера: {errs}")
 
     if replacement_orders:
         extra_orders.extend(replacement_orders)
@@ -974,7 +974,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             open_orders=open_orders_symbol,
         )
         if executed:
-            send_tg(f"{sym}: �?�?�?��? выполнил:\n- " + "\n- ".join(executed))
+            send_tg(f"{sym}: —?—?—?——? выполнил:\n- " + "\n- ".join(executed))
         if actions_performed:
             positions_map, _ = fetch_positions_snapshot(exchange, symbols_filter=[sym])
             current_position = positions_map.get(sym)
@@ -2972,7 +2972,7 @@ def ai_decision(
                     tf_key = (tf or "").strip().lower()
                     mapped_tf = tf_alias.get(tf_key, tf_key or "4h")
                     try:
-                        higher_payload = get_higher_tf(exchange, symbol, mapped_tf or "4h")
+                        higher_payload = get_higher_tf(exchange, symbol, mapped_tf or "1h")
                     except Exception as exc_ht:
                         dataset.setdefault("errors", []).append(f"needs higher_tf({mapped_tf}): {exc_ht}")
                         continue
