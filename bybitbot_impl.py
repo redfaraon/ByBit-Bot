@@ -105,6 +105,78 @@ for alias, target in SYMBOL_ALIASES.items():
     PAIR_TICKER_MAP.setdefault(target, target.split("/")[0].split(":")[0].upper())
 
 
+TIMEFRAME_NORMALIZATION_MAP = {
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "45m": "45m",
+    "60m": "1h",
+    "60": "1h",
+    "1h": "1h",
+    "1hr": "1h",
+    "1hour": "1h",
+    "1hours": "1h",
+    "2h": "2h",
+    "120m": "2h",
+    "4h": "4h",
+    "240m": "4h",
+    "240": "4h",
+    "4hour": "4h",
+    "4hours": "4h",
+    "6h": "6h",
+    "360m": "6h",
+    "12h": "12h",
+    "720m": "12h",
+    "1d": "1d",
+    "24h": "1d",
+    "1440m": "1d",
+    "1440": "1d",
+    "1day": "1d",
+    "30": "30m",
+}
+
+
+def normalize_requested_timeframe(tf_value: Any, default: str = "4h") -> str:
+    """Convert various timeframe spellings into ccxt-friendly identifiers."""
+    if tf_value is None:
+        return default
+    text = str(tf_value).strip()
+    if not text:
+        return default
+    lowered = text.lower().strip()
+    if lowered.startswith("higher_tf"):
+        parts = lowered.split(":", 1)
+        lowered = parts[1] if len(parts) == 2 and parts[1] else lowered.replace("higher_tf", "", 1)
+        lowered = lowered.strip()
+    lowered = lowered.replace(" ", "").replace("-", "")
+    replacements = {
+        "hours": "h",
+        "hour": "h",
+        "hrs": "h",
+        "hr": "h",
+        "minutes": "m",
+        "minute": "m",
+        "mins": "m",
+        "min": "m",
+    }
+    for source, target in replacements.items():
+        if source in lowered:
+            lowered = lowered.replace(source, target)
+    if lowered in TIMEFRAME_NORMALIZATION_MAP:
+        return TIMEFRAME_NORMALIZATION_MAP[lowered]
+    match = re.fullmatch(r'(\d+)([mh])?', lowered)
+    if match:
+        value = int(match.group(1))
+        unit = match.group(2)
+        if unit == "h" or (unit is None and value >= 60 and value % 60 == 0):
+            hours = value if unit == "h" else value // 60
+            return f"{hours}h"
+        if unit == "m" or unit is None:
+            return f"{value}m"
+    return lowered or default
+
 # Подавляем FutureWarning от pandas
 warnings.filterwarnings("ignore", category=FutureWarning)
 init(autoreset=True)
@@ -700,16 +772,19 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                     additional_tf_list = [str(tf) for tf in additional_tf_raw if tf]
                 else:
                     additional_tf_list = [str(additional_tf_raw)]
-            tf_alias = {'1h': '1h', '60m': '1h', '4h': '4h', '240m': '4h'}
-            normalized_extras = []
+            timeframe_requests: list[str] = []
             for tf in additional_tf_list:
-                tf_key = (tf or '').strip().lower()
-                mapped_tf = tf_alias.get(tf_key, tf_key or '4h')
-                normalized_extras.append(mapped_tf)
+                mapped_tf = normalize_requested_timeframe(tf, default="4h")
+                if mapped_tf and mapped_tf not in timeframe_requests:
+                    timeframe_requests.append(mapped_tf)
             raw_timeframes = need.get('timeframes') or []
             if isinstance(raw_timeframes, (str, bytes)):
                 raw_timeframes = [raw_timeframes]
-            requested_timeframes = list(dict.fromkeys([str(tf) for tf in raw_timeframes if tf] + normalized_extras))
+            for tf in raw_timeframes:
+                mapped_tf = normalize_requested_timeframe(tf, default=TIMEFRAME)
+                if mapped_tf and mapped_tf not in timeframe_requests:
+                    timeframe_requests.append(mapped_tf)
+            requested_timeframes = timeframe_requests or [TIMEFRAME]
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
@@ -1909,11 +1984,11 @@ def get_trigger_direction_for_side(side: str) -> str:
     """Return trigger direction flag understood by ccxt/bybit for a closing order."""
     side_lower = (side or "").lower()
     if side_lower == "sell":
-        return "below"
+        return "descending"
     if side_lower == "buy":
-        return "above"
+        return "ascending"
     # Default to trigger on downside to avoid missing protection for long positions.
-    return "below"
+    return "descending"
 
 
 def _resolve_ai_model_for_pairs(pair_count: Optional[int]) -> str:
@@ -2917,9 +2992,14 @@ def ai_decision(
                 tf_values: list[str] = []
                 indicators_requested: list[str] = []
                 if "timeframe" in n and n.get("timeframe"):
-                    tf_values.append(str(n.get("timeframe")))
+                    mapped_tf = normalize_requested_timeframe(n.get("timeframe"), default=TIMEFRAME)
+                    if mapped_tf and mapped_tf not in tf_values:
+                        tf_values.append(mapped_tf)
                 if isinstance(n.get("timeframes"), (list, tuple, set)):
-                    tf_values.extend(str(tf) for tf in n["timeframes"] if tf)
+                    for tf in n["timeframes"]:
+                        mapped_tf = normalize_requested_timeframe(tf, default=TIMEFRAME)
+                        if mapped_tf and mapped_tf not in tf_values:
+                            tf_values.append(mapped_tf)
                 higher_tf_raw = n.get("higher_tf")
                 higher_tf_list: list[str] = []
                 if higher_tf_raw:
@@ -2927,10 +3007,8 @@ def ai_decision(
                         higher_tf_list = [str(tf) for tf in higher_tf_raw if tf]
                     else:
                         higher_tf_list = [str(higher_tf_raw)]
-                tf_alias = {"1h": "1h", "60m": "1h", "4h": "4h", "240m": "4h"}
                 for tf in higher_tf_list:
-                    tf_key = (tf or "").strip().lower()
-                    mapped_tf = tf_alias.get(tf_key, tf_key or "4h")
+                    mapped_tf = normalize_requested_timeframe(tf, default="4h")
                     try:
                         higher_payload = get_higher_tf(exchange, symbol, mapped_tf or "1h")
                     except Exception as exc_ht:
@@ -3029,9 +3107,7 @@ def ai_decision(
                 needs_followup.append(n)
                 continue
             if n.startswith("higher_tf"):
-                tf = n.split(":",1)[1] if ":" in n else "4h"
-                tf_safe = (tf or "4h").strip().lower()
-                mapped_tf = {"1h": "1h", "60m": "1h", "4h": "4h", "240m": "4h"}.get(tf_safe, tf_safe)
+                mapped_tf = normalize_requested_timeframe(n, default="4h")
                 extra.setdefault("higher_tf", {})[mapped_tf] = get_higher_tf(exchange, symbol, mapped_tf or "4h")
             elif n == "funding":
                 extra["funding"] = get_funding_rate(exchange, symbol)
