@@ -1825,6 +1825,79 @@ def get_trigger_direction_for_side(side: str) -> str:
     return "below"
 
 
+def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_side, position_qty, is_long):
+    """Remove surplus reduce-only stop orders that exceed current position coverage."""
+    if (
+        not reduce_orders
+        or position_qty is None
+        or not math.isfinite(position_qty)
+        or position_qty <= 0
+    ):
+        return [], []
+
+    stop_entries: list[dict[str, Any]] = []
+    for order in reduce_orders:
+        if not isinstance(order, dict):
+            continue
+        try:
+            if order.get("reduceOnly") not in (True, "true", "1", 1):
+                continue
+            if (order.get("side") or "").lower() != protection_side:
+                continue
+        except AttributeError:
+            continue
+        order_type = (order.get("type") or "").lower()
+        trigger_price = safe_float(
+            order.get("stopPrice")
+            or order.get("triggerPrice")
+            or order.get("stopLoss")
+        )
+        if order_type not in ("stop", "stoploss", "stop_limit", "stoplimit") and trigger_price is None:
+            continue
+        order_id = order.get("id")
+        if not order_id:
+            continue
+        remaining = safe_float(order.get("remaining") or order.get("leavesQty"))
+        if remaining is None or remaining <= 0:
+            remaining = safe_float(order.get("amount"))
+        if remaining is None or remaining <= 0:
+            continue
+        if trigger_price is None or not math.isfinite(trigger_price):
+            continue
+        stop_entries.append(
+            {
+                "id": str(order_id),
+                "trigger": trigger_price,
+                "amount": remaining,
+            }
+        )
+
+    if len(stop_entries) <= 1:
+        return [], []
+
+    stop_entries.sort(key=lambda item: item["trigger"], reverse=is_long)
+    coverage = 0.0
+    tolerance = max(position_qty * 1e-6, 1e-8)
+    keep_ids: set[str] = set()
+    for entry in stop_entries:
+        keep_ids.add(entry["id"])
+        coverage += entry["amount"]
+        if coverage >= position_qty - tolerance:
+            break
+
+    cancelled_ids: list[str] = []
+    cancel_errors: list[tuple[str, str]] = []
+    for entry in stop_entries:
+        if entry["id"] in keep_ids:
+            continue
+        success, err = cancel_order_by_id(exchange, symbol, entry["id"])
+        if success:
+            cancelled_ids.append(entry["id"])
+        else:
+            cancel_errors.append((entry["id"], err))
+    return cancelled_ids, cancel_errors
+
+
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
     cfg = config or {}
     position_amount = safe_float((position or {}).get("amount"))
@@ -1850,6 +1923,27 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     tp_mult = cfg.get("tp_atr", TP_ATR)
     trailing_mult = cfg.get("trailing_atr_mult", TRAILING_ATR_MULT)
     reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
+    position_qty = abs(position_amount)
+    cancelled_stop_ids, cancel_stop_errors = _cleanup_redundant_stop_orders(
+        exchange,
+        symbol,
+        reduce_orders,
+        protection_side,
+        position_qty,
+        is_long,
+    )
+    if cancelled_stop_ids:
+        summary = ", ".join(cancelled_stop_ids)
+        log(f"✅ {symbol}: удалены лишние стоп-ордера: {summary}", Fore.LIGHTBLUE_EX)
+        send_tg(f"✅ {symbol}: удалены лишние стоп-ордера: {summary}")
+    if cancel_stop_errors:
+        details = "; ".join(f"{oid}: {err}" for oid, err in cancel_stop_errors)
+        log(f"⚠️ {symbol}: не удалось удалить часть стоп-ордеров: {details}", Fore.YELLOW)
+        send_tg(f"⚠️ {symbol}: ошибка при удалении стоп-ордеров: {details}")
+    if cancelled_stop_ids or cancel_stop_errors:
+        open_orders = fetch_open_orders_for_symbol(exchange, symbol)
+        reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
+
     has_stop = False
     has_take = False
     has_trailing = False
@@ -1895,7 +1989,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     else:
         stop_price = price + sl_mult * atrv
         take_price = price - tp_mult * atrv
-    qty = abs(position_amount)
+    qty = position_qty
     if not math.isfinite(qty) or qty <= 0:
         return open_orders or []
     position_idx = get_position_idx(protection_side)
