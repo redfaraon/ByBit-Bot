@@ -1402,6 +1402,28 @@ def fetch_open_orders_for_symbol(exchange, symbol, limit: int | None = 50):
     return simplified
 
 
+def fetch_all_open_orders_grouped(exchange, limit: int | None = None) -> dict[str, list]:
+    has_attr = getattr(exchange, "has", {})
+    if isinstance(has_attr, dict) and not has_attr.get("fetchOpenOrders", False):
+        return {}
+    try:
+        raw_orders = exchange.fetch_open_orders()
+    except Exception as e:
+        log(f"[WARN] Failed to fetch global open orders: {e}", Fore.YELLOW)
+        return {}
+    grouped: dict[str, list] = {}
+    for order in raw_orders or []:
+        symbol = order.get("symbol")
+        if not symbol:
+            continue
+        simplified = simplify_order(order)
+        bucket = grouped.setdefault(symbol, [])
+        bucket.append(simplified)
+        if limit and len(bucket) >= limit:
+            continue
+    return grouped
+
+
 def cancel_order_by_id(exchange, symbol, order_id: str):
     try:
         exchange.cancel_order(order_id, symbol)
@@ -3640,10 +3662,12 @@ def run_cycle():
         except Exception as e:
             log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
 
+    global_open_orders = fetch_all_open_orders_grouped(ex, limit=200)
     cleanup_symbols = sorted(
         set(symbols_sequence)
         | set(order_symbols)
         | {sym for sym, orders in open_orders_cache.items() if orders}
+        | set(global_open_orders.keys())
     )
     cleanup_cancelled = {}
     cleanup_failures = []
@@ -3662,8 +3686,16 @@ def run_cycle():
             )
             if amount_val is not None and math.isfinite(amount_val) and abs(amount_val) > 0:
                 continue
-            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_cleanup, limit=200)
+            orders_snapshot = global_open_orders.get(sym_cleanup)
+            if orders_snapshot is None:
+                orders_snapshot = fetch_open_orders_for_symbol(ex, sym_cleanup, limit=200)
             if not orders_snapshot:
+                continue
+            has_non_reduce_orders = any(
+                isinstance(order, dict) and not _is_reduce_only(order)
+                for order in orders_snapshot
+            )
+            if has_non_reduce_orders:
                 continue
             to_cancel_ids = []
             for order in orders_snapshot:
@@ -3685,7 +3717,9 @@ def run_cycle():
                     cleanup_failures.append((sym_cleanup, oid, err))
             if cancelled_here:
                 cleanup_cancelled[sym_cleanup] = cancelled_here
-                open_orders_cache[sym_cleanup] = fetch_open_orders_for_symbol(ex, sym_cleanup, limit=200)
+                updated_snapshot = fetch_open_orders_for_symbol(ex, sym_cleanup, limit=200)
+                open_orders_cache[sym_cleanup] = updated_snapshot
+                global_open_orders[sym_cleanup] = updated_snapshot
     if cleanup_cancelled:
         for sym_cleanup, ids in cleanup_cancelled.items():
             summary = ", ".join(ids)
