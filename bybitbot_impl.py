@@ -54,8 +54,8 @@ BASE_PAIR_CANDIDATES = [
     "SOL/USDT:USDT",
     "XRP/USDT:USDT",
     "DOGE/USDT:USDT",
-    # "BNB/USDT:USDT",
-    # "LTC/USDT:USDT",
+    "BNB/USDT:USDT",
+    "LTC/USDT:USDT",
     # "ADA/USDT:USDT",
     # "TRX/USDT:USDT",
     # "POL/USDT:USDT",
@@ -611,6 +611,9 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
             if len(summary) > 160:
                 news_digest[sym]["summary"] = summary[:157] + "..."
         messages[1]["content"] = json.dumps(request_payload, ensure_ascii=False)
+    if not _ensure_token_budget(token_estimate, AI_MODEL, "portfolio select"):
+        return None
+    _log_ai_request(AI_MODEL, token_estimate, "portfolio select")
     try:
         res = client.chat.completions.create(
             model=AI_MODEL,
@@ -621,6 +624,7 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
     except Exception as exc:
         log(f"[ERROR] OpenAI portfolio select: {exc}", Fore.RED)
         return None
+    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), "portfolio select")
     try:
         payload = res.choices[0].message.content
     except Exception:
@@ -769,6 +773,9 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
             attempt += 1
             continue
         break
+    if not _ensure_token_budget(token_estimate, AI_MODEL, f"trade plan ({stage})"):
+        return None
+    _log_ai_request(AI_MODEL, token_estimate, f"trade plan ({stage})")
     try:
         res = client.chat.completions.create(
             model=AI_MODEL,
@@ -779,6 +786,7 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
     except Exception as exc:
         log(f"[ERROR] OpenAI trade plan: {exc}", Fore.RED)
         return None
+    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
     content = res.choices[0].message.content
     try:
         return json.loads(content)
@@ -983,7 +991,7 @@ def refresh_settings():
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
-    global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD
+    global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global NEWS_API_TOKEN, NEWS_API_ENDPOINT, NEWS_API_KINDS, NEWS_API_FILTER, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
@@ -1018,6 +1026,11 @@ def refresh_settings():
         AI_MODEL_THRESHOLD = 5
     AI_MODEL_THRESHOLD = max(0, AI_MODEL_THRESHOLD)
     AI_MODEL = AI_MODEL_PRIMARY or AI_MODEL_CHEAP or "gpt-4.1-mini"
+    try:
+        AI_TOKEN_BUDGET_CYCLE = int(os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", "100000"))
+    except (TypeError, ValueError):
+        AI_TOKEN_BUDGET_CYCLE = 100_000
+    AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
@@ -1081,6 +1094,11 @@ AI_REQUESTS_LOG = "ai_requests.log"
 if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
+
+# --- AI token tracking ---
+AI_TOKEN_BUDGET_CYCLE = 100_000
+AI_TOKEN_USAGE_TOTAL = 0
+AI_TOKEN_USAGE_BY_MODEL: dict[str, dict[str, int]] = {}
 
 # --- AI model selection state ---
 AI_MODEL_PRIMARY = ""
@@ -1879,6 +1897,61 @@ def update_ai_model_for_analysis(pair_count: Optional[int]) -> str:
         context = f"{pair_count} symbols" if pair_count is not None else "unknown workload"
         log(f"[AI] Model switched {previous} -> {desired} ({context})", Fore.LIGHTBLACK_EX)
     return AI_MODEL
+
+
+def _init_ai_cycle_usage() -> None:
+    global AI_TOKEN_USAGE_TOTAL, AI_TOKEN_USAGE_BY_MODEL
+    AI_TOKEN_USAGE_TOTAL = 0
+    AI_TOKEN_USAGE_BY_MODEL = {}
+
+
+def _log_ai_request(model: str, estimate: int, context: str) -> None:
+    budget = AI_TOKEN_BUDGET_CYCLE
+    log(
+        f"[AI] {context}: модель {model}, оценка {estimate} токенов (использовано {AI_TOKEN_USAGE_TOTAL}/{budget})",
+        Fore.LIGHTBLACK_EX,
+    )
+
+
+def _ensure_token_budget(estimate: int, model: str, context: str) -> bool:
+    budget = AI_TOKEN_BUDGET_CYCLE
+    if budget and estimate and (AI_TOKEN_USAGE_TOTAL + estimate) > budget:
+        log(
+            f"[AI] Пропуск {context}: лимит {budget} токенов будет превышен (использовано {AI_TOKEN_USAGE_TOTAL}, требуется {estimate})",
+            Fore.YELLOW,
+        )
+        return False
+    return True
+
+
+def _register_ai_usage(model: str, usage: Any, context: str) -> None:
+    if not usage:
+        return
+    prompt_tokens = getattr(usage, "prompt_tokens", None) or 0
+    completion_tokens = getattr(usage, "completion_tokens", None) or 0
+    total_tokens = getattr(usage, "total_tokens", None)
+    if total_tokens is None:
+        total_tokens = prompt_tokens + completion_tokens
+    global AI_TOKEN_USAGE_TOTAL, AI_TOKEN_USAGE_BY_MODEL
+    AI_TOKEN_USAGE_TOTAL += total_tokens
+    stats = AI_TOKEN_USAGE_BY_MODEL.setdefault(
+        model,
+        {"prompt": 0, "completion": 0, "total": 0, "requests": 0},
+    )
+    stats["prompt"] += prompt_tokens
+    stats["completion"] += completion_tokens
+    stats["total"] += total_tokens
+    stats["requests"] += 1
+    log(
+        f"[AI] {context}: {model} prompt={prompt_tokens} completion={completion_tokens} total={total_tokens} "
+        f"(цикл {AI_TOKEN_USAGE_TOTAL}/{AI_TOKEN_BUDGET_CYCLE})",
+        Fore.LIGHTBLACK_EX,
+    )
+    if AI_TOKEN_BUDGET_CYCLE and AI_TOKEN_USAGE_TOTAL > AI_TOKEN_BUDGET_CYCLE:
+        log(
+            f"[AI] Внимание: превышен лимит токенов {AI_TOKEN_BUDGET_CYCLE} (использовано {AI_TOKEN_USAGE_TOTAL})",
+            Fore.YELLOW,
+        )
 
 
 def _safe_round(value: Optional[float], digits: int = 8) -> Optional[float]:
@@ -2703,6 +2776,10 @@ def ai_decision(
 
     messages_init, tokens_init, _ = prepare_messages(stage="initial")
     log(f"ℹ️ Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
+    if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
+        log(f"⚠️ {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
+        return {"symbol": symbol, "action": "skip", "reason": "token budget exceeded"}
+    _log_ai_request(AI_MODEL, tokens_init, f"{symbol} initial decision")
 
     # --- Первый проход ---
     start_init = time.perf_counter()
@@ -2714,6 +2791,7 @@ def ai_decision(
     )
     duration_init = time.perf_counter() - start_init
     log(f"⏱️ OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
+    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
     msg = res.choices[0].message.content
     decision = json.loads(msg)
     needs = decision.get("needs", [])
@@ -2869,6 +2947,11 @@ def ai_decision(
         bias_flag = bool(AI_AFTER_NEEDS_BIAS)
         messages_extra, tokens_extra, _ = prepare_messages(stage="extra", extra=extra, bias=bias_flag)
         log(f"ℹ️ Токены запроса (extra) для {symbol}: {tokens_extra}", Fore.LIGHTBLACK_EX)
+        if not _ensure_token_budget(tokens_extra, AI_MODEL, f"{symbol} extra decision"):
+            log(f"⚠️ {symbol}: пропуск extra-запроса из-за лимита токенов", Fore.YELLOW)
+            decision["needs_followup"] = needs
+            return ensure_skip_reason(decision)
+        _log_ai_request(AI_MODEL, tokens_extra, f"{symbol} extra decision")
         start_extra = time.perf_counter()
         res2 = client.chat.completions.create(
             model=AI_MODEL,
@@ -2878,6 +2961,7 @@ def ai_decision(
         )
         duration_extra = time.perf_counter() - start_extra
         log(f"⏱️ OpenAI extra запрос для {symbol}: {duration_extra:.2f} c", Fore.LIGHTBLACK_EX)
+        _register_ai_usage(AI_MODEL, getattr(res2, "usage", None), f"{symbol} extra decision")
         msg2 = res2.choices[0].message.content
         decision = json.loads(msg2)
         needs_followup = decision.get("needs", [])
@@ -2911,6 +2995,7 @@ def ai_decision(
 def run_cycle():
     _write_runtime_status(None, None, "running")
     refresh_settings()
+    _init_ai_cycle_usage()
     metadata_state = maybe_refresh_metadata()
     if isinstance(metadata_state, dict) and metadata_state.get("reload_required"):
         new_hash = metadata_state.get("current_hash")
@@ -3101,9 +3186,6 @@ def run_cycle():
     selection_next_run = None
     selection_next_time = None
 
-    # -- extra tokens tracking --
-    total_token_usage = 0
-    token_hard_limit_cycle = 100000
     if selection:
         global_timeframes = selection.get("global_timeframes") or []
         global_indicators = selection.get("global_indicators") or []
@@ -3741,6 +3823,15 @@ def run_cycle():
             detail_msg = "\n".join(decisions_details)
             log(detail_msg, Fore.LIGHTBLACK_EX)
             send_tg(detail_msg)
+
+    if AI_TOKEN_USAGE_BY_MODEL:
+        usage_lines = [
+            f"- модель {model}: {stats['total']} токенов (prompt {stats['prompt']}, completion {stats['completion']}, запросов {stats['requests']})"
+            for model, stats in sorted(AI_TOKEN_USAGE_BY_MODEL.items())
+        ]
+        usage_report = "AI токены за цикл:\n" + "\n".join(usage_lines)
+        log(usage_report, Fore.LIGHTBLACK_EX)
+        send_tg(usage_report)
 
     next_delay_minutes = None
     next_run_dt = None
