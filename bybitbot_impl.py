@@ -1828,16 +1828,23 @@ def get_trigger_direction_for_side(side: str) -> str:
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
     cfg = config or {}
     position_amount = safe_float((position or {}).get("amount"))
+    if position_amount is None or not math.isfinite(position_amount):
+        position_amount = safe_float((position or {}).get("contracts"))
+    if position_amount is None or not math.isfinite(position_amount):
+        position_amount = safe_float((position or {}).get("size"))
     if position is None or position_amount is None or not math.isfinite(position_amount) or position_amount == 0:
         return open_orders or []
 
     position_side = (position.get("side") or "").lower()
     if position_side in ("sell", "short"):
         protection_side = "buy"
+        is_long = False
     elif position_side in ("buy", "long"):
         protection_side = "sell"
+        is_long = True
     else:
-        protection_side = "sell" if position_amount > 0 else "buy"
+        is_long = position_amount > 0
+        protection_side = "sell" if is_long else "buy"
 
     sl_mult = cfg.get("sl_atr", SL_ATR)
     tp_mult = cfg.get("tp_atr", TP_ATR)
@@ -1882,9 +1889,15 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         log(f"⚠️ {symbol}: нет валидных значений ATR/цены для защиты позиции", Fore.YELLOW)
         return open_orders or []
 
-    stop_price = price - sl_mult * atrv if position_amount > 0 else price + sl_mult * atrv
-    take_price = price + tp_mult * atrv if position_amount > 0 else price - tp_mult * atrv
+    if is_long:
+        stop_price = price - sl_mult * atrv
+        take_price = price + tp_mult * atrv
+    else:
+        stop_price = price + sl_mult * atrv
+        take_price = price - tp_mult * atrv
     qty = abs(position_amount)
+    if not math.isfinite(qty) or qty <= 0:
+        return open_orders or []
     position_idx = get_position_idx(protection_side)
     base_params = {
         "reduceOnly": True,
