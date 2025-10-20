@@ -2735,6 +2735,8 @@ def run_cycle():
 
     log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
 
+    open_orders_cache = dict(open_orders_prefetch)
+
     selection_universe = available_pairs
     max_positions_reached = MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS
     if max_positions_reached:
