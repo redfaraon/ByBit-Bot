@@ -116,6 +116,7 @@ _LOG_TZ_WARNING_EMITTED = False
 DEFAULT_NEXT_RUN_MINUTES = 28.0
 RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
 CHANGELOG_STATE_FILE = Path(__file__).with_name("changelog_state.json")
+UNIVERSE_CACHE_FILE = Path(__file__).with_name("universe_cache.json")
 
 
 class ProtectionMissingError(RuntimeError):
@@ -543,13 +544,13 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
     return dataset
 
 
-def ai_select_portfolio(exchange, symbols, positions_map, equity, available_margin):
+def ai_update_universe(exchange, symbols, positions_map, equity, available_margin, universe_cache, news_digest=None):
     if not AI_KEY:
-        log("?? �?�� �?��������? OPENAI_API_KEY (stage select)", Fore.RED)
+        log("[AI] OPENAI_API_KEY missing for universe update", Fore.RED)
         return None
     client = OpenAI(api_key=AI_KEY, timeout=15)
-    news_digest = _build_news_digest(symbols)
-    positions_compact = []
+    news_digest = news_digest or _build_news_digest(symbols)
+    positions_compact: list[dict[str, Any]] = []
     for sym in symbols:
         pos = positions_map.get(sym)
         if not pos:
@@ -565,38 +566,21 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
             }
         )
     request_payload = {
-        "available_pairs": symbols,
+        "candidate_pairs": symbols,
         "indicator_candidates": BASE_INDICATOR_CANDIDATES,
         "timeframe_candidates": BASE_TIMEFRAME_CANDIDATES,
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
         "positions": positions_compact,
-        "news_digest": news_digest,
+        "news_headlines": news_digest,
+        "universe_cache": universe_cache or {},
     }
     system_msg = (
-        "Ты выступаешь как риск-нейтральный портфельный управляющий для Bybit интрадей. "
-        "Проанализируй предоставленные пары и новости, выбери сбалансированный набор инструментов "
-        "для торговли на текущую сессию. Ответ должен быть строго в JSON:\n"
-        "{\n"
-        '  "targets": [\n'
-        '    {\n'
-        '      "symbol": "PAIR",\n'
-        '      "notional_pct": float,  # 0..1, суммарно <= 1\n'
-        '      "timeframes": ["30m","4h"],\n'
-        '      "indicators": ["ema20","rsi14"],\n'
-        '      "notes": "краткое обоснование"\n'
-        "    }\n"
-        "  ],\n"
-        '  "global_timeframes": ["30m","4h"],\n'
-        '  "global_indicators": ["atr14"],\n'
-        '  "confidence": "low|medium|high",\n'
-        '  "reason": "краткое описание новостного фона"\n'
-        "}\n"
-        "Если данных недостаточно, верни {\"targets\": [], \"needs\": [\"news\", ...], \"reason\": \"...\"]"
-          "  Допустимые типы ордеров: limit, market, stop, stop_limit, take_profit, stop_loss, trailing_stop. Не используй другие значения orderType.\n"
-        "  Перед отправкой reduce-only убедись, что позиция существует и объём больше нуля.\n"
-        "  Не планируй ордера, если требуемая маржа превышает available_margin_usdt.\n"
-  )
+        "You are an AI portfolio strategist for Bybit. Update the trading universe based on the provided "
+        "candidate pairs, the existing universe cache, and the supplied news headlines. "
+        "Respond strictly in JSON with keys: universe (pairs, global_timeframes, global_indicators, notes), "
+        "targets (per-symbol recommendations), and news_requests (symbols that require full news text)."
+    )
     messages = [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": json.dumps(request_payload, ensure_ascii=False)},
@@ -618,14 +602,11 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
             token_estimate = estimate_tokens(messages, AI_MODEL)
             shrink_attempts += 1
     if per_cap and token_estimate > per_cap:
-        log(
-            f"[AI] portfolio select: не удалось ужать запрос до {per_cap} токенов",
-            Fore.YELLOW,
-        )
+        log(f"[AI] universe update: unable to compress request below {per_cap} tokens", Fore.YELLOW)
         return None
-    if not _ensure_token_budget(token_estimate, AI_MODEL, "portfolio select"):
+    if not _ensure_token_budget(token_estimate, AI_MODEL, "universe update"):
         return None
-    _log_ai_request(AI_MODEL, token_estimate, "portfolio select")
+    _log_ai_request(AI_MODEL, token_estimate, "universe update")
     try:
         res = client.chat.completions.create(
             model=AI_MODEL,
@@ -634,9 +615,9 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
             messages=messages,
         )
     except Exception as exc:
-        log(f"[ERROR] OpenAI portfolio select: {exc}", Fore.RED)
+        log(f"[ERROR] OpenAI universe update: {exc}", Fore.RED)
         return None
-    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), "portfolio select")
+    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), "universe update")
     try:
         payload = res.choices[0].message.content
     except Exception:
@@ -644,10 +625,23 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
     try:
         result = json.loads(payload)
     except json.JSONDecodeError as exc:
-        log(f"[WARN] JSON decode (portfolio select): {exc}", Fore.YELLOW)
+        log(f"[WARN] JSON decode (universe update): {exc}", Fore.YELLOW)
         return None
-    result["_news_digest"] = news_digest
-    return result
+    selection_payload = result.get("selection") or result
+    universe_payload = result.get("universe") or {}
+    news_requests = result.get("news_requests") or []
+    if isinstance(selection_payload, dict):
+        selection_payload["_news_digest"] = news_digest
+    if not universe_payload.get("pairs"):
+        fallback_pairs = selection_payload.get("pairs") or [
+            item.get("symbol")
+            for item in (selection_payload.get("targets") or [])
+            if isinstance(item, dict) and item.get("symbol")
+        ]
+        universe_payload["pairs"] = fallback_pairs
+    universe_payload.setdefault("global_timeframes", selection_payload.get("global_timeframes") or [])
+    universe_payload.setdefault("global_indicators", selection_payload.get("global_indicators") or [])
+    return selection_payload, universe_payload, news_requests
 
 
 def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None):
@@ -1125,6 +1119,32 @@ AI_SECONDARY_BUDGET_START = 70_000
 AI_PER_REQUEST_TOKEN_CAP = 10_000
 AI_HARD_STOP_BUDGET = 150_000
 MAX_SYMBOLS_PER_CYCLE = 15
+UNIVERSE_CACHE_DEFAULT = {
+    "pairs": [],
+    "global_timeframes": [],
+    "global_indicators": [],
+    "notes": None,
+}
+
+
+def load_universe_cache() -> dict:
+    try:
+        raw = UNIVERSE_CACHE_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log(f"[WARN] Failed to read universe_cache.json: {exc}", Fore.YELLOW)
+    return dict(UNIVERSE_CACHE_DEFAULT)
+
+
+def save_universe_cache(payload: dict) -> None:
+    try:
+        UNIVERSE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"[WARN] Failed to write universe_cache.json: {exc}", Fore.YELLOW)
 
 # --- AI model selection state ---
 AI_MODEL_PRIMARY = ""
@@ -2562,7 +2582,8 @@ def ai_decision(
     open_orders=None,
     extra_context=None,
     target_meta=None,
-    news_payload=None
+    news_payload=None,
+    initial_decision=None
 ):
     if not AI_KEY:
         log("❌ Не указан OPENAI_API_KEY", Fore.RED)
@@ -2828,56 +2849,63 @@ def ai_decision(
         log(f"ℹ️ Причина skip дополнена индикаторами для {symbol}", Fore.LIGHTBLACK_EX)
         return decision_obj
 
-    messages_init, tokens_init, _ = prepare_messages(stage="initial")
-    log(f"ℹ️ Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
-    per_cap_init = _current_request_token_cap()
-    if per_cap_init and tokens_init > per_cap_init:
-        log(f"⚠️ {symbol}: запрос initial превышает кап {per_cap_init} токенов", Fore.YELLOW)
-        return {"symbol": symbol, "action": "skip", "reason": "token cap exceeded"}
-    if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
-        log(f"⚠️ {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
-        return {"symbol": symbol, "action": "skip", "reason": "token budget exceeded"}
-    _log_ai_request(AI_MODEL, tokens_init, f"{symbol} initial decision")
-
-    # --- Первый проход ---
-    start_init = time.perf_counter()
-    res = client.chat.completions.create(
-        model=AI_MODEL,
-        temperature=0,
-        response_format={"type":"json_object"},
-        messages=messages_init
-    )
-    duration_init = time.perf_counter() - start_init
-    log(f"⏱️ OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
-    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
-    msg = res.choices[0].message.content
-    decision = json.loads(msg)
-    needs = decision.get("needs", [])
+        decision = initial_decision
     auto_needs_triggered = False
-    action_initial = (decision.get("action") or "").lower()
-    if not needs and action_initial == "skip":
-        reason_text = (decision.get("reason") or "").lower()
-        keywords_auto_needs = ("запрос", "needs", "дополнитель", "подтвержден")
-        if any(word in reason_text for word in keywords_auto_needs):
-            auto_needs = ["funding", "open_interest", "news"]
-            decision["needs"] = auto_needs
-            needs = auto_needs
-            auto_needs_triggered = True
-    save_json_line(
-        AI_REQUESTS_LOG,
-        {
-            "symbol": symbol,
-            "stage": "initial",
-            "tokens": tokens_init,
-            "token_limit": TOKEN_LIMIT,
-            "token_soft_limit": TOKEN_SOFT_LIMIT,
-            "duration_sec": round(duration_init, 4),
-            "context_counts": context_counts.copy(),
-            "context": current_context,
-            "needs": needs,
-            "auto_needs": auto_needs_triggered
-        }
-    )
+    needs = []
+    if decision is None:
+        messages_init, tokens_init, _ = prepare_messages(stage="initial")
+        log(f"ℹ️ Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
+        per_cap_init = _current_request_token_cap()
+        if per_cap_init and tokens_init > per_cap_init:
+            log(f"⚠️ {symbol}: запрос initial превышает кап {per_cap_init} токенов", Fore.YELLOW)
+            return {"symbol": symbol, "action": "skip", "reason": "token cap exceeded"}
+        if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
+            log(f"⚠️ {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
+            return {"symbol": symbol, "action": "skip", "reason": "token budget exceeded"}
+        _log_ai_request(AI_MODEL, tokens_init, f"{symbol} initial decision")
+
+        # --- Первый проход ---
+        start_init = time.perf_counter()
+        res = client.chat.completions.create(
+            model=AI_MODEL,
+            temperature=0,
+            response_format={"type":"json_object"},
+            messages=messages_init
+        )
+        duration_init = time.perf_counter() - start_init
+        log(f"⏱️ OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
+        _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
+        msg = res.choices[0].message.content
+        decision = json.loads(msg)
+        needs = decision.get("needs", [])
+        action_initial = (decision.get("action") or "").lower()
+        if not needs and action_initial == "skip":
+            reason_text = (decision.get("reason") or "").lower()
+            keywords_auto_needs = ("запрос", "needs", "дополнитель", "подтвержд")
+            if any(word in reason_text for word in keywords_auto_needs):
+                auto_needs = ["funding", "open_interest", "news"]
+                decision["needs"] = auto_needs
+                needs = auto_needs
+                auto_needs_triggered = True
+        save_json_line(
+            AI_REQUESTS_LOG,
+            {
+                "symbol": symbol,
+                "stage": "initial",
+                "tokens": tokens_init,
+                "token_limit": TOKEN_LIMIT,
+                "token_soft_limit": TOKEN_SOFT_LIMIT,
+                "duration_sec": round(duration_init, 4),
+                "context_counts": context_counts.copy(),
+                "context": current_context,
+                "needs": needs,
+                "auto_needs": auto_needs_triggered
+            }
+        )
+    else:
+        needs = decision.get("needs", []) if isinstance(decision, dict) else []
+
+
 
     # --- Если запрошен контекст ---
     if needs:
@@ -3153,6 +3181,45 @@ def run_cycle():
     add_candidates(BASE_PAIR_CANDIDATES)
     add_candidates(position_symbols, record_missing=False)
 
+    universe_cache = load_universe_cache()
+    news_headlines = _build_news_digest(sorted(candidate_pairs_set))
+    selection_result = None
+    universe_state = dict(universe_cache)
+    news_requests: list[Any] = []
+    updated_universe = ai_update_universe(
+        exchange=ex,
+        symbols=sorted(candidate_pairs_set),
+        positions_map=positions_map,
+        equity=equity,
+        available_margin=available_margin,
+        universe_cache=universe_cache,
+        news_digest=news_headlines,
+    )
+    if updated_universe:
+        selection_result, universe_state, news_requests = updated_universe
+        universe_state = universe_state or {}
+        universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        save_universe_cache(universe_state)
+    if universe_state.get("pairs"):
+        for pair in universe_state.get("pairs", []):
+            resolved_pair = normalize_symbol(pair, record_missing=False)
+            if resolved_pair:
+                candidate_pairs_set.add(resolved_pair)
+    news_full_cache: dict[str, dict] = {}
+    for req in news_requests or []:
+        if isinstance(req, dict):
+            sym_request = req.get("symbol")
+        else:
+            sym_request = req
+        if not sym_request:
+            continue
+        try:
+            news_full_cache[sym_request] = get_news(sym_request)
+        except Exception as exc_news:
+            log(f"[WARN] Failed to fetch detailed news for {sym_request}: {exc_news}", Fore.YELLOW)
+    if selection_result is None:
+        selection_result = None
+
     open_orders_prefetch: dict[str, list] = {}
     order_symbols: set[str] = set()
     order_symbols_non_reduce: set[str] = set()
@@ -3223,6 +3290,10 @@ def run_cycle():
         available_pairs = normalized_pair_list[:PAIR_CANDIDATE_LIMIT]
         if not available_pairs:
             available_pairs = list(sorted(markets_set))[:PAIR_CANDIDATE_LIMIT]
+    if selection_pairs:
+        prioritized = [p for p in selection_pairs if p in available_pairs]
+        prioritized += [p for p in available_pairs if p not in prioritized]
+        available_pairs = prioritized
 
     if missing_symbols:
         missing_desc = ', '.join(sorted(missing_symbols))
@@ -3240,17 +3311,20 @@ def run_cycle():
 
     open_orders_cache = dict(open_orders_prefetch)
 
-    selection_universe = available_pairs
-    max_positions_reached = MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS
-    if max_positions_reached:
-        selection_universe = [sym for sym in available_pairs if sym in position_symbols or sym in order_symbols]
-
-    analysis_pool_count = len(selection_universe) if selection_universe else len(available_pairs)
+    selection_pairs = universe_state.get("pairs") or available_pairs
+    selection_pairs_normalized: list[str] = []
+    for raw_pair in selection_pairs:
+        if not raw_pair:
+            continue
+        resolved_pair = normalize_symbol(raw_pair, record_missing=False)
+        selection_pairs_normalized.append(resolved_pair or raw_pair)
+    selection_pairs = [p for p in selection_pairs_normalized if p]
+    if not selection_pairs:
+        selection_pairs = available_pairs
+    analysis_pool_count = len(selection_pairs) if selection_pairs else len(available_pairs)
     update_ai_model_for_analysis(analysis_pool_count)
 
-    selection = None
-    if selection_universe:
-        selection = ai_select_portfolio(ex, selection_universe, positions_map, equity, available_margin)
+    selection = selection_result
     global_timeframes = []
     global_indicators = []
     news_cache = {}
@@ -3263,7 +3337,9 @@ def run_cycle():
     if selection:
         global_timeframes = selection.get("global_timeframes") or []
         global_indicators = selection.get("global_indicators") or []
-        news_cache = selection.get("_news_digest") or {}
+        news_cache = dict(selection.get("_news_digest") or {})
+        if news_full_cache:
+            news_cache.update(news_full_cache)
         for target in selection.get("targets") or []:
             raw_symbol = target.get("symbol")
             if not raw_symbol:
@@ -3294,57 +3370,34 @@ def run_cycle():
                 selection_next_run = None
         selection_next_time = selection.get("next_run_time")
 
-    if selection_missing_symbols:
-        missing_from_ai = ', '.join(sorted(set(selection_missing_symbols)))
-        log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
-
-    update_ai_model_for_analysis(len(available_pairs))
-    selection = ai_select_portfolio(ex, available_pairs, positions_map, equity, available_margin)
-    global_timeframes = []
-    global_indicators = []
-    news_cache = {}
-    target_map = {}
-    selected_symbols = []
-    selection_missing_symbols: list[str] = []
-    selection_next_run = None
-    selection_next_time = None
+    decisions_map: dict[str, dict] = {}
+    bundle = None
+    trade_plan = None
     if selection:
-        global_timeframes = selection.get("global_timeframes") or []
-        global_indicators = selection.get("global_indicators") or []
-        news_cache = selection.get("_news_digest") or {}
-        for target in selection.get("targets") or []:
-            raw_symbol = target.get("symbol")
-            if not raw_symbol:
-                continue
-            sym_sel = normalize_symbol(raw_symbol)
-            if not sym_sel:
-                selection_missing_symbols.append(raw_symbol)
-                continue
-            target_copy = dict(target)
-            target_copy["symbol"] = sym_sel
-            target_copy.setdefault("raw_symbol", raw_symbol)
-            target_map[sym_sel] = target_copy
-            if sym_sel not in selected_symbols:
-                selected_symbols.append(sym_sel)
-        selection_reason = selection.get("reason")
-        if selection_reason:
-            log(f"[INFO] Portfolio rationale: {selection_reason}", Fore.CYAN)
-            send_tg(f"[INFO] Portfolio analysis: {selection_reason}")
-        confidence = selection.get("confidence")
-        if confidence:
-            log(f"[INFO] Model confidence: {confidence}", Fore.LIGHTBLACK_EX)
-    if selection:
-        raw_next_run = selection.get("next_run_minutes")
-        if raw_next_run is not None:
-            try:
-                selection_next_run = float(raw_next_run)
-            except (TypeError, ValueError):
-                selection_next_run = None
-        selection_next_time = selection.get("next_run_time")
-
+        bundle, bundle_orders = build_portfolio_bundle(ex, selection, positions_map, news_cache=news_cache)
+        if bundle_orders:
+            open_orders_cache.update(bundle_orders)
+        bundle_meta = bundle.setdefault("meta", {})
+        bundle_meta["active_symbols"] = sorted(position_symbols)
+        bundle_meta["pending_symbols"] = sorted(order_symbols_non_reduce)
+        trade_plan = ai_plan_trades(ex, bundle, equity, available_margin, stage="initial")
+        if trade_plan:
+            for decision in trade_plan.get("decisions") or []:
+                sym_dec = decision.get("symbol")
+                sym_norm = normalize_symbol(sym_dec) if sym_dec else None
+                sym_key = sym_norm or sym_dec
+                if sym_key:
+                    decisions_map[sym_key] = decision
+            additional_missing = trade_plan.get("missing_symbols")
+            if additional_missing:
+                selection_missing_symbols.extend(list(additional_missing))
+    for sym_key in decisions_map.keys():
+        if sym_key not in selected_symbols:
+            selected_symbols.append(sym_key)
     if selection_missing_symbols:
-        missing_from_ai = ', '.join(sorted(set(selection_missing_symbols)))
+        missing_from_ai = ", ".join(sorted(set(selection_missing_symbols)))
         log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
+        send_tg(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}")
 
     symbols_sequence: list[str] = []
     seen_symbols: set[str] = set()
@@ -3448,7 +3501,7 @@ def run_cycle():
                 try:
                     news_payload_symbol = get_news(sym)
                 except Exception as news_exc:
-                    log(f"?? не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
+                    log(f"⚠️ Не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
                     news_payload_symbol = None
             current_position = positions_map.get(sym)
             initial_position_amount = safe_float(
@@ -3467,6 +3520,13 @@ def run_cycle():
                 open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
+            preloaded_decision = decisions_map.get(sym)
+            if preloaded_decision is None and decisions_map:
+                counts["skip"] = counts.get("skip", 0) + 1
+                decisions_total += 1
+                detail_entry = f"[{sym}] - держим позицию (не в приоритете после universe)"
+                decisions_details.append(detail_entry)
+                continue
             dec = ai_decision(
                 sym,
                 df,
@@ -3477,7 +3537,8 @@ def run_cycle():
                 open_orders=open_orders_symbol,
                 extra_context=extra_serialized,
                 target_meta=symbol_meta,
-                news_payload=news_payload_symbol
+                news_payload=news_payload_symbol,
+                initial_decision=preloaded_decision
             )
             if not dec: continue
             if symbol_meta.get("notional_pct") is not None and dec.get("notional_pct") is None:
