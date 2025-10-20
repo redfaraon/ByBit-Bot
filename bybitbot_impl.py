@@ -983,7 +983,7 @@ def refresh_settings():
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
-    global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY
+    global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD
     global NEWS_API_TOKEN, NEWS_API_ENDPOINT, NEWS_API_KINDS, NEWS_API_FILTER, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
@@ -1010,7 +1010,14 @@ def refresh_settings():
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
-    AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1")
+    AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4.1-mini"))
+    try:
+        AI_MODEL_THRESHOLD = int(os.getenv("OPENAI_MODEL_CHEAP_THRESHOLD", "5"))
+    except (TypeError, ValueError):
+        AI_MODEL_THRESHOLD = 5
+    AI_MODEL_THRESHOLD = max(0, AI_MODEL_THRESHOLD)
+    AI_MODEL = AI_MODEL_PRIMARY or AI_MODEL_CHEAP or "gpt-4.1-mini"
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
@@ -1075,6 +1082,10 @@ if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
 
+# --- AI model selection state ---
+AI_MODEL_PRIMARY = ""
+AI_MODEL_CHEAP = ""
+AI_MODEL_THRESHOLD = 5
 # --- Вспомогательные функции ---
 def _current_log_time():
     base = datetime.datetime.now(datetime.timezone.utc)
@@ -1823,6 +1834,95 @@ def get_trigger_direction_for_side(side: str) -> str:
         return "above"
     # Default to trigger on downside to avoid missing protection for long positions.
     return "below"
+
+
+def _resolve_ai_model_for_pairs(pair_count: Optional[int]) -> str:
+    primary = AI_MODEL_PRIMARY or AI_MODEL
+    cheap = AI_MODEL_CHEAP or ""
+    threshold = max(0, int(AI_MODEL_THRESHOLD or 0))
+    if pair_count is not None and cheap and pair_count > threshold:
+        return cheap
+    return primary or cheap or AI_MODEL
+
+
+def update_ai_model_for_analysis(pair_count: Optional[int]) -> str:
+    """Switch active AI model based on number of symbols that need analysis."""
+    global AI_MODEL
+    desired = _resolve_ai_model_for_pairs(pair_count)
+    if not desired:
+        return AI_MODEL
+    if AI_MODEL != desired:
+        previous = AI_MODEL or "undefined"
+        AI_MODEL = desired
+        context = f"{pair_count} symbols" if pair_count is not None else "unknown workload"
+        log(f"[AI] Model switched {previous} -> {desired} ({context})", Fore.LIGHTBLACK_EX)
+    return AI_MODEL
+
+
+def _safe_round(value: Optional[float], digits: int = 8) -> Optional[float]:
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return round(float(value), digits)
+
+
+def _protection_orders_signature(orders) -> tuple:
+    snapshot: list[tuple[Any, ...]] = []
+    for order in orders or []:
+        if not isinstance(order, dict):
+            continue
+        try:
+            if order.get("reduceOnly") not in (True, "true", "1", 1):
+                continue
+        except AttributeError:
+            continue
+        side = (order.get("side") or "").lower()
+        order_type = (order.get("type") or "").lower()
+        price = _safe_round(safe_float(order.get("price")))
+        trigger = _safe_round(
+            safe_float(
+                order.get("stopPrice")
+                or order.get("triggerPrice")
+                or order.get("stopLoss")
+            )
+        )
+        take_profit = _safe_round(safe_float(order.get("takeProfit")))
+        amount = _safe_round(
+            safe_float(
+                order.get("remaining")
+                or order.get("leavesQty")
+                or order.get("amount")
+            )
+        )
+        snapshot.append((side, order_type, price, trigger, take_profit, amount))
+    snapshot.sort()
+    return tuple(snapshot)
+
+
+def get_current_commit_info() -> tuple[str | None, str | None]:
+    try:
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(SCRIPT_DIR),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None, None
+    commit_message = None
+    try:
+        commit_message = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%s"],
+            cwd=str(SCRIPT_DIR),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        commit_message = None
+    return commit_hash or None, commit_message or None
 
 
 def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_side, position_qty, is_long):
@@ -2732,6 +2832,13 @@ def run_cycle():
     start_banner = f"{session_separator} START SESSION {session_stamp} {session_separator}"
     log(start_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nSTART SESSION {session_stamp}\n{session_separator}")
+    commit_hash, commit_message = get_current_commit_info()
+    if commit_hash:
+        short_hash = commit_hash[:8]
+        message_text = commit_message or "no commit message"
+        git_line = f"[GIT] {short_hash} — {message_text}"
+        log(git_line, Fore.LIGHTBLACK_EX)
+        send_tg(git_line)
     last_equity = equity
     last_available_margin = available_margin
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
@@ -2853,6 +2960,9 @@ def run_cycle():
     if max_positions_reached:
         selection_universe = [sym for sym in available_pairs if sym in position_symbols or sym in order_symbols]
 
+    analysis_pool_count = len(selection_universe) if selection_universe else len(available_pairs)
+    update_ai_model_for_analysis(analysis_pool_count)
+
     selection = None
     if selection_universe:
         selection = ai_select_portfolio(ex, selection_universe, positions_map, equity, available_margin)
@@ -2906,6 +3016,7 @@ def run_cycle():
         missing_from_ai = ', '.join(sorted(set(selection_missing_symbols)))
         log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
 
+    update_ai_model_for_analysis(len(available_pairs))
     selection = ai_select_portfolio(ex, available_pairs, positions_map, equity, available_margin)
     global_timeframes = []
     global_indicators = []
@@ -3038,6 +3149,12 @@ def run_cycle():
                     log(f"?? не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
                     news_payload_symbol = None
             current_position = positions_map.get(sym)
+            initial_position_amount = safe_float(
+                (current_position or {}).get("amount")
+                or (current_position or {}).get("contracts")
+            )
+            if initial_position_amount is None or not math.isfinite(initial_position_amount):
+                initial_position_amount = 0.0
             open_orders_symbol = open_orders_prefetch.get(sym)
             if open_orders_symbol is None:
                 try:
@@ -3046,6 +3163,7 @@ def run_cycle():
                     log(f"⚠️ Не удалось получить открытые ордера для {sym}: {fetch_exc}", Fore.YELLOW)
                     open_orders_symbol = []
                 open_orders_prefetch[sym] = open_orders_symbol
+            initial_protection_signature = _protection_orders_signature(open_orders_symbol)
             dec = ai_decision(
                 sym,
                 df,
@@ -3367,6 +3485,21 @@ def run_cycle():
                     current_position = positions_map.get(sym)
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
 
+            final_position_payload = positions_map.get(sym)
+            final_position_amount = safe_float(
+                (final_position_payload or {}).get("amount")
+                or (final_position_payload or {}).get("contracts")
+            )
+            if final_position_amount is None or not math.isfinite(final_position_amount):
+                final_position_amount = 0.0
+            final_protection_signature = _protection_orders_signature(open_orders_symbol)
+            protection_changed = initial_protection_signature != final_protection_signature
+            amount_diff = abs(final_position_amount - initial_position_amount)
+            amount_tolerance = max(abs(initial_position_amount), abs(final_position_amount)) * 1e-6 + 1e-8
+            position_changed = amount_diff > amount_tolerance
+            if protection_changed:
+                orders_activity = True
+
             if detail_entry is None:
                 if action == "open":
                     direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
@@ -3377,7 +3510,16 @@ def run_cycle():
                 elif action == "manage":
                     detail_entry = f"[{sym}] - держим позицию ({'меняли ордера' if orders_activity else 'ордера без изменений'})"
                 elif action in ("hold", "none"):
-                    detail_entry = f"[{sym}] - держим позицию (без изменений)"
+                    if protection_changed or position_changed:
+                        change_parts: list[str] = []
+                        if protection_changed:
+                            change_parts.append("обновлены стоп/профит")
+                        if position_changed:
+                            change_parts.append("объём изменён")
+                        change_note = ", ".join(change_parts) if change_parts else "есть изменения"
+                        detail_entry = f"[{sym}] - держим позицию ({change_note})"
+                    else:
+                        detail_entry = None
                 elif action == "skip":
                     detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
                 else:
