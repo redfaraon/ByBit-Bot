@@ -2018,7 +2018,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     try:
         tp_params = dict(base_params)
         tp_params["takeProfit"] = take_price
-        exchange.create_order(symbol, "takeProfit", protection_side, qty, take_price, tp_params)
+        tp_params.setdefault("timeInForce", "GTC")
+        exchange.create_order(symbol, "limit", protection_side, qty, take_price, tp_params)
         created_orders.append(("takeProfit", take_price))
     except Exception as exc:
         log(f"⚠️ {symbol}: не удалось выставить тейк-профит позиции: {exc}", Fore.YELLOW)
