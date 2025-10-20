@@ -1010,7 +1010,7 @@ def refresh_settings():
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
-    AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+    AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
@@ -2753,6 +2753,10 @@ def run_cycle():
     selection_missing_symbols: list[str] = []
     selection_next_run = None
     selection_next_time = None
+
+    # -- extra tokens tracking --
+    total_token_usage = 0
+    token_hard_limit_cycle = 100000
     if selection:
         global_timeframes = selection.get("global_timeframes") or []
         global_indicators = selection.get("global_indicators") or []
@@ -3272,6 +3276,64 @@ def run_cycle():
 
         except Exception as e:
             log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
+
+    cleanup_symbols = sorted(
+        set(symbols_sequence)
+        | set(order_symbols)
+        | {sym for sym, orders in open_orders_cache.items() if orders}
+    )
+    cleanup_cancelled = {}
+    cleanup_failures = []
+    if cleanup_symbols:
+        refreshed_positions, refreshed_count = fetch_positions_snapshot(ex, symbols_filter=cleanup_symbols)
+        if refreshed_count is None:
+            combined_positions = dict(positions_map)
+        else:
+            combined_positions = refreshed_positions
+        for sym_cleanup in cleanup_symbols:
+            if not sym_cleanup:
+                continue
+            position_payload = combined_positions.get(sym_cleanup)
+            amount_val = safe_float(
+                (position_payload or {}).get("amount") or (position_payload or {}).get("contracts")
+            )
+            if amount_val is not None and math.isfinite(amount_val) and abs(amount_val) > 0:
+                continue
+            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_cleanup)
+            if not orders_snapshot:
+                continue
+            to_cancel_ids = []
+            for order in orders_snapshot:
+                if not isinstance(order, dict):
+                    continue
+                if not _is_reduce_only(order):
+                    continue
+                if not (_has_stop_flag(order) or _has_trailing_flag(order)):
+                    continue
+                oid = order.get("id")
+                if oid:
+                    to_cancel_ids.append(str(oid))
+            if not to_cancel_ids:
+                continue
+            cancelled_here = []
+            for oid in to_cancel_ids:
+                success, err = cancel_order_by_id(ex, sym_cleanup, oid)
+                if success:
+                    cancelled_here.append(oid)
+                else:
+                    cleanup_failures.append((sym_cleanup, oid, err))
+            if cancelled_here:
+                cleanup_cancelled[sym_cleanup] = cancelled_here
+                open_orders_cache[sym_cleanup] = fetch_open_orders_for_symbol(ex, sym_cleanup)
+    if cleanup_cancelled:
+        for sym_cleanup, ids in cleanup_cancelled.items():
+            summary = ", ".join(ids)
+            log(f"✅ Сняты reduce-only стоп-ордера по {sym_cleanup}: {summary}", Fore.LIGHTBLUE_EX)
+            send_tg(f"✅ {sym_cleanup}: убраны reduce-only стопы (без позиции): {summary}")
+    if cleanup_failures:
+        details = "; ".join(f"{sym}:{oid} -> {err}" for sym, oid, err in cleanup_failures)
+        log(f"⚠️ Не удалось отменить reduce-only стоп-ордера: {details}", Fore.YELLOW)
+        send_tg(f"⚠️ Ошибка отмены reduce-only стоп-ордеров: {details}")
 
     if decisions_total>0:
         pct={k:(v/decisions_total)*100 for k,v in counts.items()}
