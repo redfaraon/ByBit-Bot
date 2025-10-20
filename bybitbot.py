@@ -24,6 +24,7 @@ def _resolve_commit_limit(raw_value: str | None) -> int:
 
 
 CHANGELOG_COMMIT_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_CHANGELOG_COMMITS"))
+FALLBACK_COMMIT_CANDIDATE_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_FALLBACK_COMMIT_LIMIT", "12"))
 
 
 def _build_commit_changelog(limit: int | None = None):
@@ -129,7 +130,7 @@ def _save_fallback_history(history: dict) -> None:
         pass
 
 
-def _list_past_commits(limit: int = 5) -> list[str]:
+def _list_past_commits(limit: int = FALLBACK_COMMIT_CANDIDATE_LIMIT) -> list[str]:
     cmd = [
         "git",
         "rev-list",
@@ -292,7 +293,7 @@ def _run_backups(reason: str) -> bool:
                 history["stable_backup"] = None
                 _save_fallback_history(history)
 
-    commit_hashes = _list_past_commits(limit=5)
+    commit_hashes = _list_past_commits()
     for commit_hash in commit_hashes:
         if commit_hash == head_hash:
             continue

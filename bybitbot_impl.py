@@ -738,15 +738,15 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
         "data": bundle,
     }
     system_msg = (
-        "Ты выступаешь как трейдер-аналитик Bybit. По каждому symbol оцени позиции, ордера, свечи и индикаторы, "
-        "верни JSON: {\n"
+        "You are a trade analyst for Bybit. For each symbol evaluate positions, orders, candles, and indicators. "
+        "Return strict JSON in the form:\n"
         '  "decisions": [\n'
         '    {\n'
         '      "symbol": "PAIR",\n'
         '      "action": "open|close|manage|reduce|skip",\n'
         '      "side": "buy|sell",\n'
         '      "notional_pct": float,\n'
-        '      "reason": "краткое обоснование",\n'
+        '      "reason": "short explanation",\n'
         '      "tp_atr": float,\n'
         '      "sl_atr": float,\n'
         '      "orders": [ {...} ],\n'
@@ -755,9 +755,11 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
         "    }\n"
         "  ],\n"
         '  "needs": [ {"symbol":"PAIR","timeframes":["1h"],"indicators":["ema100"]}, "news" ],\n'
-        '  "notes": "опционально"\n'
+        '  "next_run_minutes": float,\n'
+        '  "next_run_time": "2025-01-01T10:30:00Z",\n'
+        '  "notes": "optional"\n'
         "}\n"
-        "Если требуется дополнительная информация, заполни поле needs и сделай decisions пустым."
+        "If additional context is required, populate 'needs' and leave 'decisions' empty."
     )
     messages = [
         {"role": "system", "content": system_msg},
@@ -1116,7 +1118,7 @@ AI_TOKEN_BUDGET_CYCLE = 100_000
 AI_TOKEN_USAGE_TOTAL = 0
 AI_TOKEN_USAGE_BY_MODEL: dict[str, dict[str, int]] = {}
 AI_SECONDARY_BUDGET_START = 70_000
-AI_PER_REQUEST_TOKEN_CAP = 10_000
+AI_PER_REQUEST_TOKEN_CAP = 50_000
 AI_HARD_STOP_BUDGET = 150_000
 MAX_SYMBOLS_PER_CYCLE = 15
 UNIVERSE_CACHE_DEFAULT = {
@@ -3311,7 +3313,7 @@ def run_cycle():
 
     open_orders_cache = dict(open_orders_prefetch)
 
-    selection_pairs = universe_state.get("pairs") or available_pairs
+    selection_pairs = universe_state.get("pairs") or []
     selection_pairs_normalized: list[str] = []
     for raw_pair in selection_pairs:
         if not raw_pair:
@@ -3381,6 +3383,16 @@ def run_cycle():
         bundle_meta["active_symbols"] = sorted(position_symbols)
         bundle_meta["pending_symbols"] = sorted(order_symbols_non_reduce)
         trade_plan = ai_plan_trades(ex, bundle, equity, available_margin, stage="initial")
+        if trade_plan:
+            trade_next_minutes = trade_plan.get("next_run_minutes")
+            if trade_next_minutes is not None:
+                try:
+                    selection_next_run = float(trade_next_minutes)
+                except (TypeError, ValueError):
+                    log("[WARN] Invalid next_run_minutes from trade plan.", Fore.YELLOW)
+            trade_next_time = trade_plan.get("next_run_time")
+            if trade_next_time:
+                selection_next_time = trade_next_time
         if trade_plan:
             for decision in trade_plan.get("decisions") or []:
                 sym_dec = decision.get("symbol")
