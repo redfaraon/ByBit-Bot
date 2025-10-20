@@ -683,39 +683,71 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
     return bundle, open_orders_cache
 
 
-def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None):
+def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_full=None):
     if not needs:
         return bundle
-    symbol_map = {entry["symbol"]: entry for entry in bundle.get("symbols", []) if entry.get("symbol")}
+    symbol_map = {entry['symbol']: entry for entry in bundle.get('symbols', []) if entry.get('symbol')}
     for need in needs:
         if isinstance(need, dict):
-            symbol = need.get("symbol")
+            symbol = need.get('symbol')
             if symbol not in symbol_map:
                 continue
             dataset = symbol_map[symbol]
-            requested_timeframes = need.get("timeframes") or []
-            requested_indicators = need.get("indicators") or []
+            additional_tf_raw = need.get('higher_tf')
+            additional_tf_list: list[str] = []
+            if additional_tf_raw:
+                if isinstance(additional_tf_raw, (list, tuple, set)):
+                    additional_tf_list = [str(tf) for tf in additional_tf_raw if tf]
+                else:
+                    additional_tf_list = [str(additional_tf_raw)]
+            tf_alias = {'1h': '1h', '60m': '1h', '4h': '4h', '240m': '4h'}
+            normalized_extras = []
+            for tf in additional_tf_list:
+                tf_key = (tf or '').strip().lower()
+                mapped_tf = tf_alias.get(tf_key, tf_key or '4h')
+                normalized_extras.append(mapped_tf)
+            raw_timeframes = need.get('timeframes') or []
+            if isinstance(raw_timeframes, (str, bytes)):
+                raw_timeframes = [raw_timeframes]
+            requested_timeframes = list(dict.fromkeys([str(tf) for tf in raw_timeframes if tf] + normalized_extras))
+            requested_indicators = need.get('indicators') or []
+            if isinstance(requested_indicators, (str, bytes)):
+                requested_indicators = [requested_indicators]
             for tf in requested_timeframes:
+                tf_label = str(tf)
                 try:
-                    df_tf = fetch_df(exchange, symbol, tf)
+                    df_tf = fetch_df(exchange, symbol, tf_label)
                 except Exception as exc:
-                    dataset.setdefault("errors", []).append(f"needs fetch_df({tf}): {exc}")
+                    dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
                     continue
                 applied = []
                 for ind in requested_indicators:
                     col = _apply_indicator_to_df(df_tf, ind)
                     if col:
                         applied.append(col)
-                dataset["timeframes"][tf] = {
-                    "bars": _serialize_df(df_tf),
-                }
+                dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
                 if applied:
-                    dataset["timeframes"][tf]["indicators"] = applied
-            if need.get("news") and news_cache:
-                dataset["news"] = news_cache.get(symbol) or dataset.get("news")
-        elif isinstance(need, str):
-            bundle.setdefault("meta", {}).setdefault("extra_requests", []).append(need)
+                    dataset['timeframes'][tf_label]['indicators'] = applied
+            if need.get('funding'):
+                try:
+                    dataset['funding'] = get_funding_rate(exchange, symbol)
+                except Exception as exc:
+                    dataset.setdefault('errors', []).append(f"needs funding: {exc}")
+            if need.get('open_interest'):
+                try:
+                    dataset['open_interest'] = get_open_interest(exchange, symbol)
+                except Exception as exc:
+                    dataset.setdefault('errors', []).append(f"needs open_interest: {exc}")
+            if need.get('news'):
+                if news_full and symbol in news_full:
+                    dataset['news'] = news_full[symbol]
+                elif news_cache:
+                    dataset['news'] = news_cache.get(symbol) or dataset.get('news')
+            continue
+        if isinstance(need, str):
+            bundle.setdefault('meta', {}).setdefault('extra_requests', []).append(need)
     return bundle
+
 
 
 def _shrink_bundle_for_tokens(bundle, max_bars=60):
@@ -2928,6 +2960,25 @@ def ai_decision(
                     tf_values.append(str(n.get("timeframe")))
                 if isinstance(n.get("timeframes"), (list, tuple, set)):
                     tf_values.extend(str(tf) for tf in n["timeframes"] if tf)
+                higher_tf_raw = n.get("higher_tf")
+                higher_tf_list: list[str] = []
+                if higher_tf_raw:
+                    if isinstance(higher_tf_raw, (list, tuple, set)):
+                        higher_tf_list = [str(tf) for tf in higher_tf_raw if tf]
+                    else:
+                        higher_tf_list = [str(higher_tf_raw)]
+                tf_alias = {"1h": "1h", "60m": "1h", "4h": "4h", "240m": "4h"}
+                for tf in higher_tf_list:
+                    tf_key = (tf or "").strip().lower()
+                    mapped_tf = tf_alias.get(tf_key, tf_key or "4h")
+                    try:
+                        higher_payload = get_higher_tf(exchange, symbol, mapped_tf or "4h")
+                    except Exception as exc_ht:
+                        dataset.setdefault("errors", []).append(f"needs higher_tf({mapped_tf}): {exc_ht}")
+                        continue
+                    extra.setdefault("higher_tf", {})[mapped_tf] = higher_payload
+                    if mapped_tf not in tf_values:
+                        tf_values.append(mapped_tf)
                 raw_indicator_fields = []
                 for key in ("indicator", "indicators", "indicator_set"):
                     if key in n:
@@ -2982,8 +3033,37 @@ def ai_decision(
                             tf_payload["indicators"] = indicator_values
                         timeframe_store.setdefault(tf, tf_payload)
                         indicator_extra["timeframes"][tf] = tf_payload
-                else:
+                elif not higher_tf_list and not any(n.get(flag) for flag in ("funding", "open_interest", "news")):
                     needs_followup.append(n)
+                if n.get("funding"):
+                    try:
+                        funding_payload = get_funding_rate(exchange, symbol)
+                        extra["funding"] = funding_payload
+                        dataset["funding"] = funding_payload
+                    except Exception as exc_fn:
+                        dataset.setdefault("errors", []).append(f"needs funding: {exc_fn}")
+                if n.get("open_interest"):
+                    try:
+                        oi_payload = get_open_interest(exchange, symbol)
+                        extra["open_interest"] = oi_payload
+                        dataset["open_interest"] = oi_payload
+                    except Exception as exc_oi:
+                        dataset.setdefault("errors", []).append(f"needs open_interest: {exc_oi}")
+                if n.get("news"):
+                    news_payload = None
+                    if news_full and symbol in news_full:
+                        news_payload = news_full[symbol]
+                    elif news_cache:
+                        news_payload = news_cache.get(symbol)
+                    if news_payload is None:
+                        try:
+                            news_payload = get_news(symbol)
+                        except Exception as exc_news:
+                            dataset.setdefault("errors", []).append(f"needs news: {exc_news}")
+                            news_payload = None
+                    if news_payload is not None:
+                        extra["news"] = news_payload
+                        dataset["news"] = news_payload
                 continue
             if not isinstance(n, str):
                 needs_followup.append(n)
