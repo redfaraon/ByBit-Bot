@@ -601,16 +601,28 @@ def ai_select_portfolio(exchange, symbols, positions_map, equity, available_marg
         {"role": "system", "content": system_msg},
         {"role": "user", "content": json.dumps(request_payload, ensure_ascii=False)},
     ]
-    token_estimate = estimate_tokens(messages, AI_MODEL)
     hard_limit = TOKEN_LIMIT if TOKEN_LIMIT > 0 else None
-    if hard_limit and token_estimate > hard_limit:
-        # обрежем новости до короткой сводки
-        for sym, payload in list(news_digest.items()):
-            summary = payload.get("summary") or ""
-            payload["items"] = payload.get("items", [])[:1]
-            if len(summary) > 160:
-                news_digest[sym]["summary"] = summary[:157] + "..."
-        messages[1]["content"] = json.dumps(request_payload, ensure_ascii=False)
+    per_cap = _current_request_token_cap()
+    if per_cap:
+        hard_limit = per_cap if hard_limit is None else min(hard_limit, per_cap)
+    token_estimate = estimate_tokens(messages, AI_MODEL)
+    if hard_limit:
+        shrink_attempts = 0
+        while token_estimate > hard_limit and shrink_attempts < 3:
+            for sym, payload in list(news_digest.items()):
+                summary = payload.get("summary") or ""
+                payload["items"] = (payload.get("items") or [])[:1]
+                if len(summary) > 160:
+                    news_digest[sym]["summary"] = summary[:157] + "..."
+            messages[1]["content"] = json.dumps(request_payload, ensure_ascii=False)
+            token_estimate = estimate_tokens(messages, AI_MODEL)
+            shrink_attempts += 1
+    if per_cap and token_estimate > per_cap:
+        log(
+            f"[AI] portfolio select: не удалось ужать запрос до {per_cap} токенов",
+            Fore.YELLOW,
+        )
+        return None
     if not _ensure_token_budget(token_estimate, AI_MODEL, "portfolio select"):
         return None
     _log_ai_request(AI_MODEL, token_estimate, "portfolio select")
@@ -759,6 +771,10 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
     ]
     hard_limit = TOKEN_LIMIT if TOKEN_LIMIT > 0 else None
     soft_limit = TOKEN_SOFT_LIMIT if TOKEN_SOFT_LIMIT > 0 else None
+    per_cap = _current_request_token_cap()
+    if per_cap:
+        hard_limit = per_cap if hard_limit is None else min(hard_limit, per_cap)
+        soft_limit = per_cap if soft_limit is None else min(soft_limit, per_cap)
     attempt = 0
     while True:
         token_estimate = estimate_tokens(messages, AI_MODEL)
@@ -773,6 +789,12 @@ def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
             attempt += 1
             continue
         break
+    if per_cap and token_estimate > per_cap:
+        log(
+            f"[AI] trade plan ({stage}): не удалось ужать запрос до {per_cap} токенов",
+            Fore.YELLOW,
+        )
+        return None
     if not _ensure_token_budget(token_estimate, AI_MODEL, f"trade plan ({stage})"):
         return None
     _log_ai_request(AI_MODEL, token_estimate, f"trade plan ({stage})")
@@ -1099,6 +1121,10 @@ ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
 AI_TOKEN_BUDGET_CYCLE = 100_000
 AI_TOKEN_USAGE_TOTAL = 0
 AI_TOKEN_USAGE_BY_MODEL: dict[str, dict[str, int]] = {}
+AI_SECONDARY_BUDGET_START = 70_000
+AI_PER_REQUEST_TOKEN_CAP = 10_000
+AI_HARD_STOP_BUDGET = 150_000
+MAX_SYMBOLS_PER_CYCLE = 15
 
 # --- AI model selection state ---
 AI_MODEL_PRIMARY = ""
@@ -1877,6 +1903,8 @@ def get_trigger_direction_for_side(side: str) -> str:
 
 
 def _resolve_ai_model_for_pairs(pair_count: Optional[int]) -> str:
+    if AI_MODEL_CHEAP and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
+        return AI_MODEL_CHEAP
     primary = AI_MODEL_PRIMARY or AI_MODEL
     cheap = AI_MODEL_CHEAP or ""
     threshold = max(0, int(AI_MODEL_THRESHOLD or 0))
@@ -1906,18 +1934,27 @@ def _init_ai_cycle_usage() -> None:
 
 
 def _log_ai_request(model: str, estimate: int, context: str) -> None:
-    budget = AI_TOKEN_BUDGET_CYCLE
+    budget = AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE
+    cap = _current_request_token_cap()
+    cap_text = f", кап {cap}" if cap else ""
     log(
-        f"[AI] {context}: модель {model}, оценка {estimate} токенов (использовано {AI_TOKEN_USAGE_TOTAL}/{budget})",
+        f"[AI] {context}: модель {model}, оценка {estimate} токенов (использовано {AI_TOKEN_USAGE_TOTAL}/{budget}{cap_text})",
         Fore.LIGHTBLACK_EX,
     )
 
 
 def _ensure_token_budget(estimate: int, model: str, context: str) -> bool:
-    budget = AI_TOKEN_BUDGET_CYCLE
-    if budget and estimate and (AI_TOKEN_USAGE_TOTAL + estimate) > budget:
+    hard_stop = AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE
+    if hard_stop and AI_TOKEN_USAGE_TOTAL >= hard_stop:
         log(
-            f"[AI] Пропуск {context}: лимит {budget} токенов будет превышен (использовано {AI_TOKEN_USAGE_TOTAL}, требуется {estimate})",
+            f"[AI] Пропуск {context}: достигнут жёсткий предел {hard_stop} токенов",
+            Fore.YELLOW,
+        )
+        return False
+    projected_total = AI_TOKEN_USAGE_TOTAL + (estimate or 0)
+    if hard_stop and projected_total > hard_stop:
+        log(
+            f"[AI] Пропуск {context}: запрос превысит предел {hard_stop} токенов (будет {projected_total})",
             Fore.YELLOW,
         )
         return False
@@ -1949,9 +1986,26 @@ def _register_ai_usage(model: str, usage: Any, context: str) -> None:
     )
     if AI_TOKEN_BUDGET_CYCLE and AI_TOKEN_USAGE_TOTAL > AI_TOKEN_BUDGET_CYCLE:
         log(
-            f"[AI] Внимание: превышен лимит токенов {AI_TOKEN_BUDGET_CYCLE} (использовано {AI_TOKEN_USAGE_TOTAL})",
+            f"[AI] Внимание: превышен лимит токенов {AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE} (использовано {AI_TOKEN_USAGE_TOTAL})",
             Fore.YELLOW,
         )
+    _maybe_switch_model_after_usage()
+
+
+def _maybe_switch_model_after_usage() -> None:
+    global AI_MODEL
+    if AI_MODEL_CHEAP and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START and AI_MODEL != AI_MODEL_CHEAP:
+        previous = AI_MODEL
+        AI_MODEL = AI_MODEL_CHEAP
+        log(f"[AI] Switching to cheaper model {AI_MODEL_CHEAP} after {AI_TOKEN_USAGE_TOTAL} tokens (was {previous})", Fore.YELLOW)
+
+
+def _current_request_token_cap() -> Optional[int]:
+    if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
+        return 0
+    if AI_SECONDARY_BUDGET_START and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
+        return AI_PER_REQUEST_TOKEN_CAP
+    return None
 
 
 def _safe_round(value: Optional[float], digits: int = 8) -> Optional[float]:
@@ -2776,6 +2830,10 @@ def ai_decision(
 
     messages_init, tokens_init, _ = prepare_messages(stage="initial")
     log(f"ℹ️ Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
+    per_cap_init = _current_request_token_cap()
+    if per_cap_init and tokens_init > per_cap_init:
+        log(f"⚠️ {symbol}: запрос initial превышает кап {per_cap_init} токенов", Fore.YELLOW)
+        return {"symbol": symbol, "action": "skip", "reason": "token cap exceeded"}
     if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
         log(f"⚠️ {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
         return {"symbol": symbol, "action": "skip", "reason": "token budget exceeded"}
@@ -2944,9 +3002,20 @@ def ai_decision(
         log("✅ Контекст собран: " + ", ".join(stats_report), Fore.LIGHTBLACK_EX)
         send_tg("✅ Контекст собран для " + symbol + ":\n" + "\n".join(stats_report))
 
+        if AI_SECONDARY_BUDGET_START and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
+            log(f"⚠️ {symbol}: пропуск допконтекста из-за достигнутого лимита токенов", Fore.YELLOW)
+            decision["needs_followup"] = needs
+            decision.pop("needs", None)
+            return ensure_skip_reason(decision)
         bias_flag = bool(AI_AFTER_NEEDS_BIAS)
         messages_extra, tokens_extra, _ = prepare_messages(stage="extra", extra=extra, bias=bias_flag)
         log(f"ℹ️ Токены запроса (extra) для {symbol}: {tokens_extra}", Fore.LIGHTBLACK_EX)
+        per_cap_extra = _current_request_token_cap()
+        if per_cap_extra and tokens_extra > per_cap_extra:
+            log(f"⚠️ {symbol}: запрос extra превышает кап {per_cap_extra} токенов", Fore.YELLOW)
+            decision["needs_followup"] = needs
+            decision.pop("needs", None)
+            return ensure_skip_reason(decision)
         if not _ensure_token_budget(tokens_extra, AI_MODEL, f"{symbol} extra decision"):
             log(f"⚠️ {symbol}: пропуск extra-запроса из-за лимита токенов", Fore.YELLOW)
             decision["needs_followup"] = needs
@@ -3086,6 +3155,7 @@ def run_cycle():
 
     open_orders_prefetch: dict[str, list] = {}
     order_symbols: set[str] = set()
+    order_symbols_non_reduce: set[str] = set()
 
     prefetch_candidates = list(candidate_pairs_set)
     for sym_candidate in prefetch_candidates[:PAIR_PREFETCH_LIMIT]:
@@ -3097,6 +3167,8 @@ def run_cycle():
         open_orders_prefetch[sym_candidate] = orders_snapshot
         if orders_snapshot:
             order_symbols.add(sym_candidate)
+            if any(isinstance(o, dict) and not _is_reduce_only(o) for o in orders_snapshot):
+                order_symbols_non_reduce.add(sym_candidate)
 
     add_candidates(order_symbols, record_missing=False)
     news_pairs = _collect_news_pairs()
@@ -3162,6 +3234,8 @@ def run_cycle():
         log(f"[INFO] Using alias tickers: {alias_desc}", Fore.LIGHTBLACK_EX)
         symbol_alias_hits.clear()
 
+    if len(available_pairs) > MAX_SYMBOLS_PER_CYCLE:
+        available_pairs = available_pairs[:MAX_SYMBOLS_PER_CYCLE]
     log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
 
     open_orders_cache = dict(open_orders_prefetch)
@@ -3294,6 +3368,23 @@ def run_cycle():
             symbols_sequence.append(sym_candidate)
             seen_symbols.add(sym_candidate)
 
+    priority_sequence = []
+    seen_priority: set[str] = set()
+    for sym_order in symbols_sequence:
+        if sym_order in position_symbols and sym_order not in seen_priority:
+            priority_sequence.append(sym_order)
+            seen_priority.add(sym_order)
+    for sym_order in symbols_sequence:
+        if sym_order in order_symbols_non_reduce and sym_order not in seen_priority:
+            priority_sequence.append(sym_order)
+            seen_priority.add(sym_order)
+    for sym_order in symbols_sequence:
+        if sym_order not in seen_priority:
+            priority_sequence.append(sym_order)
+            seen_priority.add(sym_order)
+    symbols_sequence = priority_sequence
+    if len(symbols_sequence) > MAX_SYMBOLS_PER_CYCLE:
+        symbols_sequence = symbols_sequence[:MAX_SYMBOLS_PER_CYCLE]
     if not symbols_sequence:
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
@@ -3302,6 +3393,9 @@ def run_cycle():
     decisions_details: list[str] = []
 
     for i,sym in enumerate(symbols_sequence,1):
+        if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
+            log(f"⚠️ Достигнут лимит {AI_HARD_STOP_BUDGET} токенов — дальнейший анализ остановлен", Fore.YELLOW)
+            break
         log(f"[{i}/{len(symbols_sequence)}] {sym}", Fore.LIGHTBLUE_EX)
         try:
             equity, available_margin, _ = fetch_usdt_equity(ex)
