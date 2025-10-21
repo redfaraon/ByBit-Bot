@@ -767,11 +767,28 @@ def _serialize_df(df: pd.DataFrame, limit: int = 80):
     return result
 
 
+def _serialize_indicator_series(series: pd.Series, limit: int = 120) -> list:
+    if series is None or series.empty:
+        return []
+    trimmed = series.tail(limit).dropna()
+    output: list = []
+    for value in trimmed:
+        if isinstance(value, (int, float, numbers.Number)):
+            if math.isfinite(float(value)):
+                output.append(float(value))
+        elif isinstance(value, (list, tuple)):
+            output.append([float(v) if isinstance(v, (int, float, numbers.Number)) else v for v in value])
+        else:
+            output.append(value)
+    return output
+
+
 def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: list, news_cache=None):
     dataset = {"symbol": symbol, "timeframes": {}, "indicators": [], "errors": []}
     indicators = indicators or []
     timeframes = timeframes or [TIMEFRAME, "4h"]
     seen_cols = set()
+    indicator_limit = 120
     for tf in timeframes:
         try:
             df_tf = fetch_df(exchange, symbol, tf)
@@ -780,7 +797,9 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
             dataset["errors"].append(err)
             log(f"[WARN] {symbol}: {err}", Fore.YELLOW)
             continue
-        applied: list[str] = []
+        applied_columns: list[str] = []
+        indicator_series: dict[str, list] = {}
+        indicator_latest: dict[str, float] = {}
         for ind in indicators:
             cols = _apply_indicator_to_df(df_tf, ind)
             if not cols:
@@ -789,14 +808,34 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
                 cols_list = [cols]
             else:
                 cols_list = list(cols)
-            applied.extend(cols_list)
+            applied_columns.extend(cols_list)
             seen_cols.update(cols_list)
-        dataset["timeframes"][tf] = {
+            for col in cols_list:
+                if col in df_tf:
+                    series_payload = _serialize_indicator_series(df_tf[col], limit=indicator_limit)
+                    if series_payload:
+                        indicator_series[col] = series_payload
+                        latest_val = df_tf[col].dropna().iloc[-1]
+                        if isinstance(latest_val, (int, float, numbers.Number)) and math.isfinite(float(latest_val)):
+                            indicator_latest[col] = float(latest_val)
+        timeframe_payload = {
             "bars": _serialize_df(df_tf)
         }
-        if applied:
-            dataset["timeframes"][tf]["indicators"] = applied
+        if applied_columns:
+            timeframe_payload["indicator_columns"] = applied_columns
+        if indicator_series:
+            timeframe_payload["indicator_series"] = indicator_series
+        if indicator_latest:
+            timeframe_payload["indicator_latest"] = indicator_latest
+        dataset["timeframes"][tf] = timeframe_payload
     dataset["indicators"] = sorted(seen_cols)
+    if dataset["timeframes"]:
+        latest_map = {}
+        for tf_entry in dataset["timeframes"].values():
+            for col, val in (tf_entry.get("indicator_latest") or {}).items():
+                latest_map[col] = val
+        if latest_map:
+            dataset["indicator_latest"] = latest_map
     dataset["position"] = None
     dataset["open_orders"] = []
     if news_cache and symbol in news_cache:
@@ -977,6 +1016,7 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
+            indicator_limit = 120
             for tf in requested_timeframes:
                 tf_label = str(tf)
                 try:
@@ -984,7 +1024,9 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                 except Exception as exc:
                     dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
                     continue
-                applied: list[str] = []
+                applied_columns: list[str] = []
+                indicator_series: dict[str, list] = {}
+                indicator_latest: dict[str, float] = {}
                 for ind in requested_indicators:
                     cols = _apply_indicator_to_df(df_tf, ind)
                     if not cols:
@@ -993,19 +1035,43 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                         cols_list = [cols]
                     else:
                         cols_list = list(cols)
-                    applied.extend(cols_list)
-                dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
+                    applied_columns.extend(cols_list)
+                    for col in cols_list:
+                        if col in df_tf:
+                            series_payload = _serialize_indicator_series(df_tf[col], limit=indicator_limit)
+                            if series_payload:
+                                indicator_series[col] = series_payload
+                                latest_val = df_tf[col].dropna().iloc[-1]
+                                if isinstance(latest_val, (int, float, numbers.Number)) and math.isfinite(float(latest_val)):
+                                    indicator_latest[col] = float(latest_val)
+                timeframe_entry = dataset.setdefault('timeframes', {}).setdefault(tf_label, {})
+                timeframe_entry['bars'] = _serialize_df(df_tf)
                 enriched = True
-                if applied:
-                    dataset['timeframes'][tf_label]['indicators'] = applied
+                if applied_columns:
+                    existing_cols = set(timeframe_entry.get("indicator_columns") or [])
+                    timeframe_entry["indicator_columns"] = list(sorted(existing_cols | set(applied_columns)))
+                if indicator_series:
+                    existing_series = timeframe_entry.get("indicator_series") or {}
+                    existing_series.update(indicator_series)
+                    timeframe_entry["indicator_series"] = existing_series
+                if indicator_latest:
+                    existing_latest = timeframe_entry.get("indicator_latest") or {}
+                    existing_latest.update(indicator_latest)
+                    timeframe_entry["indicator_latest"] = existing_latest
                     existing_indicators = set(dataset.get("indicators") or [])
-                    existing_indicators.update(applied)
+                    existing_indicators.update(applied_columns)
                     dataset['indicators'] = sorted(existing_indicators)
                     target_block = dataset.get("target")
                     if isinstance(target_block, dict):
                         target_inds = list(target_block.get("indicators") or [])
-                        target_inds.extend(x for x in applied if x not in target_inds)
+                        target_inds.extend(x for x in applied_columns if x not in target_inds)
                         target_block["indicators"] = target_inds
+            latest_map = {}
+            for tf_entry in dataset.get("timeframes", {}).values():
+                for col, val in (tf_entry.get("indicator_latest") or {}).items():
+                    latest_map[col] = val
+            if latest_map:
+                dataset["indicator_latest"] = latest_map
             if need.get('funding'):
                 try:
                     dataset['funding'] = get_funding_rate(exchange, symbol)
@@ -3920,6 +3986,7 @@ def run_cycle():
     decisions_map: dict[str, dict] = {}
     bundle = None
     trade_plan = None
+    followup_attempted = False
     if selection:
         bundle, bundle_orders = build_portfolio_bundle(ex, selection, positions_map, news_cache=news_cache)
         if bundle_orders:
@@ -3938,7 +4005,8 @@ def run_cycle():
         )
         if trade_plan:
             requested_needs = [need for need in (trade_plan.get("needs") or []) if need]
-            if requested_needs:
+            if requested_needs and not followup_attempted:
+                followup_attempted = True
                 bundle_enriched = copy.deepcopy(bundle)
                 bundle_enriched, enriched = augment_bundle_with_needs(
                     ex,
@@ -4004,6 +4072,7 @@ def run_cycle():
                         Fore.LIGHTBLACK_EX,
                     )
         if trade_plan:
+            trade_plan.pop("needs", None)
             trade_next_minutes = trade_plan.get("next_run_minutes")
             if trade_next_minutes is not None:
                 try:
