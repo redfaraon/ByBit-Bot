@@ -2691,6 +2691,7 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
     executed = []
     open_orders = open_orders or []
     reduce_only_map = {}
+    protection_state: dict[str, bool] = {}
     for existing in open_orders:
         try:
             reduce_flag = existing.get("reduceOnly")
@@ -2699,11 +2700,51 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
         if reduce_flag in (True, "true", "1", 1):
             side_key = (existing.get("side") or "").lower()
             reduce_only_map.setdefault(side_key, []).append(existing)
+            protection_state[side_key] = True
     if not isinstance(orders, (list, tuple)):
         log(f"⚠️ Некорректный формат orders для {symbol}: ожидается список", Fore.YELLOW)
         return executed, False
     cancelled_success = []
     cancel_errors = []
+    cancelled_ids_set: set[str] = set()
+    pending_cancellations: list[tuple[str, list[dict[str, Any]]]] = []
+    position_closed = False
+
+    def _force_close_position_due_to_missing_protection(reason: str) -> bool:
+        nonlocal position_closed, current_position
+        if not current_position:
+            return False
+        try:
+            amount_val = float(current_position.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount_val = 0.0
+        if not math.isfinite(amount_val) or amount_val == 0:
+            return False
+        close_side = "sell" if amount_val > 0 else "buy"
+        qty = abs(amount_val)
+        params = {"reduceOnly": True}
+        position_idx = get_position_idx(close_side)
+        if position_idx is not None:
+            params["positionIdx"] = position_idx
+        try:
+            exchange.create_order(symbol, "market", close_side, qty, None, params)
+            log(
+                f"[WARN] Forced close {symbol} {close_side.upper()} {qty:.4f} due to missing protection ({reason})",
+                Fore.YELLOW,
+            )
+            send_tg(
+                f"[WARN] {symbol}: closed {close_side.upper()} {qty:.4f} because protection order failed ({reason})"
+            )
+            executed.append(f"FORCE CLOSE {close_side.upper()} {qty:.4f}")
+            position_closed = True
+            current_position = dict(current_position)
+            current_position["amount"] = 0.0
+            return True
+        except Exception as close_exc:
+            err_text = str(close_exc)
+            log(f"[ERROR] Failed to force-close {symbol}: {err_text}", Fore.RED)
+            send_tg(f"[ERROR] {symbol}: failed to close position after protection failure - {err_text}")
+            return False
     for idx, order in enumerate(orders, 1):
         if not isinstance(order, dict):
             log(f"⚠️ Пропуск order #{idx} для {symbol}: ожидается объект", Fore.YELLOW)
@@ -2800,25 +2841,14 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
             log(f"⚠️ Нужна цена для ордера #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
             continue
 
+        existing_reduce_orders = list(reduce_only_map.get(side) or [])
+        had_protection = protection_state.get(side, False) or bool(existing_reduce_orders)
         if params.get("reduceOnly"):
             if abs(position_amount) == 0:
                 log(f'[INFO] Пропуск reduce-only ордера по {symbol}: позиция отсутствует', Fore.LIGHTBLACK_EX)
                 send_tg(f'[INFO] {symbol}: reduce-only без позиции пропущен')
                 continue
-            existing_list = reduce_only_map.get(side)
-            if existing_list:
-                for existing_order in existing_list:
-                    oid = existing_order.get("id")
-                    if not oid:
-                        continue
-                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
-                    if success:
-                        cancelled_success.append(str(oid))
-                        log(f'[INFO] Отменён существующий reduce-only ордер {oid} для {symbol} перед заменой', Fore.LIGHTBLUE_EX)
-                    else:
-                        cancel_errors.append((oid, err))
-                        log(f'[WARN] Не удалось отменить reduce-only ордер {oid} для {symbol}: {err}', Fore.YELLOW)
-                reduce_only_map[side] = []
+            protection_state.setdefault(side, bool(existing_reduce_orders))
 
         try:
             order_id = exchange.create_order(symbol, ccxt_type, side, amount, price, params)
@@ -2830,14 +2860,44 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
                 desc += f" — {note}"
             executed.append(desc)
             log(f"🛠️ Доп. ордер для {symbol}: {desc}", Fore.LIGHTBLUE_EX)
+            if params.get("reduceOnly"):
+                protection_state[side] = True
+                if existing_reduce_orders:
+                    pending_cancellations.append((side, existing_reduce_orders))
+                    reduce_only_map[side] = []
         except Exception as e:
-            log(f"❌ Ошибка доп. ордера #{idx} для {symbol}: {e}", Fore.RED)
+            err_text = str(e)
+            log(f"❌ Ошибка доп. ордера #{idx} для {symbol}: {err_text}", Fore.RED)
+            if params.get("reduceOnly") and not had_protection:
+                _force_close_position_due_to_missing_protection(err_text)
+            continue
+    for side_cancel, cancel_list in pending_cancellations:
+        for existing_order in cancel_list:
+            oid = (
+                existing_order.get("id")
+                or existing_order.get("orderId")
+                or existing_order.get("order_id")
+            )
+            if not oid:
+                continue
+            oid_str = str(oid)
+            if oid_str in cancelled_ids_set:
+                continue
+            success, err = cancel_order_by_id(exchange, symbol, oid_str)
+            if success:
+                cancelled_ids_set.add(oid_str)
+                cancelled_success.append(oid_str)
+                log(f"[INFO] Cancelled existing reduce-only order {oid_str} for {symbol} after replacement", Fore.LIGHTBLUE_EX)
+            else:
+                cancel_errors.append((oid_str, err))
+                log(f"[WARN] Failed to cancel reduce-only order {oid_str} for {symbol}: {err}", Fore.YELLOW)
+
     if cancelled_success:
         send_tg(f"🗑️ {symbol}: отменены ордера {', '.join(cancelled_success)} перед заменой")
     if cancel_errors:
         errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_errors)
         send_tg(f"⚠️ {symbol}: ошибки отмены ордеров — {errs}")
-    actions_performed = bool(executed or cancelled_success or cancel_errors)
+    actions_performed = bool(executed or cancelled_success or cancel_errors or position_closed)
     return executed, actions_performed
 
 # --- Решение модели (2 прохода, русский лог) ---
@@ -3917,13 +3977,24 @@ def run_cycle():
                 dec["symbol"] = sym
             else:
                 has_position = abs(initial_position_amount) > 0
-                default_action = "hold" if has_position else "skip"
+                pending_orders = [order for order in (open_orders_symbol or []) if isinstance(order, dict)]
+                pending_count = len(pending_orders)
+                entry_orders = [
+                    order
+                    for order in pending_orders
+                    if (str(order.get("type") or "").lower() == "limit")
+                    and order.get("reduceOnly") not in (True, "true", "1", 1)
+                ]
+                has_entry_orders = bool(entry_orders)
+                default_action = "hold" if (has_position or has_entry_orders) else "skip"
                 exposure_notes = []
                 if has_position:
                     exposure_notes.append(f"open amount {initial_position_amount:.4f}")
-                pending_count = len(open_orders_symbol or [])
                 if pending_count:
-                    exposure_notes.append(f"{pending_count} pending order(s)")
+                    if has_entry_orders:
+                        exposure_notes.append(f"{pending_count} pending order(s) (entry)")
+                    else:
+                        exposure_notes.append(f"{pending_count} pending order(s)")
                 if not exposure_notes:
                     exposure_notes.append("no active exposure")
                 if trade_plan:
