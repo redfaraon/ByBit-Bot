@@ -1051,7 +1051,7 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
-            indicator_limit = 120
+            indicator_limit = 40
             for tf in requested_timeframes:
                 tf_label = str(tf)
                 try:
@@ -1152,6 +1152,32 @@ def _shrink_bundle_for_tokens(bundle, max_bars=60):
                 tf_data["bars"] = bars[-max_bars:]
 
 
+def _lighten_trade_bundle(bundle, level: int = 1):
+    clone = copy.deepcopy(bundle)
+    bars_limit = 30 if level == 1 else 20
+    drop_series = level >= 1
+    drop_stats = level >= 1
+    drop_news = level >= 2
+    for entry in clone.get("symbols", []):
+        tf_map = entry.get("timeframes") or {}
+        for tf_payload in tf_map.values():
+            if not isinstance(tf_payload, dict):
+                continue
+            bars = tf_payload.get("bars")
+            if isinstance(bars, list) and len(bars) > bars_limit:
+                tf_payload["bars"] = bars[-bars_limit:]
+            if drop_series:
+                tf_payload.pop("indicator_series", None)
+                tf_payload.pop("indicator_latest", None)
+            if drop_stats:
+                tf_payload.pop("indicator_stats", None)
+        if drop_series:
+            entry.pop("indicator_latest", None)
+        if drop_news:
+            entry.pop("news", None)
+    return clone
+
+
 def ai_plan_trades(
     exchange,
     bundle,
@@ -1160,6 +1186,7 @@ def ai_plan_trades(
     positions_snapshot=None,
     pending_orders=None,
     stage="initial",
+    attempt: int = 0,
 ):
     if not AI_KEY:
         log("?? �� 㪠��� OPENAI_API_KEY (stage plan)", Fore.RED)
@@ -1167,11 +1194,14 @@ def ai_plan_trades(
     client = OpenAI(api_key=AI_KEY, timeout=20)
     positions_payload = _compact_positions_snapshot(positions_snapshot)
     pending_orders_payload = _compact_orders_snapshot(pending_orders)
+    working_bundle = copy.deepcopy(bundle)
+    if attempt > 0:
+        working_bundle = _lighten_trade_bundle(working_bundle, level=attempt)
     payload = {
         "stage": stage,
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
-        "data": bundle,
+        "data": working_bundle,
     }
     if positions_payload:
         payload["positions_snapshot"] = positions_payload
@@ -1211,18 +1241,18 @@ def ai_plan_trades(
     if per_cap:
         hard_limit = per_cap if hard_limit is None else min(hard_limit, per_cap)
         soft_limit = per_cap if soft_limit is None else min(soft_limit, per_cap)
-    attempt = 0
+    shrink_attempt = 0
     while True:
         token_estimate = estimate_tokens(messages, AI_MODEL)
-        if hard_limit and token_estimate > hard_limit and attempt < 3:
-            _shrink_bundle_for_tokens(payload["data"], max_bars=max(20, 60 - attempt * 15))
+        if hard_limit and token_estimate > hard_limit and shrink_attempt < 3:
+            _shrink_bundle_for_tokens(payload["data"], max_bars=max(20, 60 - shrink_attempt * 15))
             messages[1]["content"] = json.dumps(payload, ensure_ascii=False)
-            attempt += 1
+            shrink_attempt += 1
             continue
-        if soft_limit and token_estimate > soft_limit and attempt < 3:
-            _shrink_bundle_for_tokens(payload["data"], max_bars=max(30, 80 - attempt * 10))
+        if soft_limit and token_estimate > soft_limit and shrink_attempt < 3:
+            _shrink_bundle_for_tokens(payload["data"], max_bars=max(30, 80 - shrink_attempt * 10))
             messages[1]["content"] = json.dumps(payload, ensure_ascii=False)
-            attempt += 1
+            shrink_attempt += 1
             continue
         break
     if per_cap and token_estimate > per_cap:
@@ -1242,7 +1272,20 @@ def ai_plan_trades(
             messages=messages,
         )
     except Exception as exc:
-        log(f"[ERROR] OpenAI trade plan: {exc}", Fore.RED)
+        log(f"[ERROR] OpenAI trade plan ({stage}, attempt={attempt}): {exc}", Fore.RED)
+        message_text = str(exc).lower()
+        if ("timed out" in message_text or "timeout" in message_text) and attempt < 2:
+            log(f"[INFO] Retrying trade plan with simplified payload (attempt {attempt + 1}).", Fore.YELLOW)
+            return ai_plan_trades(
+                exchange,
+                bundle,
+                equity,
+                available_margin,
+                positions_snapshot=positions_snapshot,
+                pending_orders=pending_orders,
+                stage=stage,
+                attempt=attempt + 1,
+            )
         return None
     _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
     content = res.choices[0].message.content
