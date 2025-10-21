@@ -3691,6 +3691,7 @@ def run_cycle():
         news_cache = dict(selection.get("_news_digest") or {})
         if news_full_cache:
             news_cache.update(news_full_cache)
+        normalized_targets: list[dict[str, Any]] = []
         for target in selection.get("targets") or []:
             raw_symbol = None
             target_payload = {}
@@ -3722,6 +3723,10 @@ def run_cycle():
             target_map[sym_sel] = target_copy
             if sym_sel not in selected_symbols:
                 selected_symbols.append(sym_sel)
+            normalized_targets.append(target_copy)
+        if isinstance(selection, dict):
+            selection = dict(selection)
+            selection["targets"] = normalized_targets
         selection_reason = selection.get("reason")
         if selection_reason:
             log(f"[INFO] Portfolio rationale: {selection_reason}", Fore.CYAN)
