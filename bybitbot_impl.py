@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.20.2
+# Version: 2025.10.20.6
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.20.2"
+BOT_VERSION = "2025.10.20.6"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -262,6 +262,93 @@ def safe_float(val):
     return None
 
 
+def safe_int(val):
+    try:
+        if val is None or val == "":
+            return None
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            if math.isnan(val):
+                return None
+            return int(round(val))
+        if isinstance(val, str):
+            cleaned = val.replace(',', '').strip()
+            if not cleaned:
+                return None
+            return int(float(cleaned))
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+def _resolve_symbol_leverage(decision: dict, symbol_meta: dict, current_position: dict | None, default: int | None = None) -> int:
+    fallback = default if default is not None else LEVERAGE
+    candidates = [
+        (decision or {}).get("leverage"),
+        ((decision or {}).get("config") or {}).get("leverage") if isinstance(decision, dict) else None,
+        ((decision or {}).get("risk") or {}).get("leverage") if isinstance(decision, dict) else None,
+        (symbol_meta or {}).get("leverage"),
+        ((symbol_meta or {}).get("config") or {}).get("leverage") if isinstance(symbol_meta, dict) else None,
+        (symbol_meta or {}).get("risk", {}).get("leverage") if isinstance(symbol_meta, dict) else None,
+        (current_position or {}).get("leverage") if isinstance(current_position, dict) else None,
+        fallback,
+    ]
+    for value in candidates:
+        leverage_val = safe_int(value)
+        if leverage_val and leverage_val > 0:
+            return leverage_val
+    return max(1, safe_int(fallback) or 1)
+
+
+def _set_symbol_leverage(exchange, symbol: str, leverage: int, current_position: dict | None = None):
+    leverage_val = safe_int(leverage)
+    if leverage_val is None or leverage_val <= 0:
+        return
+    current_lev = safe_float((current_position or {}).get("leverage") if isinstance(current_position, dict) else None)
+    if current_lev is not None and math.isfinite(current_lev) and abs(current_lev - leverage_val) < 1e-6:
+        return
+    try:
+        exchange.set_leverage(leverage_val, symbol)
+    except Exception as e:
+        code = get_bybit_retcode(e)
+        if code == 110043:
+            log(f"ℹ️ Плечо {leverage_val}x уже установлено для {symbol} (код {code})", Fore.LIGHTBLACK_EX)
+        else:
+            log(f"⚠️ Не удалось установить плечо {leverage_val}x для {symbol}: {e}", Fore.YELLOW)
+
+
+
+def _extract_decision_position_size(decision, symbol_meta=None):
+    """Extract an absolute size or notional for the primary action from AI payload."""
+    sources: list[dict] = []
+    if isinstance(decision, dict):
+        sources.append(decision)
+        for key in ("config", "sizing", "risk"):
+            value = decision.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+    if isinstance(symbol_meta, dict):
+        sources.append(symbol_meta)
+        for key in ("config", "sizing", "risk"):
+            value = symbol_meta.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("amount", "qty", "quantity", "contracts", "size", "units"):
+            val = source.get(key)
+            amount = safe_float(val)
+            if amount and amount > 0:
+                return amount, None
+        for key in ("notional", "notional_usdt", "quote", "notionalQuote"):
+            val = source.get(key)
+            notional = safe_float(val)
+            if notional and notional > 0:
+                return None, notional
+    return None, None
+
 def detect_unprotected_positions(exchange, positions_map) -> list[tuple[str, str]]:
     missing: list[tuple[str, str]] = []
     for symbol, position in (positions_map or {}).items():
@@ -460,9 +547,17 @@ def _build_news_digest(symbols):
                 continue
             summary = news_payload.get("summary") or ""
             items = news_payload.get("items") or []
+            trimmed_items = []
+            for item in items[: max(1, min(len(items), 3))]:
+                trimmed_items.append({
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "source": item.get("source"),
+                    "published_at": item.get("published_at"),
+                })
             digest[sym] = {
                 "summary": summary,
-                "items": items[: max(1, min(len(items), 3))]
+                "items": trimmed_items
             }
         except Exception as exc:
             log(f"[WARN] Failed to fetch news headlines for {sym}: {exc}", Fore.YELLOW)
@@ -1131,7 +1226,7 @@ def refresh_settings():
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
     global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
-    global NEWS_API_TOKEN, NEWS_API_ENDPOINT, NEWS_API_KINDS, NEWS_API_FILTER, NEWS_ITEMS_LIMIT
+    global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
@@ -1186,10 +1281,8 @@ def refresh_settings():
     PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
     PAIR_PREFETCH_LIMIT = env_int("PAIR_PREFETCH_LIMIT", PAIR_PREFETCH_LIMIT)
 
+    NEWS_PROVIDER = (os.getenv("CRYPTO_NEWS_PROVIDER") or "cryptocompare").strip().lower()
     NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
-    NEWS_API_ENDPOINT = os.getenv("CRYPTO_NEWS_ENDPOINT", "https://cryptopanic.com/api/v1/posts/")
-    NEWS_API_KINDS = os.getenv("CRYPTO_NEWS_KIND", "news,media")
-    NEWS_API_FILTER = os.getenv("CRYPTO_NEWS_FILTER", "important")
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
     POSITION_MODE = (os.getenv("BYBIT_POSITION_MODE") or "oneway").strip().lower()
     HEDGE_MODE = POSITION_MODE in ("hedge", "hedged", "dual", "dual_side", "dual-side")
@@ -1216,6 +1309,11 @@ RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://u.today/rss",
 ]
+
+NEWS_PROVIDER = "cryptocompare"
+NEWS_API_TOKEN = ""
+NEWS_ITEMS_LIMIT = 5
+
 
 
 refresh_settings()
@@ -1827,11 +1925,19 @@ def get_news_from_rss(base_symbol: str, limit: int):
         for entry in feed.entries[:10]:
             title = entry.get("title", "")
             link = entry.get("link")
+            summary_text = (
+                entry.get("summary")
+                or (entry.get("summary_detail") or {}).get("value")
+                or entry.get("description")
+                or ""
+            )
+            published_raw = entry.get("published", entry.get("updated"))
             item = {
                 "title": title,
                 "url": link,
                 "source": entry.get("source", {}).get("title") if isinstance(entry.get("source"), dict) else entry.get("source"),
-                "published_at": entry.get("published", entry.get("updated"))
+                "published_at": to_iso_utc(published_raw),
+                "body": summary_text,
             }
             general_articles.append(item)
             if base_upper and base_upper in title.upper():
@@ -1851,10 +1957,57 @@ def get_news_from_rss(base_symbol: str, limit: int):
     return {"summary": summary, "items": selected, "asset": base_upper, "source": "rss"}
 
 
+def get_news_from_cryptocompare(base_symbol: str, limit: int):
+    url = "https://min-api.cryptocompare.com/data/v2/news/"
+    params = {
+        "lang": "EN",
+        "sortOrder": "latest",
+    }
+    try:
+        response = requests.get(url, params=params, timeout=6)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        log(f"[WARN] CryptoCompare news unavailable: {exc}", Fore.YELLOW)
+        return {"summary": "CryptoCompare unavailable", "items": [], "asset": base_symbol.upper(), "source": "cryptocompare"}
+    articles = payload.get("Data") or []
+    base_upper = (base_symbol or "").upper()
+    focused: list[dict[str, Any]] = []
+    general: list[dict[str, Any]] = []
+    for art in articles:
+        title = art.get("title") or ""
+        categories = (art.get("categories") or "").upper()
+        entry = {
+            "title": title,
+            "body": art.get("body") or art.get("summary") or "",
+            "url": art.get("url"),
+            "source": (art.get("source_info") or {}).get("name") or art.get("source"),
+            "published_at": to_iso_utc(art.get("published_on")),
+        }
+        if base_upper and (base_upper in title.upper() or base_upper in categories):
+            focused.append(entry)
+        else:
+            general.append(entry)
+        if len(focused) >= limit and len(general) >= limit:
+            break
+    selected = focused[:limit] if focused else general[:limit]
+    summary = (
+        f"CryptoCompare {len(selected)} articles for {base_upper}"
+        if base_upper and selected
+        else (f"CryptoCompare {len(selected)} latest articles" if selected else "CryptoCompare: no articles")
+    )
+    return {"summary": summary, "items": selected, "asset": base_upper, "source": "cryptocompare"}
+
 def get_news(symbol):
     base = symbol.split("/")[0].split(":")[0].upper()
     limit = max(1, NEWS_ITEMS_LIMIT)
-    log("[INFO] Using RSS feeds only for news.", Fore.LIGHTBLACK_EX)
+    provider_payload = None
+    if NEWS_PROVIDER in ("cryptocompare", "cc", "crypto"):
+        provider_payload = get_news_from_cryptocompare(base, limit)
+        if provider_payload.get("items"):
+            return provider_payload
+    if NEWS_PROVIDER and NEWS_PROVIDER not in ("cryptocompare", "cc", "crypto"):
+        log(f"[WARN] Unknown NEWS_PROVIDER '{NEWS_PROVIDER}', falling back to RSS.", Fore.YELLOW)
     return get_news_from_rss(base, limit)
 
 # --- Подключение к бирже ---
@@ -2800,7 +2953,7 @@ def ai_decision(
         return context
 
     def build_prompt(extra=None, bias=False):
-        news_desc = "CryptoPanic API (fallback: RSS крипто-ленты)" if NEWS_API_TOKEN else "RSS новости по ключевому активу"
+        news_desc = "CryptoCompare API (fallback: RSS feeds)" if NEWS_PROVIDER in ("cryptocompare", "cc", "crypto") else "RSS headlines for the asset"
         prompt = {
             "символ": symbol,
             "финансы": {
@@ -3291,7 +3444,9 @@ def run_cycle():
 
     ensure_position_mode(ex)
     positions_map, open_positions = fetch_positions_snapshot(ex)
-    if MAX_OPEN_POSITIONS > 0 and open_positions is None:
+    base_max_positions = max(0, MAX_OPEN_POSITIONS or 0)
+    max_positions_limit = base_max_positions
+    if max_positions_limit > 0 and open_positions is None:
         log("⚠️ Не удалось определить количество открытых позиций — лимит по позициям отключён на этот цикл", Fore.YELLOW)
         open_positions = None
     equity, available_margin, _ = fetch_usdt_equity(ex)
@@ -3385,6 +3540,36 @@ def run_cycle():
     if selection_result is None:
         selection_result = None
 
+    if selection_result:
+        limit_candidates: list[Any] = []
+        limits_block = selection_result.get("limits")
+        if isinstance(limits_block, dict):
+            limit_candidates.extend(
+                limits_block.get(key)
+                for key in (
+                    "max_positions",
+                    "maxPositions",
+                    "max_open_positions",
+                    "maxOpenPositions",
+                )
+            )
+        limit_candidates.extend(
+            selection_result.get(key)
+            for key in (
+                "max_positions",
+                "maxPositions",
+                "max_open_positions",
+                "maxOpenPositions",
+            )
+        )
+        for candidate in limit_candidates:
+            val = safe_int(candidate)
+            if val and val > 0:
+                max_positions_limit = val
+                break
+        if max_positions_limit != base_max_positions and max_positions_limit > 0:
+            log(f"[INFO] Model requested max open positions: {max_positions_limit}", Fore.LIGHTBLACK_EX)
+
     open_orders_prefetch: dict[str, list] = {}
     order_symbols: set[str] = set()
     order_symbols_non_reduce: set[str] = set()
@@ -3441,7 +3626,7 @@ def run_cycle():
     seen_available: set[str] = set()
 
     news_sorted = sorted(news_priority)
-    if MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS:
+    if max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
         _append_unique(available_pairs, sorted(position_symbols), seen_available)
         _append_unique(available_pairs, sorted(order_symbols), seen_available)
     else:
@@ -3450,6 +3635,15 @@ def run_cycle():
         _append_unique(available_pairs, sorted(order_symbols), seen_available)
         remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
         _append_unique(available_pairs, remaining_pairs, seen_available)
+
+    selection_pairs = universe_state.get("pairs") or []
+    selection_pairs_normalized: list[str] = []
+    for raw_pair in selection_pairs:
+        if not raw_pair:
+            continue
+        resolved_pair = normalize_symbol(raw_pair, record_missing=False)
+        selection_pairs_normalized.append(resolved_pair or raw_pair)
+    selection_pairs = [p for p in selection_pairs_normalized if p]
 
     if not available_pairs:
         available_pairs = normalized_pair_list[:PAIR_CANDIDATE_LIMIT]
@@ -3476,14 +3670,6 @@ def run_cycle():
 
     open_orders_cache = dict(open_orders_prefetch)
 
-    selection_pairs = universe_state.get("pairs") or []
-    selection_pairs_normalized: list[str] = []
-    for raw_pair in selection_pairs:
-        if not raw_pair:
-            continue
-        resolved_pair = normalize_symbol(raw_pair, record_missing=False)
-        selection_pairs_normalized.append(resolved_pair or raw_pair)
-    selection_pairs = [p for p in selection_pairs_normalized if p]
     if not selection_pairs:
         selection_pairs = available_pairs
     analysis_pool_count = len(selection_pairs) if selection_pairs else len(available_pairs)
@@ -3731,6 +3917,9 @@ def run_cycle():
                 }
             if symbol_meta.get("notional_pct") is not None and dec.get("notional_pct") is None:
                 dec["notional_pct"] = symbol_meta.get("notional_pct")
+            symbol_leverage = _resolve_symbol_leverage(dec, symbol_meta, current_position)
+            dec["leverage"] = symbol_leverage
+            _set_symbol_leverage(ex, sym, symbol_leverage, current_position)
             save_json_line(
                 AI_LOG_FILE,
                 {
@@ -3886,9 +4075,9 @@ def run_cycle():
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
                     send_tg(f"⚠️ {sym}: позиция уже открыта, сигнал open пропущен")
-                elif MAX_OPEN_POSITIONS > 0 and open_positions is not None and open_positions >= MAX_OPEN_POSITIONS:
-                    log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{MAX_OPEN_POSITIONS}), пропускаем {sym}", Fore.YELLOW)
-                    send_tg(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{MAX_OPEN_POSITIONS}), {sym} пропущен")
+                elif max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
+                    log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), пропускаем {sym}", Fore.YELLOW)
+                    send_tg(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), {sym} пропущен")
                 else:
                     log(f"🟢 Сигнал {side.upper()} ({reason})", Fore.GREEN)
                     send_tg(f"🟢 {sym} {side.upper()} — {reason or 'причина не указана'}")
@@ -3932,30 +4121,47 @@ def run_cycle():
                         log(f"ℹ️ Пропуск лимитного ордера {sym}: уже выставлен {side.upper()} @ {dup_price}", Fore.LIGHTBLACK_EX)
                         send_tg(f"ℹ️ {sym}: лимит {side.upper()} @ {dup_price} уже активен, новый ордер не размещён")
                         continue
-                    risk_distance = abs(price - sl)
-                    if risk_distance <= 0 or not math.isfinite(risk_distance):
-                        log(f"⚠️ Невалидная дистанция до SL для {sym}, пропуск сигнала", Fore.YELLOW)
-                        send_tg(f"⚠️ {sym}: не удалось вычислить расстояние до стопа")
-                        continue
-                    risk_budget_base = max(0.0, min(equity, available_margin))
-                    risk_capital = risk_budget_base * RISK_PCT
-                    if risk_capital <= 0:
-                        log(f"⛔ Недостаточно доступной маржи для {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
-                        send_tg(f"⛔ {sym}: недостаточно свободной маржи ({available_margin:.2f} USDT)")
-                        continue
-                    qty = risk_capital / risk_distance
+                    explicit_qty, explicit_notional = _extract_decision_position_size(dec, symbol_meta)
+                    qty = None
+                    notional = None
+                    if explicit_qty is not None or explicit_notional is not None:
+                        if price is None or not math.isfinite(price) or price <= 0:
+                            log(f"⚠️ Невозможно применить объём для {sym}: недопустимая цена", Fore.YELLOW)
+                            send_tg(f"⚠️ {sym}: модель прислала объём, но цена недоступна — пропускаем сделку.")
+                            continue
+                        qty = explicit_qty if explicit_qty is not None else explicit_notional / price
+                        notional = qty * price
+                    else:
+                        risk_distance = abs(price - sl)
+                        if risk_distance <= 0 or not math.isfinite(risk_distance):
+                            log(f"⚠️ Невозможно рассчитать риск для {sym}", Fore.YELLOW)
+                            send_tg(f"⚠️ {sym}: не удалось оценить риск, сделка пропущена")
+                            continue
+                        risk_budget_base = max(0.0, min(equity, available_margin))
+                        risk_capital = risk_budget_base * RISK_PCT
+                        if risk_capital <= 0:
+                            log(f"⚠️ Недостаточно бюджета риска для {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
+                            send_tg(f"⚠️ {sym}: недостаточно свободного баланса ({available_margin:.2f} USDT)")
+                            continue
+                        qty = risk_capital / risk_distance
+                        if not math.isfinite(qty) or qty <= 0:
+                            log(f"⚠️ Расчёт объёма дал некорректное значение для {sym}", Fore.YELLOW)
+                            continue
+                        notional = qty * price
+                        if not math.isfinite(notional) or notional <= 0:
+                            log(f"⚠️ Невозможно определить нотионал для {sym}", Fore.YELLOW)
+                            continue
                     if not math.isfinite(qty) or qty <= 0:
-                        log(f"⚠️ Расчёт объёма дал некорректное значение для {sym}", Fore.YELLOW)
+                        log(f"⚠️ Объём сделки некорректен для {sym}", Fore.YELLOW)
                         continue
-                    notional = qty * price
                     if not math.isfinite(notional) or notional <= 0:
-                        log(f"⚠️ Невозможно определить нотионал для {sym}", Fore.YELLOW)
+                        log(f"⚠️ Нотионал сделки некорректен для {sym}", Fore.YELLOW)
                         continue
                     if notional < MIN_NOTIONAL_USDT:
                         qty = MIN_NOTIONAL_USDT / price
                         notional = qty * price
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
-                    max_notional = effective_margin * LEVERAGE
+                    max_notional = effective_margin * max(1, symbol_leverage)
                     if max_notional <= 0:
                         log(f"⛔ Доступная маржа для {sym} исчерпана", Fore.YELLOW)
                         send_tg(f"⛔ {sym}: доступная маржа исчерпана")
@@ -3964,7 +4170,7 @@ def run_cycle():
                         log(f"⛔ Недостаточно маржи для минимального ордера {sym} (доступно {available_margin:.2f} USDT)", Fore.YELLOW)
                         send_tg(f"⛔ {sym}: маржа меньше минимального объёма (доступно {available_margin:.2f} USDT)")
                         continue
-                    margin_required = notional / LEVERAGE if LEVERAGE else notional
+                    margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
                         log(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT превышает доступную {effective_margin:.2f} USDT, ордер пропущен', Fore.YELLOW)
                         send_tg(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT больше доступной {effective_margin:.2f} USDT, ордер пропущен')
@@ -3986,25 +4192,17 @@ def run_cycle():
                         send_tg(f"⛔ {sym}: объём после округления ниже минимума ({notional:.2f} USDT)")
                         continue
                     try:
-                        ex.set_leverage(LEVERAGE, sym)
-                    except Exception as e:
-                        code = get_bybit_retcode(e)
-                        if code == 110043:
-                            log(f"ℹ️ Плечо {LEVERAGE}x уже установлено для {sym} (код {code})", Fore.LIGHTBLACK_EX)
-                        else:
-                            log(f"⚠️ Ошибка установки плеча: {e}", Fore.YELLOW)
-                    try:
                         position_idx = get_position_idx(side)
                         params = {"takeProfit": tp, "stopLoss": sl, "tpSlMode": "Full", "reduceOnly": False}
                         if position_idx is not None:
                             params["positionIdx"] = position_idx
-                        margin_required = notional / LEVERAGE if LEVERAGE else notional
+                        margin_required = notional / symbol_leverage if symbol_leverage else notional
                         ex.create_order(sym, "limit", side, qty, price, params)
                         log(f"✅ Ордер {sym} {side.upper()} {qty:.4f}@{price:.2f} SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
                             f"✅ {sym} {side.upper()} @ {price:.2f}\n"
                             f"SL {sl:.2f} TP {tp:.2f}\n"
-                            f"Объём {notional:.2f} USDT, маржа {margin_required:.2f} USDT"
+                            f"Объём {notional:.2f} USDT, маржа {margin_required:.2f} USDT, плечо x{symbol_leverage}"
                         )
                         positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                         current_position = positions_map.get(sym)
@@ -4018,9 +4216,9 @@ def run_cycle():
 
             current_amount_val = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts"))
             limit_blocks_new_orders = (
-                MAX_OPEN_POSITIONS > 0
+                max_positions_limit > 0
                 and open_positions is not None
-                and open_positions >= MAX_OPEN_POSITIONS
+                and open_positions >= max_positions_limit
                 and (current_amount_val is None or abs(current_amount_val) == 0)
             )
             if limit_blocks_new_orders:
@@ -4062,10 +4260,10 @@ def run_cycle():
             if detail_entry is None:
                 if action == "open":
                     direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
-                    detail_entry = f"[{sym}] - открыт {direction or 'позиция'}"
+                    detail_entry = f"[{sym}] - открыт {direction or 'позиция'} (плечо x{symbol_leverage})"
                 elif action == "close":
                     direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
-                    detail_entry = f"[{sym}] - закрыт {direction or 'позиция'}"
+                    detail_entry = f"[{sym}] - закрыт {direction or 'позиция'} (плечо x{symbol_leverage})"
                 elif action == "manage":
                     detail_entry = f"[{sym}] - держим позицию ({'меняли ордера' if orders_activity else 'ордера без изменений'})"
                 elif action in ("hold", "none"):
@@ -4348,3 +4546,4 @@ if __name__ == "__main__":
         if exit_code != 0:
             log(f"Fallback version exited with code {exit_code}", Fore.RED)
         sys.exit(exit_code)
+
