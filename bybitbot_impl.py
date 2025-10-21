@@ -3692,14 +3692,31 @@ def run_cycle():
         if news_full_cache:
             news_cache.update(news_full_cache)
         for target in selection.get("targets") or []:
-            raw_symbol = target.get("symbol")
+            raw_symbol = None
+            target_payload = {}
+            if isinstance(target, str):
+                raw_symbol = target.strip()
+            elif isinstance(target, dict):
+                target_payload = dict(target)
+                symbol_candidates = (
+                    target_payload.get("symbol"),
+                    target_payload.get("pair"),
+                    target_payload.get("ticker"),
+                )
+                for candidate in symbol_candidates:
+                    if isinstance(candidate, str) and candidate.strip():
+                        raw_symbol = candidate.strip()
+                        break
+            else:
+                log(f"[WARN] Ignoring unexpected target payload of type {type(target)!r}", Fore.YELLOW)
+                continue
             if not raw_symbol:
                 continue
             sym_sel = normalize_symbol(raw_symbol)
             if not sym_sel:
                 selection_missing_symbols.append(raw_symbol)
                 continue
-            target_copy = dict(target)
+            target_copy = dict(target_payload)
             target_copy["symbol"] = sym_sel
             target_copy.setdefault("raw_symbol", raw_symbol)
             target_map[sym_sel] = target_copy
