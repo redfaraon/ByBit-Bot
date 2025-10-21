@@ -16,7 +16,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
-import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, copy
+import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
 from pathlib import Path
 from typing import Optional, Tuple, Any
 import pandas as pd
@@ -624,7 +624,7 @@ def _expand_indicator_entries(entry) -> list:
     return result
 
 
-def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[list[str] | str]:
+def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[str]:
     if df.empty:
         return None
     base, length = _parse_indicator_name(indicator_name)
@@ -654,94 +654,6 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[li
             high_max = df["high"].rolling(period).max()
             df[col] = 100 * (df["close"] - low_min) / (high_max - low_min).replace(0, pd.NA)
             return col
-        if base == "macd":
-            fast = 12
-            slow = 26
-            signal = 9
-            if length:
-                fast = max(2, int(length))
-                slow = max(fast + 1, fast * 2)
-            ema_fast = ema(df["close"], fast)
-            ema_slow = ema(df["close"], slow)
-            macd_line = ema_fast - ema_slow
-            signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-            hist_line = macd_line - signal_line
-            df["macd"] = macd_line
-            df["macd_signal"] = signal_line
-            df["macd_hist"] = hist_line
-            return ["macd", "macd_signal", "macd_hist"]
-        if base == "bbands":
-            period = length or 20
-            multiplier = 2.0
-            rolling_mean = df["close"].rolling(period).mean()
-            rolling_std = df["close"].rolling(period).std(ddof=0)
-            df["bbands_basis"] = rolling_mean
-            df["bbands_upper"] = rolling_mean + multiplier * rolling_std
-            df["bbands_lower"] = rolling_mean - multiplier * rolling_std
-            return ["bbands_basis", "bbands_upper", "bbands_lower"]
-        if base == "vwma":
-            period = length or 20
-            if "volume" not in df.columns:
-                return None
-            price_volume = df["close"] * df["volume"]
-            rolling_pv = price_volume.rolling(period).sum()
-            rolling_volume = df["volume"].rolling(period).sum()
-            col = f"vwma{period}"
-            df[col] = rolling_pv / rolling_volume.replace(0, pd.NA)
-            return col
-        if base == "supertrend":
-            period = length or 10
-            multiplier = 3.0
-            atr_series = atr(df, period)
-            hl2 = (df["high"] + df["low"]) / 2.0
-            basic_upper = hl2 + multiplier * atr_series
-            basic_lower = hl2 - multiplier * atr_series
-            final_upper = basic_upper.copy()
-            final_lower = basic_lower.copy()
-            for i in range(1, len(df)):
-                if df["close"].iloc[i - 1] > final_upper.iloc[i - 1]:
-                    final_upper.iloc[i] = basic_upper.iloc[i]
-                else:
-                    final_upper.iloc[i] = min(basic_upper.iloc[i], final_upper.iloc[i - 1])
-                if df["close"].iloc[i - 1] < final_lower.iloc[i - 1]:
-                    final_lower.iloc[i] = basic_lower.iloc[i]
-                else:
-                    final_lower.iloc[i] = max(basic_lower.iloc[i], final_lower.iloc[i - 1])
-            supertrend_col = f"supertrend{period}"
-            direction_col = f"supertrend_dir{period}"
-            df[supertrend_col] = pd.NA
-            df[direction_col] = 1
-            current_supertrend = final_upper.iloc[0]
-            current_direction = -1
-            for i in range(len(df)):
-                if i == 0:
-                    current_supertrend = final_upper.iloc[i]
-                    current_direction = -1
-                else:
-                    if current_supertrend == final_upper.iloc[i - 1]:
-                        if df["close"].iloc[i] <= final_upper.iloc[i]:
-                            current_supertrend = final_upper.iloc[i]
-                            current_direction = -1
-                        else:
-                            current_supertrend = final_lower.iloc[i]
-                            current_direction = 1
-                    elif current_supertrend == final_lower.iloc[i - 1]:
-                        if df["close"].iloc[i] >= final_lower.iloc[i]:
-                            current_supertrend = final_lower.iloc[i]
-                            current_direction = 1
-                        else:
-                            current_supertrend = final_upper.iloc[i]
-                            current_direction = -1
-                df.at[df.index[i], supertrend_col] = current_supertrend
-                df.at[df.index[i], direction_col] = current_direction
-            df[f"supertrend_upper{period}"] = final_upper
-            df[f"supertrend_lower{period}"] = final_lower
-            return [
-                supertrend_col,
-                direction_col,
-                f"supertrend_upper{period}",
-                f"supertrend_lower{period}",
-            ]
     except Exception as exc:
         log(f"[WARN] Failed to apply indicator {indicator_name}: {exc}", Fore.YELLOW)
     return None
@@ -767,92 +679,11 @@ def _serialize_df(df: pd.DataFrame, limit: int = 80):
     return result
 
 
-def _serialize_indicator_series(series: pd.Series, limit: int = 40) -> list:
-    if series is None or series.empty:
-        return []
-    trimmed = series.tail(limit).dropna()
-    output: list = []
-    for value in trimmed:
-        if isinstance(value, (int, float, numbers.Number)):
-            if math.isfinite(float(value)):
-                output.append(float(value))
-        elif isinstance(value, (list, tuple)):
-            output.append([float(v) if isinstance(v, (int, float, numbers.Number)) else v for v in value])
-        else:
-            output.append(value)
-    return output
-
-
-def _indicator_stats(series: pd.Series) -> dict:
-    stats: dict[str, float] = {}
-    if series is None or series.empty:
-        return stats
-    clean = series.dropna()
-    if clean.empty:
-        return stats
-    latest = clean.iloc[-1]
-    stats["latest"] = float(latest) if isinstance(latest, (int, float, numbers.Number)) else latest
-    if len(clean) >= 2:
-        prev = clean.iloc[-2]
-        if isinstance(prev, (int, float, numbers.Number)):
-            stats["prev"] = float(prev)
-            if isinstance(latest, (int, float, numbers.Number)):
-                stats["delta"] = float(latest) - float(prev)
-    if len(clean) >= 5 and isinstance(clean.iloc[-1], (int, float, numbers.Number)):
-        window = clean.tail(5).reset_index(drop=True)
-        x = list(range(len(window)))
-        mean_x = sum(x) / len(x)
-        mean_y = sum(float(v) for v in window) / len(window)
-        numerator = sum((x[i] - mean_x) * (float(window[i]) - mean_y) for i in range(len(window)))
-        denominator = sum((x_i - mean_x) ** 2 for x_i in x) or 1.0
-        stats["slope"] = numerator / denominator
-    return stats
-
-
-def _limit_timeframes(timeframes: list[str] | None) -> list[str]:
-    result: list[str] = []
-    candidates = list(TIMEFRAME_PRIORITY)
-    if timeframes:
-        candidates.extend(timeframes)
-    for tf in candidates:
-        mapped = normalize_requested_timeframe(tf, default=TIMEFRAME)
-        if mapped and mapped not in result:
-            result.append(mapped)
-        if len(result) >= MAX_BASE_TIMEFRAMES:
-            break
-    return result
-
-
-def _normalize_indicator_name(name: str | None) -> str | None:
-    if not name:
-        return None
-    return str(name).strip()
-
-
-def _limit_indicators(indicators: list[str] | None) -> list[str]:
-    result: list[str] = []
-    if indicators:
-        extras = [val for val in indicators if val]
-    else:
-        extras = []
-    candidates = INDICATOR_PRIORITY + extras
-    for item in candidates:
-        normalized = _normalize_indicator_name(item)
-        if not normalized:
-            continue
-        if normalized not in result:
-            result.append(normalized)
-        if len(result) >= MAX_BASE_INDICATORS:
-            break
-    return result
-
-
 def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: list, news_cache=None):
     dataset = {"symbol": symbol, "timeframes": {}, "indicators": [], "errors": []}
     indicators = indicators or []
     timeframes = timeframes or [TIMEFRAME, "4h"]
     seen_cols = set()
-    indicator_limit = 120
     for tf in timeframes:
         try:
             df_tf = fetch_df(exchange, symbol, tf)
@@ -861,54 +692,18 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
             dataset["errors"].append(err)
             log(f"[WARN] {symbol}: {err}", Fore.YELLOW)
             continue
-        applied_columns: list[str] = []
-        indicator_series: dict[str, list] = {}
-        indicator_latest: dict[str, float] = {}
+        applied = []
         for ind in indicators:
-            cols = _apply_indicator_to_df(df_tf, ind)
-            if not cols:
-                continue
-            if isinstance(cols, str):
-                cols_list = [cols]
-            else:
-                cols_list = list(cols)
-            applied_columns.extend(cols_list)
-            seen_cols.update(cols_list)
-            for col in cols_list:
-                if col in df_tf:
-                    series_payload = _serialize_indicator_series(df_tf[col], limit=indicator_limit)
-                    if series_payload:
-                        indicator_series[col] = series_payload
-                        latest_val = df_tf[col].dropna().iloc[-1]
-                        if isinstance(latest_val, (int, float, numbers.Number)) and math.isfinite(float(latest_val)):
-                            indicator_latest[col] = float(latest_val)
-        timeframe_payload = {
+            col = _apply_indicator_to_df(df_tf, ind)
+            if col:
+                applied.append(col)
+                seen_cols.add(col)
+        dataset["timeframes"][tf] = {
             "bars": _serialize_df(df_tf)
         }
-        if applied_columns:
-            timeframe_payload["indicator_columns"] = applied_columns
-        if indicator_series:
-            timeframe_payload["indicator_series"] = indicator_series
-        if indicator_latest:
-            timeframe_payload["indicator_latest"] = indicator_latest
-        if applied_columns:
-            stats_block = {}
-            for col_name in applied_columns:
-                if col_name in df_tf:
-                    stats_payload = _indicator_stats(df_tf[col_name])
-                    if stats_payload:
-                        stats_block[col_name] = stats_payload
-            if stats_block:
-                timeframe_payload["indicator_stats"] = stats_block
-        dataset["timeframes"][tf] = timeframe_payload
+        if applied:
+            dataset["timeframes"][tf]["indicators"] = applied
     dataset["indicators"] = sorted(seen_cols)
-    if dataset["timeframes"]:
-        latest_map = {}
-        for tf_entry in dataset["timeframes"].values():
-            for col, val in (tf_entry.get("indicator_latest") or {}).items():
-                latest_map[col] = val
-        if latest_map:
-            dataset["indicator_latest"] = latest_map
     dataset["position"] = None
     dataset["open_orders"] = []
     if news_cache and symbol in news_cache:
@@ -1018,16 +813,16 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
 
 def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None):
     targets = (selection_result or {}).get("targets") or []
-    global_timeframes = _limit_timeframes((selection_result or {}).get("global_timeframes") or [])
-    global_indicators = _limit_indicators((selection_result or {}).get("global_indicators") or [])
+    global_timeframes = set((selection_result or {}).get("global_timeframes") or [])
+    global_indicators = set((selection_result or {}).get("global_indicators") or [])
     bundle = {"symbols": [], "meta": {}}
     open_orders_cache = {}
     for target in targets:
         symbol = target.get("symbol")
         if not symbol:
             continue
-        timeframes = _limit_timeframes((target.get("timeframes") or []) + list(global_timeframes))
-        indicators = _limit_indicators((target.get("indicators") or []) + list(global_indicators))
+        timeframes = list(set((target.get("timeframes") or []) + list(global_timeframes)))
+        indicators = list(set((target.get("indicators") or []) + list(global_indicators)))
         dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
         dataset["target"] = {
             "notional_pct": target.get("notional_pct"),
@@ -1047,8 +842,8 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
         open_orders_cache[symbol] = open_orders
         bundle["symbols"].append(dataset)
     bundle["meta"] = {
-        "global_timeframes": global_timeframes,
-        "global_indicators": global_indicators,
+        "global_timeframes": list(global_timeframes),
+        "global_indicators": list(global_indicators),
         "confidence": (selection_result or {}).get("confidence"),
         "reason": (selection_result or {}).get("reason"),
     }
@@ -1056,9 +851,8 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
 
 
 def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_full=None):
-    enriched = False
     if not needs:
-        return bundle, enriched
+        return bundle
     symbol_map = {entry['symbol']: entry for entry in bundle.get('symbols', []) if entry.get('symbol')}
     for need in needs:
         if isinstance(need, dict):
@@ -1085,12 +879,10 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                 mapped_tf = normalize_requested_timeframe(tf, default=TIMEFRAME)
                 if mapped_tf and mapped_tf not in timeframe_requests:
                     timeframe_requests.append(mapped_tf)
-            requested_timeframes = _limit_timeframes(timeframe_requests or [TIMEFRAME])
+            requested_timeframes = timeframe_requests or [TIMEFRAME]
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
-            requested_indicators = _limit_indicators(requested_indicators)
-            indicator_limit = 40
             for tf in requested_timeframes:
                 tf_label = str(tf)
                 try:
@@ -1098,88 +890,33 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                 except Exception as exc:
                     dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
                     continue
-                applied_columns: list[str] = []
-                indicator_series: dict[str, list] = {}
-                indicator_latest: dict[str, float] = {}
+                applied = []
                 for ind in requested_indicators:
-                    cols = _apply_indicator_to_df(df_tf, ind)
-                    if not cols:
-                        continue
-                    if isinstance(cols, str):
-                        cols_list = [cols]
-                    else:
-                        cols_list = list(cols)
-                    applied_columns.extend(cols_list)
-                    for col in cols_list:
-                        if col in df_tf:
-                            series_payload = _serialize_indicator_series(df_tf[col], limit=indicator_limit)
-                            if series_payload:
-                                indicator_series[col] = series_payload
-                                latest_val = df_tf[col].dropna().iloc[-1]
-                                if isinstance(latest_val, (int, float, numbers.Number)) and math.isfinite(float(latest_val)):
-                                    indicator_latest[col] = float(latest_val)
-                timeframe_entry = dataset.setdefault('timeframes', {}).setdefault(tf_label, {})
-                timeframe_entry['bars'] = _serialize_df(df_tf)
-                enriched = True
-                if applied_columns:
-                    existing_cols = set(timeframe_entry.get("indicator_columns") or [])
-                    timeframe_entry["indicator_columns"] = list(sorted(existing_cols | set(applied_columns)))
-                if indicator_series:
-                    existing_series = timeframe_entry.get("indicator_series") or {}
-                    existing_series.update(indicator_series)
-                    timeframe_entry["indicator_series"] = existing_series
-                if indicator_latest:
-                    existing_latest = timeframe_entry.get("indicator_latest") or {}
-                    existing_latest.update(indicator_latest)
-                    timeframe_entry["indicator_latest"] = existing_latest
-                if applied_columns:
-                    stats_block = timeframe_entry.get("indicator_stats") or {}
-                    for col_name in applied_columns:
-                        if col_name in df_tf:
-                            stats_payload = _indicator_stats(df_tf[col_name])
-                            if stats_payload:
-                                stats_block[col_name] = stats_payload
-                    if stats_block:
-                        timeframe_entry["indicator_stats"] = stats_block
-                    existing_indicators = set(dataset.get("indicators") or [])
-                    existing_indicators.update(applied_columns)
-                    dataset['indicators'] = sorted(existing_indicators)
-                    target_block = dataset.get("target")
-                    if isinstance(target_block, dict):
-                        target_inds = list(target_block.get("indicators") or [])
-                        target_inds.extend(x for x in applied_columns if x not in target_inds)
-                        target_block["indicators"] = target_inds
-            latest_map = {}
-            for tf_entry in dataset.get("timeframes", {}).values():
-                for col, val in (tf_entry.get("indicator_latest") or {}).items():
-                    latest_map[col] = val
-            if latest_map:
-                dataset["indicator_latest"] = latest_map
+                    col = _apply_indicator_to_df(df_tf, ind)
+                    if col:
+                        applied.append(col)
+                dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
+                if applied:
+                    dataset['timeframes'][tf_label]['indicators'] = applied
             if need.get('funding'):
                 try:
                     dataset['funding'] = get_funding_rate(exchange, symbol)
-                    enriched = True
                 except Exception as exc:
                     dataset.setdefault('errors', []).append(f"needs funding: {exc}")
             if need.get('open_interest'):
                 try:
                     dataset['open_interest'] = get_open_interest(exchange, symbol)
-                    enriched = True
                 except Exception as exc:
                     dataset.setdefault('errors', []).append(f"needs open_interest: {exc}")
             if need.get('news'):
                 if news_full and symbol in news_full:
                     dataset['news'] = news_full[symbol]
-                    enriched = True
                 elif news_cache:
                     dataset['news'] = news_cache.get(symbol) or dataset.get('news')
-                    if dataset.get('news'):
-                        enriched = True
             continue
         if isinstance(need, str):
             bundle.setdefault('meta', {}).setdefault('extra_requests', []).append(need)
-            enriched = True
-    return bundle, enriched
+    return bundle
 
 
 
@@ -1191,32 +928,6 @@ def _shrink_bundle_for_tokens(bundle, max_bars=60):
                 tf_data["bars"] = bars[-max_bars:]
 
 
-def _lighten_trade_bundle(bundle, level: int = 1):
-    clone = copy.deepcopy(bundle)
-    bars_limit = 30 if level == 1 else 20
-    drop_series = level >= 1
-    drop_stats = level >= 1
-    drop_news = level >= 2
-    for entry in clone.get("symbols", []):
-        tf_map = entry.get("timeframes") or {}
-        for tf_payload in tf_map.values():
-            if not isinstance(tf_payload, dict):
-                continue
-            bars = tf_payload.get("bars")
-            if isinstance(bars, list) and len(bars) > bars_limit:
-                tf_payload["bars"] = bars[-bars_limit:]
-            if drop_series:
-                tf_payload.pop("indicator_series", None)
-                tf_payload.pop("indicator_latest", None)
-            if drop_stats:
-                tf_payload.pop("indicator_stats", None)
-        if drop_series:
-            entry.pop("indicator_latest", None)
-        if drop_news:
-            entry.pop("news", None)
-    return clone
-
-
 def ai_plan_trades(
     exchange,
     bundle,
@@ -1225,7 +936,6 @@ def ai_plan_trades(
     positions_snapshot=None,
     pending_orders=None,
     stage="initial",
-    attempt: int = 0,
 ):
     if not AI_KEY:
         log("?? �� 㪠��� OPENAI_API_KEY (stage plan)", Fore.RED)
@@ -1233,14 +943,11 @@ def ai_plan_trades(
     client = OpenAI(api_key=AI_KEY, timeout=20)
     positions_payload = _compact_positions_snapshot(positions_snapshot)
     pending_orders_payload = _compact_orders_snapshot(pending_orders)
-    working_bundle = copy.deepcopy(bundle)
-    if attempt > 0:
-        working_bundle = _lighten_trade_bundle(working_bundle, level=attempt)
     payload = {
         "stage": stage,
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
-        "data": working_bundle,
+        "data": bundle,
     }
     if positions_payload:
         payload["positions_snapshot"] = positions_payload
@@ -1280,18 +987,18 @@ def ai_plan_trades(
     if per_cap:
         hard_limit = per_cap if hard_limit is None else min(hard_limit, per_cap)
         soft_limit = per_cap if soft_limit is None else min(soft_limit, per_cap)
-    shrink_attempt = 0
+    attempt = 0
     while True:
         token_estimate = estimate_tokens(messages, AI_MODEL)
-        if hard_limit and token_estimate > hard_limit and shrink_attempt < 3:
-            _shrink_bundle_for_tokens(payload["data"], max_bars=max(20, 60 - shrink_attempt * 15))
+        if hard_limit and token_estimate > hard_limit and attempt < 3:
+            _shrink_bundle_for_tokens(payload["data"], max_bars=max(20, 60 - attempt * 15))
             messages[1]["content"] = json.dumps(payload, ensure_ascii=False)
-            shrink_attempt += 1
+            attempt += 1
             continue
-        if soft_limit and token_estimate > soft_limit and shrink_attempt < 3:
-            _shrink_bundle_for_tokens(payload["data"], max_bars=max(30, 80 - shrink_attempt * 10))
+        if soft_limit and token_estimate > soft_limit and attempt < 3:
+            _shrink_bundle_for_tokens(payload["data"], max_bars=max(30, 80 - attempt * 10))
             messages[1]["content"] = json.dumps(payload, ensure_ascii=False)
-            shrink_attempt += 1
+            attempt += 1
             continue
         break
     if per_cap and token_estimate > per_cap:
@@ -1311,20 +1018,7 @@ def ai_plan_trades(
             messages=messages,
         )
     except Exception as exc:
-        log(f"[ERROR] OpenAI trade plan ({stage}, attempt={attempt}): {exc}", Fore.RED)
-        message_text = str(exc).lower()
-        if ("timed out" in message_text or "timeout" in message_text) and attempt < 2:
-            log(f"[INFO] Retrying trade plan with simplified payload (attempt {attempt + 1}).", Fore.YELLOW)
-            return ai_plan_trades(
-                exchange,
-                bundle,
-                equity,
-                available_margin,
-                positions_snapshot=positions_snapshot,
-                pending_orders=pending_orders,
-                stage=stage,
-                attempt=attempt + 1,
-            )
+        log(f"[ERROR] OpenAI trade plan: {exc}", Fore.RED)
         return None
     _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
     content = res.choices[0].message.content
@@ -1634,26 +1328,6 @@ CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
 AI_LOG_FILE = "ai_decisions.log"
 AI_ARCHIVE_FILE = "ai_decisions_archive.log"
 AI_REQUESTS_LOG = "ai_requests.log"
-MAX_BASE_TIMEFRAMES = env_int("MAX_BASE_TIMEFRAMES", 3)
-MAX_BASE_INDICATORS = env_int("MAX_BASE_INDICATORS", 6)
-TIMEFRAME_PRIORITY = [
-    TIMEFRAME,
-    "4h",
-    "1h",
-    "15m",
-]
-INDICATOR_PRIORITY = [
-    "ema20",
-    "ema50",
-    "ema200",
-    "rsi14",
-    "atr14",
-    "macd",
-    "bbands",
-    "supertrend",
-    "vwma20",
-    "stoch14",
-]
 if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
@@ -3017,7 +2691,6 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
     executed = []
     open_orders = open_orders or []
     reduce_only_map = {}
-    protection_state: dict[str, bool] = {}
     for existing in open_orders:
         try:
             reduce_flag = existing.get("reduceOnly")
@@ -3026,51 +2699,11 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
         if reduce_flag in (True, "true", "1", 1):
             side_key = (existing.get("side") or "").lower()
             reduce_only_map.setdefault(side_key, []).append(existing)
-            protection_state[side_key] = True
     if not isinstance(orders, (list, tuple)):
         log(f"⚠️ Некорректный формат orders для {symbol}: ожидается список", Fore.YELLOW)
         return executed, False
     cancelled_success = []
     cancel_errors = []
-    cancelled_ids_set: set[str] = set()
-    pending_cancellations: list[tuple[str, list[dict[str, Any]]]] = []
-    position_closed = False
-
-    def _force_close_position_due_to_missing_protection(reason: str) -> bool:
-        nonlocal position_closed, current_position
-        if not current_position:
-            return False
-        try:
-            amount_val = float(current_position.get("amount") or 0)
-        except (TypeError, ValueError):
-            amount_val = 0.0
-        if not math.isfinite(amount_val) or amount_val == 0:
-            return False
-        close_side = "sell" if amount_val > 0 else "buy"
-        qty = abs(amount_val)
-        params = {"reduceOnly": True}
-        position_idx = get_position_idx(close_side)
-        if position_idx is not None:
-            params["positionIdx"] = position_idx
-        try:
-            exchange.create_order(symbol, "market", close_side, qty, None, params)
-            log(
-                f"[WARN] Forced close {symbol} {close_side.upper()} {qty:.4f} due to missing protection ({reason})",
-                Fore.YELLOW,
-            )
-            send_tg(
-                f"[WARN] {symbol}: closed {close_side.upper()} {qty:.4f} because protection order failed ({reason})"
-            )
-            executed.append(f"FORCE CLOSE {close_side.upper()} {qty:.4f}")
-            position_closed = True
-            current_position = dict(current_position)
-            current_position["amount"] = 0.0
-            return True
-        except Exception as close_exc:
-            err_text = str(close_exc)
-            log(f"[ERROR] Failed to force-close {symbol}: {err_text}", Fore.RED)
-            send_tg(f"[ERROR] {symbol}: failed to close position after protection failure - {err_text}")
-            return False
     for idx, order in enumerate(orders, 1):
         if not isinstance(order, dict):
             log(f"⚠️ Пропуск order #{idx} для {symbol}: ожидается объект", Fore.YELLOW)
@@ -3167,14 +2800,25 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
             log(f"⚠️ Нужна цена для ордера #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
             continue
 
-        existing_reduce_orders = list(reduce_only_map.get(side) or [])
-        had_protection = protection_state.get(side, False) or bool(existing_reduce_orders)
         if params.get("reduceOnly"):
             if abs(position_amount) == 0:
                 log(f'[INFO] Пропуск reduce-only ордера по {symbol}: позиция отсутствует', Fore.LIGHTBLACK_EX)
                 send_tg(f'[INFO] {symbol}: reduce-only без позиции пропущен')
                 continue
-            protection_state.setdefault(side, bool(existing_reduce_orders))
+            existing_list = reduce_only_map.get(side)
+            if existing_list:
+                for existing_order in existing_list:
+                    oid = existing_order.get("id")
+                    if not oid:
+                        continue
+                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
+                    if success:
+                        cancelled_success.append(str(oid))
+                        log(f'[INFO] Отменён существующий reduce-only ордер {oid} для {symbol} перед заменой', Fore.LIGHTBLUE_EX)
+                    else:
+                        cancel_errors.append((oid, err))
+                        log(f'[WARN] Не удалось отменить reduce-only ордер {oid} для {symbol}: {err}', Fore.YELLOW)
+                reduce_only_map[side] = []
 
         try:
             order_id = exchange.create_order(symbol, ccxt_type, side, amount, price, params)
@@ -3186,44 +2830,14 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
                 desc += f" — {note}"
             executed.append(desc)
             log(f"🛠️ Доп. ордер для {symbol}: {desc}", Fore.LIGHTBLUE_EX)
-            if params.get("reduceOnly"):
-                protection_state[side] = True
-                if existing_reduce_orders:
-                    pending_cancellations.append((side, existing_reduce_orders))
-                    reduce_only_map[side] = []
         except Exception as e:
-            err_text = str(e)
-            log(f"❌ Ошибка доп. ордера #{idx} для {symbol}: {err_text}", Fore.RED)
-            if params.get("reduceOnly") and not had_protection:
-                _force_close_position_due_to_missing_protection(err_text)
-            continue
-    for side_cancel, cancel_list in pending_cancellations:
-        for existing_order in cancel_list:
-            oid = (
-                existing_order.get("id")
-                or existing_order.get("orderId")
-                or existing_order.get("order_id")
-            )
-            if not oid:
-                continue
-            oid_str = str(oid)
-            if oid_str in cancelled_ids_set:
-                continue
-            success, err = cancel_order_by_id(exchange, symbol, oid_str)
-            if success:
-                cancelled_ids_set.add(oid_str)
-                cancelled_success.append(oid_str)
-                log(f"[INFO] Cancelled existing reduce-only order {oid_str} for {symbol} after replacement", Fore.LIGHTBLUE_EX)
-            else:
-                cancel_errors.append((oid_str, err))
-                log(f"[WARN] Failed to cancel reduce-only order {oid_str} for {symbol}: {err}", Fore.YELLOW)
-
+            log(f"❌ Ошибка доп. ордера #{idx} для {symbol}: {e}", Fore.RED)
     if cancelled_success:
         send_tg(f"🗑️ {symbol}: отменены ордера {', '.join(cancelled_success)} перед заменой")
     if cancel_errors:
         errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_errors)
         send_tg(f"⚠️ {symbol}: ошибки отмены ордеров — {errs}")
-    actions_performed = bool(executed or cancelled_success or cancel_errors or position_closed)
+    actions_performed = bool(executed or cancelled_success or cancel_errors)
     return executed, actions_performed
 
 # --- Решение модели (2 прохода, русский лог) ---
@@ -4132,7 +3746,6 @@ def run_cycle():
     decisions_map: dict[str, dict] = {}
     bundle = None
     trade_plan = None
-    followup_attempted = False
     if selection:
         bundle, bundle_orders = build_portfolio_bundle(ex, selection, positions_map, news_cache=news_cache)
         if bundle_orders:
@@ -4150,75 +3763,6 @@ def run_cycle():
             stage="initial",
         )
         if trade_plan:
-            requested_needs = [need for need in (trade_plan.get("needs") or []) if need]
-            if requested_needs and not followup_attempted:
-                followup_attempted = True
-                bundle_enriched = copy.deepcopy(bundle)
-                bundle_enriched, enriched = augment_bundle_with_needs(
-                    ex,
-                    bundle_enriched,
-                    requested_needs,
-                    news_cache=news_cache,
-                    news_full=news_full_cache,
-                )
-                if enriched:
-                    bundle_enriched.setdefault("meta", {}).update(
-                        {
-                            "active_symbols": sorted(position_symbols),
-                            "pending_symbols": sorted(order_symbols_non_reduce),
-                            "needs_requested": requested_needs,
-                        }
-                    )
-                    extra_timeframes: set[str] = set()
-                    extra_indicators: set[str] = set()
-                    for extra_need in requested_needs:
-                        if not isinstance(extra_need, dict):
-                            continue
-                        high_tf = extra_need.get("higher_tf")
-                        if isinstance(high_tf, (list, tuple, set)):
-                            high_tf_iter = high_tf
-                        else:
-                            high_tf_iter = [high_tf] if high_tf else []
-                        for tf_item in list(high_tf_iter) + list(extra_need.get("timeframes") or []):
-                            mapped = normalize_requested_timeframe(tf_item, default=TIMEFRAME)
-                            if mapped:
-                                extra_timeframes.add(mapped)
-                        indicators_extra = extra_need.get("indicators") or []
-                        if isinstance(indicators_extra, (str, bytes)):
-                            indicators_extra = [indicators_extra]
-                        for ind_item in indicators_extra:
-                            if ind_item:
-                                extra_indicators.add(str(ind_item))
-                    meta_block = bundle_enriched.setdefault("meta", {})
-                    if extra_timeframes:
-                        current_tfs = set(meta_block.get("global_timeframes") or [])
-                        meta_block["global_timeframes"] = _limit_timeframes(list(current_tfs | extra_timeframes))
-                    if extra_indicators:
-                        current_inds = set(meta_block.get("global_indicators") or [])
-                        meta_block["global_indicators"] = _limit_indicators(list(current_inds | extra_indicators))
-                    followup_plan = ai_plan_trades(
-                        ex,
-                        bundle_enriched,
-                        equity,
-                        available_margin,
-                        positions_snapshot=positions_map,
-                        pending_orders=open_orders_prefetch,
-                        stage="followup",
-                    )
-                    if followup_plan:
-                        trade_plan = followup_plan
-                    else:
-                        log(
-                            "[WARN] Trade plan follow-up failed after needs enrichment.",
-                            Fore.YELLOW,
-                        )
-                else:
-                    log(
-                        "[INFO] Trade plan requested extra context but no new data was gathered; skipping follow-up.",
-                        Fore.LIGHTBLACK_EX,
-                    )
-        if trade_plan:
-            trade_plan.pop("needs", None)
             trade_next_minutes = trade_plan.get("next_run_minutes")
             if trade_next_minutes is not None:
                 try:
@@ -4373,24 +3917,13 @@ def run_cycle():
                 dec["symbol"] = sym
             else:
                 has_position = abs(initial_position_amount) > 0
-                pending_orders = [order for order in (open_orders_symbol or []) if isinstance(order, dict)]
-                pending_count = len(pending_orders)
-                entry_orders = [
-                    order
-                    for order in pending_orders
-                    if (str(order.get("type") or "").lower() == "limit")
-                    and order.get("reduceOnly") not in (True, "true", "1", 1)
-                ]
-                has_entry_orders = bool(entry_orders)
-                default_action = "hold" if (has_position or has_entry_orders) else "skip"
+                default_action = "hold" if has_position else "skip"
                 exposure_notes = []
                 if has_position:
                     exposure_notes.append(f"open amount {initial_position_amount:.4f}")
+                pending_count = len(open_orders_symbol or [])
                 if pending_count:
-                    if has_entry_orders:
-                        exposure_notes.append(f"{pending_count} pending order(s) (entry)")
-                    else:
-                        exposure_notes.append(f"{pending_count} pending order(s)")
+                    exposure_notes.append(f"{pending_count} pending order(s)")
                 if not exposure_notes:
                     exposure_notes.append("no active exposure")
                 if trade_plan:
