@@ -809,6 +809,44 @@ def _indicator_stats(series: pd.Series) -> dict:
     return stats
 
 
+def _limit_timeframes(timeframes: list[str] | None) -> list[str]:
+    result: list[str] = []
+    candidates = list(TIMEFRAME_PRIORITY)
+    if timeframes:
+        candidates.extend(timeframes)
+    for tf in candidates:
+        mapped = normalize_requested_timeframe(tf, default=TIMEFRAME)
+        if mapped and mapped not in result:
+            result.append(mapped)
+        if len(result) >= MAX_BASE_TIMEFRAMES:
+            break
+    return result
+
+
+def _normalize_indicator_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    return str(name).strip()
+
+
+def _limit_indicators(indicators: list[str] | None) -> list[str]:
+    result: list[str] = []
+    if indicators:
+        extras = [val for val in indicators if val]
+    else:
+        extras = []
+    candidates = INDICATOR_PRIORITY + extras
+    for item in candidates:
+        normalized = _normalize_indicator_name(item)
+        if not normalized:
+            continue
+        if normalized not in result:
+            result.append(normalized)
+        if len(result) >= MAX_BASE_INDICATORS:
+            break
+    return result
+
+
 def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: list, news_cache=None):
     dataset = {"symbol": symbol, "timeframes": {}, "indicators": [], "errors": []}
     indicators = indicators or []
@@ -980,16 +1018,16 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
 
 def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None):
     targets = (selection_result or {}).get("targets") or []
-    global_timeframes = set((selection_result or {}).get("global_timeframes") or [])
-    global_indicators = set((selection_result or {}).get("global_indicators") or [])
+    global_timeframes = _limit_timeframes((selection_result or {}).get("global_timeframes") or [])
+    global_indicators = _limit_indicators((selection_result or {}).get("global_indicators") or [])
     bundle = {"symbols": [], "meta": {}}
     open_orders_cache = {}
     for target in targets:
         symbol = target.get("symbol")
         if not symbol:
             continue
-        timeframes = list(set((target.get("timeframes") or []) + list(global_timeframes)))
-        indicators = list(set((target.get("indicators") or []) + list(global_indicators)))
+        timeframes = _limit_timeframes((target.get("timeframes") or []) + list(global_timeframes))
+        indicators = _limit_indicators((target.get("indicators") or []) + list(global_indicators))
         dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
         dataset["target"] = {
             "notional_pct": target.get("notional_pct"),
@@ -1009,8 +1047,8 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
         open_orders_cache[symbol] = open_orders
         bundle["symbols"].append(dataset)
     bundle["meta"] = {
-        "global_timeframes": list(global_timeframes),
-        "global_indicators": list(global_indicators),
+        "global_timeframes": global_timeframes,
+        "global_indicators": global_indicators,
         "confidence": (selection_result or {}).get("confidence"),
         "reason": (selection_result or {}).get("reason"),
     }
@@ -1047,10 +1085,11 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                 mapped_tf = normalize_requested_timeframe(tf, default=TIMEFRAME)
                 if mapped_tf and mapped_tf not in timeframe_requests:
                     timeframe_requests.append(mapped_tf)
-            requested_timeframes = timeframe_requests or [TIMEFRAME]
+            requested_timeframes = _limit_timeframes(timeframe_requests or [TIMEFRAME])
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
+            requested_indicators = _limit_indicators(requested_indicators)
             indicator_limit = 40
             for tf in requested_timeframes:
                 tf_label = str(tf)
@@ -1595,6 +1634,26 @@ CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
 AI_LOG_FILE = "ai_decisions.log"
 AI_ARCHIVE_FILE = "ai_decisions_archive.log"
 AI_REQUESTS_LOG = "ai_requests.log"
+MAX_BASE_TIMEFRAMES = env_int("MAX_BASE_TIMEFRAMES", 3)
+MAX_BASE_INDICATORS = env_int("MAX_BASE_INDICATORS", 6)
+TIMEFRAME_PRIORITY = [
+    TIMEFRAME,
+    "4h",
+    "1h",
+    "15m",
+]
+INDICATOR_PRIORITY = [
+    "ema20",
+    "ema50",
+    "ema200",
+    "rsi14",
+    "atr14",
+    "macd",
+    "bbands",
+    "supertrend",
+    "vwma20",
+    "stoch14",
+]
 if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
@@ -4133,10 +4192,10 @@ def run_cycle():
                     meta_block = bundle_enriched.setdefault("meta", {})
                     if extra_timeframes:
                         current_tfs = set(meta_block.get("global_timeframes") or [])
-                        meta_block["global_timeframes"] = sorted(current_tfs | extra_timeframes)
+                        meta_block["global_timeframes"] = _limit_timeframes(list(current_tfs | extra_timeframes))
                     if extra_indicators:
                         current_inds = set(meta_block.get("global_indicators") or [])
-                        meta_block["global_indicators"] = sorted(current_inds | extra_indicators)
+                        meta_block["global_indicators"] = _limit_indicators(list(current_inds | extra_indicators))
                     followup_plan = ai_plan_trades(
                         ex,
                         bundle_enriched,
