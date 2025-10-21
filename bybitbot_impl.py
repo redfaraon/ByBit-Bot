@@ -767,7 +767,7 @@ def _serialize_df(df: pd.DataFrame, limit: int = 80):
     return result
 
 
-def _serialize_indicator_series(series: pd.Series, limit: int = 120) -> list:
+def _serialize_indicator_series(series: pd.Series, limit: int = 40) -> list:
     if series is None or series.empty:
         return []
     trimmed = series.tail(limit).dropna()
@@ -781,6 +781,32 @@ def _serialize_indicator_series(series: pd.Series, limit: int = 120) -> list:
         else:
             output.append(value)
     return output
+
+
+def _indicator_stats(series: pd.Series) -> dict:
+    stats: dict[str, float] = {}
+    if series is None or series.empty:
+        return stats
+    clean = series.dropna()
+    if clean.empty:
+        return stats
+    latest = clean.iloc[-1]
+    stats["latest"] = float(latest) if isinstance(latest, (int, float, numbers.Number)) else latest
+    if len(clean) >= 2:
+        prev = clean.iloc[-2]
+        if isinstance(prev, (int, float, numbers.Number)):
+            stats["prev"] = float(prev)
+            if isinstance(latest, (int, float, numbers.Number)):
+                stats["delta"] = float(latest) - float(prev)
+    if len(clean) >= 5 and isinstance(clean.iloc[-1], (int, float, numbers.Number)):
+        window = clean.tail(5).reset_index(drop=True)
+        x = list(range(len(window)))
+        mean_x = sum(x) / len(x)
+        mean_y = sum(float(v) for v in window) / len(window)
+        numerator = sum((x[i] - mean_x) * (float(window[i]) - mean_y) for i in range(len(window)))
+        denominator = sum((x_i - mean_x) ** 2 for x_i in x) or 1.0
+        stats["slope"] = numerator / denominator
+    return stats
 
 
 def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: list, news_cache=None):
@@ -827,6 +853,15 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
             timeframe_payload["indicator_series"] = indicator_series
         if indicator_latest:
             timeframe_payload["indicator_latest"] = indicator_latest
+        if applied_columns:
+            stats_block = {}
+            for col_name in applied_columns:
+                if col_name in df_tf:
+                    stats_payload = _indicator_stats(df_tf[col_name])
+                    if stats_payload:
+                        stats_block[col_name] = stats_payload
+            if stats_block:
+                timeframe_payload["indicator_stats"] = stats_block
         dataset["timeframes"][tf] = timeframe_payload
     dataset["indicators"] = sorted(seen_cols)
     if dataset["timeframes"]:
@@ -1058,6 +1093,15 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
                     existing_latest = timeframe_entry.get("indicator_latest") or {}
                     existing_latest.update(indicator_latest)
                     timeframe_entry["indicator_latest"] = existing_latest
+                if applied_columns:
+                    stats_block = timeframe_entry.get("indicator_stats") or {}
+                    for col_name in applied_columns:
+                        if col_name in df_tf:
+                            stats_payload = _indicator_stats(df_tf[col_name])
+                            if stats_payload:
+                                stats_block[col_name] = stats_payload
+                    if stats_block:
+                        timeframe_entry["indicator_stats"] = stats_block
                     existing_indicators = set(dataset.get("indicators") or [])
                     existing_indicators.update(applied_columns)
                     dataset['indicators'] = sorted(existing_indicators)
