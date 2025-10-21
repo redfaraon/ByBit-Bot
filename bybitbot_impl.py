@@ -624,7 +624,7 @@ def _expand_indicator_entries(entry) -> list:
     return result
 
 
-def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[str]:
+def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[list[str] | str]:
     if df.empty:
         return None
     base, length = _parse_indicator_name(indicator_name)
@@ -654,6 +654,94 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
             high_max = df["high"].rolling(period).max()
             df[col] = 100 * (df["close"] - low_min) / (high_max - low_min).replace(0, pd.NA)
             return col
+        if base == "macd":
+            fast = 12
+            slow = 26
+            signal = 9
+            if length:
+                fast = max(2, int(length))
+                slow = max(fast + 1, fast * 2)
+            ema_fast = ema(df["close"], fast)
+            ema_slow = ema(df["close"], slow)
+            macd_line = ema_fast - ema_slow
+            signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+            hist_line = macd_line - signal_line
+            df["macd"] = macd_line
+            df["macd_signal"] = signal_line
+            df["macd_hist"] = hist_line
+            return ["macd", "macd_signal", "macd_hist"]
+        if base == "bbands":
+            period = length or 20
+            multiplier = 2.0
+            rolling_mean = df["close"].rolling(period).mean()
+            rolling_std = df["close"].rolling(period).std(ddof=0)
+            df["bbands_basis"] = rolling_mean
+            df["bbands_upper"] = rolling_mean + multiplier * rolling_std
+            df["bbands_lower"] = rolling_mean - multiplier * rolling_std
+            return ["bbands_basis", "bbands_upper", "bbands_lower"]
+        if base == "vwma":
+            period = length or 20
+            if "volume" not in df.columns:
+                return None
+            price_volume = df["close"] * df["volume"]
+            rolling_pv = price_volume.rolling(period).sum()
+            rolling_volume = df["volume"].rolling(period).sum()
+            col = f"vwma{period}"
+            df[col] = rolling_pv / rolling_volume.replace(0, pd.NA)
+            return col
+        if base == "supertrend":
+            period = length or 10
+            multiplier = 3.0
+            atr_series = atr(df, period)
+            hl2 = (df["high"] + df["low"]) / 2.0
+            basic_upper = hl2 + multiplier * atr_series
+            basic_lower = hl2 - multiplier * atr_series
+            final_upper = basic_upper.copy()
+            final_lower = basic_lower.copy()
+            for i in range(1, len(df)):
+                if df["close"].iloc[i - 1] > final_upper.iloc[i - 1]:
+                    final_upper.iloc[i] = basic_upper.iloc[i]
+                else:
+                    final_upper.iloc[i] = min(basic_upper.iloc[i], final_upper.iloc[i - 1])
+                if df["close"].iloc[i - 1] < final_lower.iloc[i - 1]:
+                    final_lower.iloc[i] = basic_lower.iloc[i]
+                else:
+                    final_lower.iloc[i] = max(basic_lower.iloc[i], final_lower.iloc[i - 1])
+            supertrend_col = f"supertrend{period}"
+            direction_col = f"supertrend_dir{period}"
+            df[supertrend_col] = pd.NA
+            df[direction_col] = 1
+            current_supertrend = final_upper.iloc[0]
+            current_direction = -1
+            for i in range(len(df)):
+                if i == 0:
+                    current_supertrend = final_upper.iloc[i]
+                    current_direction = -1
+                else:
+                    if current_supertrend == final_upper.iloc[i - 1]:
+                        if df["close"].iloc[i] <= final_upper.iloc[i]:
+                            current_supertrend = final_upper.iloc[i]
+                            current_direction = -1
+                        else:
+                            current_supertrend = final_lower.iloc[i]
+                            current_direction = 1
+                    elif current_supertrend == final_lower.iloc[i - 1]:
+                        if df["close"].iloc[i] >= final_lower.iloc[i]:
+                            current_supertrend = final_lower.iloc[i]
+                            current_direction = 1
+                        else:
+                            current_supertrend = final_upper.iloc[i]
+                            current_direction = -1
+                df.at[df.index[i], supertrend_col] = current_supertrend
+                df.at[df.index[i], direction_col] = current_direction
+            df[f"supertrend_upper{period}"] = final_upper
+            df[f"supertrend_lower{period}"] = final_lower
+            return [
+                supertrend_col,
+                direction_col,
+                f"supertrend_upper{period}",
+                f"supertrend_lower{period}",
+            ]
     except Exception as exc:
         log(f"[WARN] Failed to apply indicator {indicator_name}: {exc}", Fore.YELLOW)
     return None
@@ -692,12 +780,17 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
             dataset["errors"].append(err)
             log(f"[WARN] {symbol}: {err}", Fore.YELLOW)
             continue
-        applied = []
+        applied: list[str] = []
         for ind in indicators:
-            col = _apply_indicator_to_df(df_tf, ind)
-            if col:
-                applied.append(col)
-                seen_cols.add(col)
+            cols = _apply_indicator_to_df(df_tf, ind)
+            if not cols:
+                continue
+            if isinstance(cols, str):
+                cols_list = [cols]
+            else:
+                cols_list = list(cols)
+            applied.extend(cols_list)
+            seen_cols.update(cols_list)
         dataset["timeframes"][tf] = {
             "bars": _serialize_df(df_tf)
         }
@@ -884,23 +977,35 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
-                for tf in requested_timeframes:
-                    tf_label = str(tf)
-                    try:
-                        df_tf = fetch_df(exchange, symbol, tf_label)
-                    except Exception as exc:
-                        dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
+            for tf in requested_timeframes:
+                tf_label = str(tf)
+                try:
+                    df_tf = fetch_df(exchange, symbol, tf_label)
+                except Exception as exc:
+                    dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
+                    continue
+                applied: list[str] = []
+                for ind in requested_indicators:
+                    cols = _apply_indicator_to_df(df_tf, ind)
+                    if not cols:
                         continue
-                    applied = []
-                    for ind in requested_indicators:
-                        col = _apply_indicator_to_df(df_tf, ind)
-                        if col:
-                            applied.append(col)
-                    dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
-                    enriched = True
-                    if applied:
-                        dataset['timeframes'][tf_label]['indicators'] = applied
-                        enriched = True
+                    if isinstance(cols, str):
+                        cols_list = [cols]
+                    else:
+                        cols_list = list(cols)
+                    applied.extend(cols_list)
+                dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
+                enriched = True
+                if applied:
+                    dataset['timeframes'][tf_label]['indicators'] = applied
+                    existing_indicators = set(dataset.get("indicators") or [])
+                    existing_indicators.update(applied)
+                    dataset['indicators'] = sorted(existing_indicators)
+                    target_block = dataset.get("target")
+                    if isinstance(target_block, dict):
+                        target_inds = list(target_block.get("indicators") or [])
+                        target_inds.extend(x for x in applied if x not in target_inds)
+                        target_block["indicators"] = target_inds
             if need.get('funding'):
                 try:
                     dataset['funding'] = get_funding_rate(exchange, symbol)
@@ -3850,6 +3955,33 @@ def run_cycle():
                             "needs_requested": requested_needs,
                         }
                     )
+                    extra_timeframes: set[str] = set()
+                    extra_indicators: set[str] = set()
+                    for extra_need in requested_needs:
+                        if not isinstance(extra_need, dict):
+                            continue
+                        high_tf = extra_need.get("higher_tf")
+                        if isinstance(high_tf, (list, tuple, set)):
+                            high_tf_iter = high_tf
+                        else:
+                            high_tf_iter = [high_tf] if high_tf else []
+                        for tf_item in list(high_tf_iter) + list(extra_need.get("timeframes") or []):
+                            mapped = normalize_requested_timeframe(tf_item, default=TIMEFRAME)
+                            if mapped:
+                                extra_timeframes.add(mapped)
+                        indicators_extra = extra_need.get("indicators") or []
+                        if isinstance(indicators_extra, (str, bytes)):
+                            indicators_extra = [indicators_extra]
+                        for ind_item in indicators_extra:
+                            if ind_item:
+                                extra_indicators.add(str(ind_item))
+                    meta_block = bundle_enriched.setdefault("meta", {})
+                    if extra_timeframes:
+                        current_tfs = set(meta_block.get("global_timeframes") or [])
+                        meta_block["global_timeframes"] = sorted(current_tfs | extra_timeframes)
+                    if extra_indicators:
+                        current_inds = set(meta_block.get("global_indicators") or [])
+                        meta_block["global_indicators"] = sorted(current_inds | extra_indicators)
                     followup_plan = ai_plan_trades(
                         ex,
                         bundle_enriched,
