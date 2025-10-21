@@ -62,3 +62,7 @@ Recent commits (last 8)
 - At cycle end, re-establish missing SL/TP protection or close the position if safeguards cannot be restored.
 - Loader marks new commits stable only after a successful protected run and preserves readable English logs.
 
+2025.10.20.2
+- Сделан торговый план основным источником решений: теперь за цикл отправляется один многопарный запрос без индивидуальных initial-запросов.
+- Позиции вне плана переводятся в hold/skip с безопасной защитой и явной причиной.
+- В payload торгового плана добавлены снапшоты открытых позиций и ожиданий по ордерам для всей выборки.

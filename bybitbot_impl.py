@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.20.1
+# Version: 2025.10.20.2
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.20.1"
+BOT_VERSION = "2025.10.20.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -833,17 +833,31 @@ def _shrink_bundle_for_tokens(bundle, max_bars=60):
                 tf_data["bars"] = bars[-max_bars:]
 
 
-def ai_plan_trades(exchange, bundle, equity, available_margin, stage="initial"):
+def ai_plan_trades(
+    exchange,
+    bundle,
+    equity,
+    available_margin,
+    positions_snapshot=None,
+    pending_orders=None,
+    stage="initial",
+):
     if not AI_KEY:
-        log("⚠️ Не указан OPENAI_API_KEY (stage plan)", Fore.RED)
+        log("?? �� 㪠��� OPENAI_API_KEY (stage plan)", Fore.RED)
         return None
     client = OpenAI(api_key=AI_KEY, timeout=20)
+    positions_payload = _compact_positions_snapshot(positions_snapshot)
+    pending_orders_payload = _compact_orders_snapshot(pending_orders)
     payload = {
         "stage": stage,
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
         "data": bundle,
     }
+    if positions_payload:
+        payload["positions_snapshot"] = positions_payload
+    if pending_orders_payload:
+        payload["pending_orders"] = pending_orders_payload
     system_msg = (
         "You are a trade analyst for Bybit. For each symbol evaluate positions, orders, candles, and indicators. "
         "Return strict JSON in the form:\n"
@@ -1532,6 +1546,39 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
             simplified[symbol] = simp
             count += 1
     return simplified, count
+
+
+def _compact_positions_snapshot(positions_map: dict[str, Any] | None) -> dict[str, Any]:
+    """Strip heavy fields from positions before sending to the trade plan model."""
+    snapshot: dict[str, Any] = {}
+    if not isinstance(positions_map, dict):
+        return snapshot
+    for symbol, payload in positions_map.items():
+        if not isinstance(payload, dict):
+            continue
+        filtered = {k: v for k, v in payload.items() if k != "raw"}
+        if filtered:
+            snapshot[symbol] = filtered
+    return snapshot
+
+
+def _compact_orders_snapshot(orders_map: dict[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
+    """Return a lean view of pending orders grouped by symbol for trade planning."""
+    snapshot: dict[str, list[dict[str, Any]]] = {}
+    if not isinstance(orders_map, dict):
+        return snapshot
+    keep_keys = {"id", "type", "side", "price", "stopPrice", "amount", "remaining", "reduceOnly", "status", "timestamp"}
+    for symbol, bucket in orders_map.items():
+        if not bucket:
+            continue
+        simplified: list[dict[str, Any]] = []
+        for order in bucket:
+            if not isinstance(order, dict):
+                continue
+            simplified.append({key: order.get(key) for key in keep_keys})
+        if simplified:
+            snapshot[symbol] = simplified
+    return snapshot
 
 
 def simplify_order(order):
@@ -3498,7 +3545,15 @@ def run_cycle():
         bundle_meta = bundle.setdefault("meta", {})
         bundle_meta["active_symbols"] = sorted(position_symbols)
         bundle_meta["pending_symbols"] = sorted(order_symbols_non_reduce)
-        trade_plan = ai_plan_trades(ex, bundle, equity, available_margin, stage="initial")
+        trade_plan = ai_plan_trades(
+            ex,
+            bundle,
+            equity,
+            available_margin,
+            positions_snapshot=positions_map,
+            pending_orders=open_orders_prefetch,
+            stage="initial",
+        )
         if trade_plan:
             trade_next_minutes = trade_plan.get("next_run_minutes")
             if trade_next_minutes is not None:
@@ -3649,30 +3704,41 @@ def run_cycle():
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
             preloaded_decision = decisions_map.get(sym)
-            if preloaded_decision is None and decisions_map:
-                counts["skip"] = counts.get("skip", 0) + 1
-                decisions_total += 1
-                detail_entry = f"[{sym}] - держим позицию (не в приоритете после universe)"
-                decisions_details.append(detail_entry)
-                continue
-            dec = ai_decision(
-                sym,
-                df,
-                equity,
-                available_margin,
-                ex,
-                current_position=current_position,
-                open_orders=open_orders_symbol,
-                extra_context=extra_serialized,
-                target_meta=symbol_meta,
-                news_payload=news_payload_symbol,
-                initial_decision=preloaded_decision
-            )
-            if not dec: continue
+            if preloaded_decision is not None:
+                dec = dict(preloaded_decision)
+                dec["symbol"] = sym
+            else:
+                has_position = abs(initial_position_amount) > 0
+                default_action = "hold" if has_position else "skip"
+                exposure_notes = []
+                if has_position:
+                    exposure_notes.append(f"open amount {initial_position_amount:.4f}")
+                pending_count = len(open_orders_symbol or [])
+                if pending_count:
+                    exposure_notes.append(f"{pending_count} pending order(s)")
+                if not exposure_notes:
+                    exposure_notes.append("no active exposure")
+                if trade_plan:
+                    base_reason = "trade plan omitted symbol"
+                else:
+                    base_reason = "trade plan unavailable"
+                detail_text = "; ".join(exposure_notes)
+                default_reason = f"{base_reason}; {detail_text}"
+                dec = {
+                    "symbol": sym,
+                    "action": default_action,
+                    "reason": default_reason,
+                }
             if symbol_meta.get("notional_pct") is not None and dec.get("notional_pct") is None:
                 dec["notional_pct"] = symbol_meta.get("notional_pct")
-            save_json_line(AI_LOG_FILE, {"timestamp":datetime.datetime.now().isoformat(),
-                                         "symbol":sym,"decision":dec})
+            save_json_line(
+                AI_LOG_FILE,
+                {
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "symbol": sym,
+                    "decision": dec,
+                },
+            )
             action = (dec.get("action") or "skip").lower()
             side = dec.get("side") or ""
             reason = dec.get("reason") or ""
