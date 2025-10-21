@@ -16,7 +16,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
-import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
+import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, copy
 from pathlib import Path
 from typing import Optional, Tuple, Any
 import pandas as pd
@@ -851,8 +851,9 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
 
 
 def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_full=None):
+    enriched = False
     if not needs:
-        return bundle
+        return bundle, enriched
     symbol_map = {entry['symbol']: entry for entry in bundle.get('symbols', []) if entry.get('symbol')}
     for need in needs:
         if isinstance(need, dict):
@@ -883,40 +884,48 @@ def augment_bundle_with_needs(exchange, bundle, needs, news_cache=None, news_ful
             requested_indicators = need.get('indicators') or []
             if isinstance(requested_indicators, (str, bytes)):
                 requested_indicators = [requested_indicators]
-            for tf in requested_timeframes:
-                tf_label = str(tf)
-                try:
-                    df_tf = fetch_df(exchange, symbol, tf_label)
-                except Exception as exc:
-                    dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
-                    continue
-                applied = []
-                for ind in requested_indicators:
-                    col = _apply_indicator_to_df(df_tf, ind)
-                    if col:
-                        applied.append(col)
-                dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
-                if applied:
-                    dataset['timeframes'][tf_label]['indicators'] = applied
+                for tf in requested_timeframes:
+                    tf_label = str(tf)
+                    try:
+                        df_tf = fetch_df(exchange, symbol, tf_label)
+                    except Exception as exc:
+                        dataset.setdefault('errors', []).append(f"needs fetch_df({tf_label}): {exc}")
+                        continue
+                    applied = []
+                    for ind in requested_indicators:
+                        col = _apply_indicator_to_df(df_tf, ind)
+                        if col:
+                            applied.append(col)
+                    dataset.setdefault('timeframes', {})[tf_label] = {'bars': _serialize_df(df_tf)}
+                    enriched = True
+                    if applied:
+                        dataset['timeframes'][tf_label]['indicators'] = applied
+                        enriched = True
             if need.get('funding'):
                 try:
                     dataset['funding'] = get_funding_rate(exchange, symbol)
+                    enriched = True
                 except Exception as exc:
                     dataset.setdefault('errors', []).append(f"needs funding: {exc}")
             if need.get('open_interest'):
                 try:
                     dataset['open_interest'] = get_open_interest(exchange, symbol)
+                    enriched = True
                 except Exception as exc:
                     dataset.setdefault('errors', []).append(f"needs open_interest: {exc}")
             if need.get('news'):
                 if news_full and symbol in news_full:
                     dataset['news'] = news_full[symbol]
+                    enriched = True
                 elif news_cache:
                     dataset['news'] = news_cache.get(symbol) or dataset.get('news')
+                    if dataset.get('news'):
+                        enriched = True
             continue
         if isinstance(need, str):
             bundle.setdefault('meta', {}).setdefault('extra_requests', []).append(need)
-    return bundle
+            enriched = True
+    return bundle, enriched
 
 
 
@@ -3822,6 +3831,46 @@ def run_cycle():
             pending_orders=open_orders_prefetch,
             stage="initial",
         )
+        if trade_plan:
+            requested_needs = [need for need in (trade_plan.get("needs") or []) if need]
+            if requested_needs:
+                bundle_enriched = copy.deepcopy(bundle)
+                bundle_enriched, enriched = augment_bundle_with_needs(
+                    ex,
+                    bundle_enriched,
+                    requested_needs,
+                    news_cache=news_cache,
+                    news_full=news_full_cache,
+                )
+                if enriched:
+                    bundle_enriched.setdefault("meta", {}).update(
+                        {
+                            "active_symbols": sorted(position_symbols),
+                            "pending_symbols": sorted(order_symbols_non_reduce),
+                            "needs_requested": requested_needs,
+                        }
+                    )
+                    followup_plan = ai_plan_trades(
+                        ex,
+                        bundle_enriched,
+                        equity,
+                        available_margin,
+                        positions_snapshot=positions_map,
+                        pending_orders=open_orders_prefetch,
+                        stage="followup",
+                    )
+                    if followup_plan:
+                        trade_plan = followup_plan
+                    else:
+                        log(
+                            "[WARN] Trade plan follow-up failed after needs enrichment.",
+                            Fore.YELLOW,
+                        )
+                else:
+                    log(
+                        "[INFO] Trade plan requested extra context but no new data was gathered; skipping follow-up.",
+                        Fore.LIGHTBLACK_EX,
+                    )
         if trade_plan:
             trade_next_minutes = trade_plan.get("next_run_minutes")
             if trade_next_minutes is not None:
