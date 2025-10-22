@@ -2340,6 +2340,16 @@ def _register_ai_usage(model: str, usage: Any, context: str) -> None:
     _maybe_switch_model_after_usage()
 
 
+def _is_truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    return False
+
+
 def _maybe_switch_model_after_usage() -> None:
     global AI_MODEL
     if AI_MODEL_CHEAP and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START and AI_MODEL != AI_MODEL_CHEAP:
@@ -2371,10 +2381,21 @@ def _extract_protection_orders(orders) -> list[dict[str, Any]]:
     for order in orders or []:
         if not isinstance(order, dict):
             continue
-        try:
-            if order.get("reduceOnly") not in (True, "true", "1", 1):
-                continue
-        except AttributeError:
+        reduce_flag = _is_truthy_flag(order.get("reduceOnly"))
+        close_on_trigger = _is_truthy_flag(order.get("closeOnTrigger"))
+        order_type = (order.get("type") or "").lower()
+        has_tp_sl_field = any(
+            order.get(key) not in (None, "")
+            for key in ("takeProfit", "stopLoss", "tp", "sl")
+        )
+        if not (
+            reduce_flag
+            or close_on_trigger
+            or has_tp_sl_field
+            or order_type in ("stop", "stop_limit", "stoploss", "takeprofit", "trailingstop")
+            or _has_stop_flag(order)
+            or _has_trailing_flag(order)
+        ):
             continue
         extracted.append(order)
     return extracted
@@ -3806,12 +3827,22 @@ def run_cycle():
     bundle = None
     trade_plan = None
     if selection:
+        extra_symbols_candidates: list[str] = []
+        for sym_extra in sorted(order_symbols_non_reduce):
+            normalized_extra = normalize_symbol(sym_extra, record_missing=False)
+            if not normalized_extra and sym_extra:
+                sym_key = sym_extra.replace("/", "").replace(":", "").upper()
+                mapped = TICKER_TO_SYMBOL.get(sym_key) or TICKER_TO_SYMBOL.get(sym_key.rstrip("USDT"))
+                if mapped:
+                    normalized_extra = normalize_symbol(mapped, record_missing=False) or mapped
+            if normalized_extra and normalized_extra not in extra_symbols_candidates:
+                extra_symbols_candidates.append(normalized_extra)
         bundle, bundle_orders = build_portfolio_bundle(
             ex,
             selection,
             positions_map,
             news_cache=news_cache,
-            extra_symbols=sorted(order_symbols_non_reduce),
+            extra_symbols=extra_symbols_candidates,
         )
         if bundle_orders:
             open_orders_cache.update(bundle_orders)
