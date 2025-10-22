@@ -2497,6 +2497,18 @@ def _canonical_decision_symbol(symbol: str | None) -> str | None:
         return str(symbol).strip()
     return None
 
+def _order_allows_increase(order: dict) -> bool:
+    if not isinstance(order, dict):
+        return False
+    flags = ["allowIncrease", "allow_increase", "increase", "increasePosition", "increase_position", "scaleIn", "scale_in"]
+    for key in flags:
+        if _is_truthy_flag(order.get(key)):
+            return True
+    intent = (order.get("intent") or order.get("action") or "").lower()
+    if intent in {"increase", "scale_in", "add", "add_position"}:
+        return True
+    return False
+
 def _maybe_switch_model_after_usage() -> None:
     global AI_MODEL
     if AI_MODEL_CHEAP and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START and AI_MODEL != AI_MODEL_CHEAP:
@@ -3014,7 +3026,7 @@ def execute_extra_orders(
                 (position_side in ("long", "buy") and side == "buy")
                 or (position_side in ("short", "sell") and side == "sell")
             )
-            if same_direction:
+            if same_direction and not _order_allows_increase(order):
                 log(
                     f"[WARN] Skipping additive extra order #{idx} for {symbol}: position side {position_side} vs order {side.upper()}",
                     Fore.YELLOW,
