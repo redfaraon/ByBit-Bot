@@ -832,6 +832,12 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     news_requests = result.get("news_requests") or []
     if isinstance(selection_payload, dict):
         selection_payload["_news_digest"] = news_digest
+        selection_payload["_position_snapshot"] = _compact_positions_snapshot(positions_map)
+        selection_payload["_order_snapshot"] = _compact_orders_snapshot(open_orders_cache)
+        selection_payload["_global_timeframes"] = list(global_timeframes)
+        selection_payload["_global_indicators"] = list(global_indicators)
+        selection_payload.setdefault("global_timeframes", list(global_timeframes))
+        selection_payload.setdefault("global_indicators", list(global_indicators))
     if not universe_payload.get("pairs"):
         fallback_pairs = selection_payload.get("pairs") or [
             item.get("symbol")
@@ -857,7 +863,7 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
             continue
         base_timeframes = list(global_timeframes)
         timeframes = list(dict.fromkeys(base_timeframes + (target.get("timeframes") or [])))
-        baseline_indicators = list(global_indicators)[:3]
+        baseline_indicators = (list(global_indicators) or list(BASE_INDICATOR_CANDIDATES))[:3]
         indicator_candidates = (target.get("indicators") or []) + list(global_indicators)
         indicators = list(dict.fromkeys(baseline_indicators + indicator_candidates))
         dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
