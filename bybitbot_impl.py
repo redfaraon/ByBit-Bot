@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.5
+# Version: 2025.10.22.6
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.5"
+BOT_VERSION = "2025.10.22.6"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -855,8 +855,11 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
         symbol = target.get("symbol")
         if not symbol:
             continue
-        timeframes = list(set((target.get("timeframes") or []) + list(global_timeframes)))
-        indicators = list(set((target.get("indicators") or []) + list(global_indicators)))
+        base_timeframes = list(global_timeframes)
+        timeframes = list(dict.fromkeys(base_timeframes + (target.get("timeframes") or [])))
+        baseline_indicators = list(global_indicators)[:3]
+        indicator_candidates = (target.get("indicators") or []) + list(global_indicators)
+        indicators = list(dict.fromkeys(baseline_indicators + indicator_candidates))
         dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
         dataset["target"] = {
             "notional_pct": target.get("notional_pct"),
@@ -1340,7 +1343,7 @@ def refresh_settings():
     try:
         AI_TOKEN_BUDGET_CYCLE = int(os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", "100000"))
     except (TypeError, ValueError):
-        AI_TOKEN_BUDGET_CYCLE = 100_000
+        AI_TOKEN_BUDGET_CYCLE = 170_000
     AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -1426,12 +1429,12 @@ if "TRADE_PLAN_BACKOFF_SECONDS" not in globals():
     TRADE_PLAN_BACKOFF_SECONDS = 5.0
 
 # --- AI token tracking ---
-AI_TOKEN_BUDGET_CYCLE = 100_000
+AI_TOKEN_BUDGET_CYCLE = 170_000
 AI_TOKEN_USAGE_TOTAL = 0
 AI_TOKEN_USAGE_BY_MODEL: dict[str, dict[str, int]] = {}
-AI_SECONDARY_BUDGET_START = 70_000
+AI_SECONDARY_BUDGET_START = 80_000
 AI_PER_REQUEST_TOKEN_CAP = 50_000
-AI_HARD_STOP_BUDGET = 150_000
+AI_HARD_STOP_BUDGET = 200_000
 MAX_SYMBOLS_PER_CYCLE = 15
 UNIVERSE_CACHE_DEFAULT = {
     "pairs": [],
@@ -4337,9 +4340,19 @@ def run_cycle():
 
             extra_orders_raw = dec.get("orders") or dec.get("adjustments") or dec.get("extra_orders") or []
             if isinstance(extra_orders_raw, dict):
-                extra_orders = [extra_orders_raw]
+                item = dict(extra_orders_raw)
+                if action in ("manage", "hold") and not _is_truthy_flag(item.get("reduceOnly")):
+                    item["reduceOnly"] = True
+                extra_orders = [item]
             elif isinstance(extra_orders_raw, list):
-                extra_orders = list(extra_orders_raw)
+                extra_orders = []
+                for item in extra_orders_raw:
+                    if not isinstance(item, dict):
+                        continue
+                    item_copy = dict(item)
+                    if action in ("manage", "hold") and not _is_truthy_flag(item_copy.get("reduceOnly")):
+                        item_copy["reduceOnly"] = True
+                    extra_orders.append(item_copy)
             else:
                 extra_orders = []
 

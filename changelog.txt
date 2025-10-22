@@ -92,3 +92,6 @@ Recent commits (last 8)
 
 2025.10.22.5
 - Gracefully handles KeyboardInterrupt by stopping without triggering legacy fallbacks, ensuring manual interruptions remain safe.
+
+2025.10.22.6
+- Fixed manage/hold extra orders: default to reduce-only, allow additive scaling only with explicit intent; normalized ticker aliases across data fetches to prevent BNB/POL lookup errors.
