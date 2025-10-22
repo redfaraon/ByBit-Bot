@@ -79,3 +79,8 @@ Recent commits (last 8)
 2025.10.22.2
 - Launcher now falls back to the dedicated `stable` branch whenever the latest commit fails validation, keeping prior commit/backups as secondary safeguards.
 - Trading cycle aborts when every flat symbol is skipped by the trade plan or when open positions lack stop/trailing protection, triggering an automatic rollback to stable.
+
+2025.10.22.3
+- Hardened AI retries and logging so fallbacks clearly state source and target, and cycles fail fast when the trade plan is unavailable.
+- Normalized ticker aliases for extra-symbol bundles so symbols like `BNB` always fetch candles/orders from Bybit.
+- Recognize protective orders even without the `reduceOnly` flag and drop non-reduce extra orders that would expand existing exposure.

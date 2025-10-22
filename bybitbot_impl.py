@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.2
+# Version: 2025.10.22.3
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.2"
+BOT_VERSION = "2025.10.22.3"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -4105,6 +4105,49 @@ def run_cycle():
                 extra_orders = list(extra_orders_raw)
             else:
                 extra_orders = []
+
+            if extra_orders:
+                filtered_orders: list[dict] = []
+                dropped_orders: list[str] = []
+                position_side_label = (current_position or {}).get("side")
+                if position_side_label:
+                    position_side = position_side_label.lower()
+                elif initial_position_amount > 0:
+                    position_side = "long"
+                elif initial_position_amount < 0:
+                    position_side = "short"
+                else:
+                    position_side = ""
+                for order in extra_orders:
+                    if not isinstance(order, dict):
+                        continue
+                    reduce_only_flag = _is_truthy_flag(order.get("reduceOnly"))
+                    order_side = (order.get("side") or "").lower()
+                    allow_order = True
+                    if not reduce_only_flag:
+                        allow_order = False
+                        if action == "open" and not has_position:
+                            allow_order = True
+                        elif has_position and position_side:
+                            same_direction = (
+                                (position_side in ("long", "buy") and order_side == "buy")
+                                or (position_side in ("short", "sell") and order_side == "sell")
+                            )
+                            if not same_direction:
+                                allow_order = True
+                    if allow_order:
+                        filtered_orders.append(order)
+                    else:
+                        summary = f"{order_side.upper()} {order.get('type') or 'order'}"
+                        if order.get("price") is not None:
+                            summary += f" @{order.get('price')}"
+                        dropped_orders.append(summary)
+                if dropped_orders:
+                    log(
+                        f"[WARN] Skipping non-reduce extra orders for {sym}: {', '.join(dropped_orders)}",
+                        Fore.YELLOW,
+                    )
+                extra_orders = filtered_orders
 
             def normalize_order_ids(value):
                 if value is None:
