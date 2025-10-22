@@ -84,3 +84,8 @@ Recent commits (last 8)
 - Hardened AI retries and logging so fallbacks clearly state source and target, and cycles fail fast when the trade plan is unavailable.
 - Normalized ticker aliases for extra-symbol bundles so symbols like `BNB` always fetch candles/orders from Bybit.
 - Recognize protective orders even without the `reduceOnly` flag and drop non-reduce extra orders that would expand existing exposure.
+
+2025.10.22.4
+- Hardened OpenAI retries with exponential backoff and optional probe attempts to restore the latest commit after fallbacks.
+- Normalized ticker aliases (e.g. BNB, POL) across data fetches and order management so Bybit lookups always use canonical symbols.
+- Tightened extra-order safeguards: limit non-reduce duplicates, enforce margin checks, and prune stale limit orders before placing new ones.

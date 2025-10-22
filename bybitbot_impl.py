@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.3
+# Version: 2025.10.22.4
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.3"
+BOT_VERSION = "2025.10.22.4"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -114,6 +114,17 @@ SYMBOL_ALIASES = {
 for alias, target in SYMBOL_ALIASES.items():
     PAIR_TICKER_MAP.setdefault(alias, alias.split("/")[0].split(":")[0].upper())
     PAIR_TICKER_MAP.setdefault(target, target.split("/")[0].split(":")[0].upper())
+
+for pair, ticker in PAIR_TICKER_MAP.items():
+    if not pair:
+        continue
+    if ticker:
+        upper_ticker = ticker.upper()
+        TICKER_TO_SYMBOL.setdefault(upper_ticker, pair)
+        TICKER_TO_SYMBOL.setdefault(f"{upper_ticker}USDT", pair)
+    sanitized = re.sub(r"[^A-Z0-9]", "", pair.upper())
+    if sanitized:
+        TICKER_TO_SYMBOL.setdefault(sanitized, pair)
 
 for pair, ticker in PAIR_TICKER_MAP.items():
     if not pair:
@@ -1360,7 +1371,11 @@ def refresh_settings():
     MAX_NON_REDUCE_LIMITS_PER_SIDE = env_int("BYBITBOT_MAX_NON_REDUCE_LIMITS_PER_SIDE", 1)
     NON_REDUCE_PRICE_DECIMALS = env_int("BYBITBOT_NON_REDUCE_PRICE_DECIMALS", 4)
     TRADE_PLAN_MAX_ATTEMPTS = env_int("BYBITBOT_TRADE_PLAN_MAX_ATTEMPTS", 5)
-    TRADE_PLAN_BACKOFF_SECONDS = float(os.getenv("BYBITBOT_TRADE_PLAN_BACKOFF", "5"))
+    try:
+        TRADE_PLAN_BACKOFF_SECONDS = float(os.getenv("BYBITBOT_TRADE_PLAN_BACKOFF", "5"))
+    except (TypeError, ValueError):
+        TRADE_PLAN_BACKOFF_SECONDS = 5.0
+    TRADE_PLAN_BACKOFF_SECONDS = max(1.0, TRADE_PLAN_BACKOFF_SECONDS)
     LOG_TIMEZONE = (os.getenv("LOG_TIMEZONE") or "").strip()
     parsed_tz = resolve_timezone(LOG_TIMEZONE)
     if LOG_TIMEZONE and parsed_tz is None:
@@ -1785,8 +1800,9 @@ def fetch_open_orders_for_symbol(exchange, symbol, limit: int | None = 50):
     has_attr = getattr(exchange, "has", {})
     if isinstance(has_attr, dict) and not has_attr.get("fetchOpenOrders", False):
         return []
+    resolved_symbol = _resolve_symbol_alias(symbol) or symbol
     try:
-        raw_orders = exchange.fetch_open_orders(symbol)
+        raw_orders = exchange.fetch_open_orders(resolved_symbol)
     except Exception as e:
         log(f"⚠️ Не удалось получить открытые ордера для {symbol}: {e}", Fore.YELLOW)
         return []
@@ -1812,8 +1828,10 @@ def fetch_all_open_orders_grouped(exchange, limit: int | None = None) -> dict[st
         symbol = order.get("symbol")
         if not symbol:
             continue
+        canonical_symbol = _resolve_symbol_alias(symbol) or symbol
         simplified = simplify_order(order)
-        bucket = grouped.setdefault(symbol, [])
+        simplified["symbol"] = canonical_symbol
+        bucket = grouped.setdefault(canonical_symbol, [])
         bucket.append(simplified)
         if limit and len(bucket) >= limit:
             continue
@@ -1821,8 +1839,9 @@ def fetch_all_open_orders_grouped(exchange, limit: int | None = None) -> dict[st
 
 
 def cancel_order_by_id(exchange, symbol, order_id: str):
+    resolved_symbol = _resolve_symbol_alias(symbol) or symbol
     try:
-        exchange.cancel_order(order_id, symbol)
+        exchange.cancel_order(order_id, resolved_symbol)
         return True, None
     except Exception as e:
         return False, str(e)
@@ -1966,8 +1985,9 @@ def atr(df, n=14):
 
 # --- Получение контекста ---
 def get_higher_tf(exchange, symbol, tf="4h", limit=120):
+    resolved_symbol = _resolve_symbol_alias(symbol) or symbol
     try:
-        data = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
+        data = exchange.fetch_ohlcv(resolved_symbol, timeframe=tf, limit=limit)
         df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
         df["timestamp"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         df.drop(columns=["ts"], inplace=True)
@@ -2177,7 +2197,8 @@ def init_exchange():
     return exchange
 
 def fetch_df(exchange, symbol, tf):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=200)
+    resolved_symbol = _resolve_symbol_alias(symbol) or symbol
+    ohlcv = exchange.fetch_ohlcv(resolved_symbol, timeframe=tf, limit=200)
     df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     df.set_index("timestamp", inplace=True)
@@ -2441,6 +2462,40 @@ def _is_truthy_flag(value: Any) -> bool:
         return value.strip().lower() in {"true", "1", "yes", "y"}
     return False
 
+
+def _resolve_symbol_alias(symbol: str | None) -> str | None:
+    if not symbol:
+        return None
+    sym = str(symbol).strip()
+    if not sym:
+        return None
+    if sym in SYMBOL_ALIASES:
+        sym = SYMBOL_ALIASES[sym]
+    if "/" in sym and ":" in sym:
+        return sym
+    sym_upper = sym.upper()
+    mapped = TICKER_TO_SYMBOL.get(sym_upper)
+    if mapped:
+        return mapped
+    if sym_upper.endswith("USDT"):
+        base = sym_upper[:-4]
+        mapped = TICKER_TO_SYMBOL.get(base)
+        if mapped:
+            return mapped
+        return f"{base}/USDT:USDT"
+    mapped = TICKER_TO_SYMBOL.get(sym_upper)
+    if mapped:
+        return mapped
+    return f"{sym_upper}/USDT:USDT"
+
+
+def _canonical_decision_symbol(symbol: str | None) -> str | None:
+    resolved = _resolve_symbol_alias(symbol)
+    if resolved:
+        return resolved
+    if symbol:
+        return str(symbol).strip()
+    return None
 
 def _maybe_switch_model_after_usage() -> None:
     global AI_MODEL
@@ -2723,6 +2778,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         return open_orders or []
 
     position_side = (position.get("side") or "").lower()
+    exchange_symbol = _resolve_symbol_alias(symbol) or symbol
     if position_side in ("sell", "short"):
         protection_side = "buy"
         is_long = False
@@ -2827,7 +2883,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 "closeOnTrigger": True,
             }
         )
-        exchange.create_order(symbol, "market", protection_side, qty, None, stop_params)
+        exchange.create_order(exchange_symbol, "market", protection_side, qty, None, stop_params)
         created_orders.append(("stopLoss", stop_price))
     except Exception as exc:
         log(f"⚠️ {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
@@ -2836,7 +2892,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         tp_params = dict(base_params)
         tp_params["takeProfit"] = take_price
         tp_params.setdefault("timeInForce", "GTC")
-        exchange.create_order(symbol, "limit", protection_side, qty, take_price, tp_params)
+        exchange.create_order(exchange_symbol, "limit", protection_side, qty, take_price, tp_params)
         created_orders.append(("takeProfit", take_price))
     except Exception as exc:
         log(f"⚠️ {symbol}: не удалось выставить тейк-профит позиции: {exc}", Fore.YELLOW)
@@ -2845,7 +2901,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         try:
             trailing_params = dict(base_params)
             trailing_params["trailingStop"] = trailing_mult * atrv
-            exchange.create_order(symbol, "trailingStop", protection_side, qty, None, trailing_params)
+            exchange.create_order(exchange_symbol, "trailingStop", protection_side, qty, None, trailing_params)
             created_orders.append(("trailingStop", trailing_mult * atrv))
         except Exception as exc:
             log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп: {exc}", Fore.YELLOW)
@@ -2871,6 +2927,7 @@ def execute_extra_orders(
     max_limits_per_side: int = 1,
 ):
     executed = []
+    exchange_symbol = _resolve_symbol_alias(symbol) or symbol
     open_orders = open_orders or []
     position_side = ((current_position or {}).get("side") or "").lower()
     reduce_only_map: dict[str, list[dict]] = {}
@@ -3069,7 +3126,7 @@ def execute_extra_orders(
             log(f"[WARN] Missing price for extra order #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
             continue
         try:
-            order_id = exchange.create_order(symbol, ccxt_type, side, amount, price, params)
+            order_id = exchange.create_order(exchange_symbol, ccxt_type, side, amount, price, params)
             display_type = "STOP-MARKET" if order_type_key == "stop_loss" else ccxt_type.upper()
             desc = f"{display_type} {side.upper()} {amount}"
             if price:
@@ -4055,29 +4112,9 @@ def run_cycle():
             for decision in trade_plan.get("decisions") or []:
                 sym_raw = decision.get("symbol")
                 sym_dec = sym_raw.strip() if isinstance(sym_raw, str) else ""
-                sym_norm = normalize_symbol(sym_dec, record_missing=False) if sym_dec else None
-                if not sym_norm and sym_dec:
-                    sym_clean = re.sub(r"[^A-Z0-9]", "", sym_dec.upper())
-                    candidate_pair = None
-                    if sym_clean:
-                        candidate_pair = TICKER_TO_SYMBOL.get(sym_clean)
-                        if not candidate_pair and sym_clean.endswith("USDT"):
-                            candidate_pair = TICKER_TO_SYMBOL.get(sym_clean[:-4])
-                    if candidate_pair:
-                        sym_candidate = normalize_symbol(candidate_pair, record_missing=False) or candidate_pair
-                        sym_norm = sym_candidate
-                keys_to_store: set[str] = set()
-                if sym_dec:
-                    keys_to_store.add(sym_dec)
-                if sym_norm:
-                    keys_to_store.add(sym_norm)
-                    ticker_key = PAIR_TICKER_MAP.get(sym_norm)
-                    if ticker_key:
-                        keys_to_store.add(ticker_key)
-                        keys_to_store.add(f"{ticker_key}USDT")
-                for key in keys_to_store:
-                    if key:
-                        decisions_map[key] = decision
+                canonical_key = _canonical_decision_symbol(sym_dec) or sym_dec
+                if canonical_key:
+                    decisions_map[canonical_key] = decision
             additional_missing = trade_plan.get("missing_symbols")
             if additional_missing:
                 selection_missing_symbols.extend(list(additional_missing))
@@ -4225,11 +4262,8 @@ def run_cycle():
             open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
-            preloaded_decision = decisions_map.get(sym)
-            if preloaded_decision is None:
-                ticker_key = PAIR_TICKER_MAP.get(sym)
-                if ticker_key:
-                    preloaded_decision = decisions_map.get(ticker_key) or decisions_map.get(f"{ticker_key}USDT")
+            canonical_lookup = _canonical_decision_symbol(sym)
+            preloaded_decision = decisions_map.get(canonical_lookup)
             if preloaded_decision is not None:
                 dec = dict(preloaded_decision)
                 dec["symbol"] = sym

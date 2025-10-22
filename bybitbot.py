@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.22.3")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.22.4")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
@@ -27,6 +27,8 @@ CHANGELOG_COMMIT_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_CHANGELOG_COM
 FALLBACK_COMMIT_CANDIDATE_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_FALLBACK_COMMIT_LIMIT", "12"))
 DEFAULT_STABLE_BRANCH = (os.getenv("BYBITBOT_STABLE_BRANCH") or "stable").strip() or "stable"
 
+
+FALLBACK_PROBE_INTERVAL = max(1, int(os.getenv("BYBITBOT_FALLBACK_PROBE_INTERVAL", "10")))
 
 def _build_commit_changelog(limit: int | None = None):
     limit = CHANGELOG_COMMIT_LIMIT if limit is None else _resolve_commit_limit(str(limit))
@@ -124,6 +126,15 @@ def _load_fallback_history() -> dict:
     stable_branch = (data.get("stable_branch") or "").strip()
     if not stable_branch:
         data["stable_branch"] = DEFAULT_STABLE_BRANCH
+    if not isinstance(data.get("fallback_active"), bool):
+        data["fallback_active"] = False
+    if not isinstance(data.get("fallback_cycles"), int):
+        data["fallback_cycles"] = 0
+    if not isinstance(data.get("fallback_probe_interval"), int):
+        data["fallback_probe_interval"] = FALLBACK_PROBE_INTERVAL
+    data.setdefault("fallback_last_head", None)
+    data.setdefault("fallback_source", None)
+    data.setdefault("fallback_target", None)
     return data
 
 
@@ -137,6 +148,17 @@ def _save_fallback_history(history: dict) -> None:
         pass
 
 
+
+
+def _record_fallback(history: dict, *, head_hash: str | None, source_label: str, target_label: str) -> None:
+    history["fallback_active"] = True
+    history["fallback_cycles"] = 0
+    if head_hash:
+        history["fallback_last_head"] = head_hash
+    history["fallback_source"] = source_label
+    history["fallback_target"] = target_label
+    history.setdefault("fallback_probe_interval", FALLBACK_PROBE_INTERVAL)
+    _save_fallback_history(history)
 def _list_past_commits(limit: int = FALLBACK_COMMIT_CANDIDATE_LIMIT) -> list[str]:
     cmd = [
         "git",
@@ -424,7 +446,7 @@ def _run_backups(reason: str) -> bool:
                 history["stable_branch"] = stable_branch
                 history.pop("stable_commit", None)
                 history.pop("stable_backup", None)
-                _save_fallback_history(history)
+                _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
                 return True
             else:
                 _save_fallback_history(history)
@@ -447,11 +469,11 @@ def _run_backups(reason: str) -> bool:
             if success:
                 history["stable_commit"] = stable_commit
                 history.pop("stable_backup", None)
+                _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
+                return True
             else:
                 history["stable_commit"] = None
-            _save_fallback_history(history)
-            if success:
-                return True
+                _save_fallback_history(history)
 
     if stable_backup:
         backup_path = REPO_ROOT / "backups" / stable_backup
@@ -462,7 +484,7 @@ def _run_backups(reason: str) -> bool:
             if success:
                 history["stable_backup"] = stable_backup
                 history["stable_commit"] = None
-                _save_fallback_history(history)
+                _record_fallback(history, head_hash=head_hash, source_label=stable_backup, target_label=stable_backup)
                 return True
             else:
                 history["stable_backup"] = None
@@ -485,9 +507,9 @@ def _run_backups(reason: str) -> bool:
         if success:
             history["stable_commit"] = commit_hash
             history.pop("stable_backup", None)
-        _save_fallback_history(history)
-        if success:
+            _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
             return True
+        _save_fallback_history(history)
 
     backups = _iter_backups()
     if not backups:
@@ -504,9 +526,9 @@ def _run_backups(reason: str) -> bool:
         if success:
             history["stable_commit"] = None
             history["stable_backup"] = backup_key
-        _save_fallback_history(history)
-        if success:
+            _record_fallback(history, head_hash=head_hash, source_label=candidate.name, target_label=candidate_version)
             return True
+        _save_fallback_history(history)
     print("[BOOT] All backups failed.", file=sys.stderr)
     return False
 
@@ -514,6 +536,23 @@ def _run_backups(reason: str) -> bool:
 def main():
     _update_current_branch()
     history = _load_fallback_history()
+    if history.get("fallback_active"):
+        cycles = int(history.get("fallback_cycles") or 0) + 1
+        history["fallback_cycles"] = cycles
+        _save_fallback_history(history)
+        probe_interval = max(1, int(history.get("fallback_probe_interval") or FALLBACK_PROBE_INTERVAL))
+        fallback_head = history.get("fallback_last_head")
+        if fallback_head and cycles >= probe_interval:
+            history["fallback_cycles"] = 0
+            _save_fallback_history(history)
+            script_path = _materialize_commit_script(fallback_head)
+            if script_path:
+                short = fallback_head[:8]
+                context = f"probe {short}"
+                version_label = f"commit.{short}"
+                source_label = f"probe {short}"
+                if _run_script_candidate(script_path, version_label, "scheduled fallback probe", source_label, fallback_context=context):
+                    return
     head_hash = _current_head()
     head_status = None
     if head_hash:
@@ -538,6 +577,11 @@ def main():
             history.setdefault("commits", {})[head_hash] = "success"
             history["stable_commit"] = head_hash
             history.pop("stable_backup", None)
+            history["fallback_active"] = False
+            history["fallback_cycles"] = 0
+            history["fallback_last_head"] = None
+            history["fallback_source"] = None
+            history["fallback_target"] = None
             _save_fallback_history(history)
 
 
