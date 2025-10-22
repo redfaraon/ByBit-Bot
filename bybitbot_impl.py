@@ -92,7 +92,7 @@ BASE_INDICATOR_CANDIDATES = [
 
 BASE_TIMEFRAME_CANDIDATES = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"]
 PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BASE_PAIR_CANDIDATES}
-TICKER_TO_SYMBOL = {}
+TICKER_TO_SYMBOL: dict[str, str] = {}
 for pair, ticker in PAIR_TICKER_MAP.items():
     if not pair:
         continue
@@ -114,6 +114,17 @@ SYMBOL_ALIASES = {
 for alias, target in SYMBOL_ALIASES.items():
     PAIR_TICKER_MAP.setdefault(alias, alias.split("/")[0].split(":")[0].upper())
     PAIR_TICKER_MAP.setdefault(target, target.split("/")[0].split(":")[0].upper())
+
+for pair, ticker in PAIR_TICKER_MAP.items():
+    if not pair:
+        continue
+    if ticker:
+        upper_ticker = ticker.upper()
+        TICKER_TO_SYMBOL.setdefault(upper_ticker, pair)
+        TICKER_TO_SYMBOL.setdefault(f"{upper_ticker}USDT", pair)
+    sanitized = re.sub(r"[^A-Z0-9]", "", pair.upper())
+    if sanitized:
+        TICKER_TO_SYMBOL.setdefault(sanitized, pair)
 
 
 TIMEFRAME_NORMALIZATION_MAP = {
@@ -822,12 +833,13 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     return selection_payload, universe_payload, news_requests
 
 
-def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None):
+def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None, extra_symbols=None):
     targets = (selection_result or {}).get("targets") or []
     global_timeframes = set((selection_result or {}).get("global_timeframes") or [])
     global_indicators = set((selection_result or {}).get("global_indicators") or [])
     bundle = {"symbols": [], "meta": {}}
     open_orders_cache = {}
+    processed_symbols: set[str] = set()
     for target in targets:
         symbol = target.get("symbol")
         if not symbol:
@@ -852,6 +864,26 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
         dataset["open_orders"] = open_orders
         open_orders_cache[symbol] = open_orders
         bundle["symbols"].append(dataset)
+        processed_symbols.add(symbol)
+    for extra_symbol in extra_symbols or []:
+        if not extra_symbol or extra_symbol in processed_symbols:
+            continue
+        timeframes = [TIMEFRAME, "4h"]
+        indicators = list(global_indicators)
+        dataset = prepare_symbol_dataset(exchange, extra_symbol, timeframes, indicators, news_cache=news_cache)
+        dataset.setdefault("meta", {})["source"] = "non_reduce_orders"
+        position_payload = positions_map.get(extra_symbol)
+        if position_payload:
+            dataset["position"] = position_payload
+        try:
+            open_orders = fetch_open_orders_for_symbol(exchange, extra_symbol)
+        except Exception as exc:
+            log(f"[WARN] fetch_open_orders {extra_symbol}: {exc}", Fore.YELLOW)
+            open_orders = []
+        dataset["open_orders"] = open_orders
+        open_orders_cache[extra_symbol] = open_orders
+        bundle["symbols"].append(dataset)
+        processed_symbols.add(extra_symbol)
     bundle["meta"] = {
         "global_timeframes": list(global_timeframes),
         "global_indicators": list(global_indicators),
@@ -1021,23 +1053,39 @@ def ai_plan_trades(
     if not _ensure_token_budget(token_estimate, AI_MODEL, f"trade plan ({stage})"):
         return None
     _log_ai_request(AI_MODEL, token_estimate, f"trade plan ({stage})")
-    try:
-        res = client.chat.completions.create(
-            model=AI_MODEL,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=messages,
-        )
-    except Exception as exc:
-        log(f"[ERROR] OpenAI trade plan: {exc}", Fore.RED)
-        return None
-    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
-    content = res.choices[0].message.content
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as exc:
-        log(f"[WARN] JSON decode (trade plan): {exc}", Fore.YELLOW)
-        return None
+    attempt_count = 0
+    backoff_seconds = 5
+    last_error: Exception | None = None
+    while attempt_count < 3:
+        attempt_count += 1
+        try:
+            res = client.chat.completions.create(
+                model=AI_MODEL,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+        except Exception as exc:
+            last_error = exc
+            log(f"[ERROR] OpenAI trade plan attempt {attempt_count}: {exc}", Fore.RED)
+            if attempt_count >= 3:
+                break
+            time.sleep(backoff_seconds * attempt_count)
+            continue
+        _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
+        content = res.choices[0].message.content
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            log(f"[WARN] JSON decode (trade plan): {exc}", Fore.YELLOW)
+            last_error = exc
+            if attempt_count >= 3:
+                break
+            time.sleep(backoff_seconds * attempt_count)
+            continue
+    if last_error:
+        log(f"[ERROR] OpenAI trade plan failed after retries: {last_error}", Fore.RED)
+    return None
 
 
 def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache, counts):
@@ -3758,7 +3806,13 @@ def run_cycle():
     bundle = None
     trade_plan = None
     if selection:
-        bundle, bundle_orders = build_portfolio_bundle(ex, selection, positions_map, news_cache=news_cache)
+        bundle, bundle_orders = build_portfolio_bundle(
+            ex,
+            selection,
+            positions_map,
+            news_cache=news_cache,
+            extra_symbols=sorted(order_symbols_non_reduce),
+        )
         if bundle_orders:
             open_orders_cache.update(bundle_orders)
         bundle_meta = bundle.setdefault("meta", {})
@@ -3868,8 +3922,11 @@ def run_cycle():
     decisions_details: list[str] = []
     eligible_flat_symbols = 0
     skipped_plan_omitted_symbols = 0
+    skipped_plan_unavailable_symbols = 0
     flat_skip_symbols: list[str] = []
+    flat_unavailable_symbols: list[str] = []
 
+    trade_plan_failed = trade_plan is None
     for i,sym in enumerate(symbols_sequence,1):
         if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
             log(f"⚠️ Достигнут лимит {AI_HARD_STOP_BUDGET} токенов — дальнейший анализ остановлен", Fore.YELLOW)
@@ -3994,13 +4051,16 @@ def run_cycle():
             if not has_position:
                 eligible_flat_symbols += 1
                 reason_lower = reason.lower()
-                if (
-                    action == "skip"
-                    and "trade plan omitted symbol" in reason_lower
-                    and "no active exposure" in reason_lower
-                ):
-                    skipped_plan_omitted_symbols += 1
-                    flat_skip_symbols.append(sym)
+                if action == "skip":
+                    if (
+                        "trade plan omitted symbol" in reason_lower
+                        and "no active exposure" in reason_lower
+                    ):
+                        skipped_plan_omitted_symbols += 1
+                        flat_skip_symbols.append(sym)
+                    if "trade plan unavailable" in reason_lower:
+                        skipped_plan_unavailable_symbols += 1
+                        flat_unavailable_symbols.append(sym)
             counts[action] = counts.get(action,0)+1
             decisions_total += 1
             side_text = side.lower()
@@ -4461,6 +4521,21 @@ def run_cycle():
         log(issue_msg, Fore.RED)
         send_tg(issue_msg)
         raise RuntimeError("trade plan omitted every flat symbol; no active exposure")
+
+    unavailable_all = (
+        trade_plan_failed
+        and eligible_flat_symbols > 0
+        and skipped_plan_unavailable_symbols == eligible_flat_symbols
+    )
+    if unavailable_all:
+        skipped_list = ", ".join(sorted(set(flat_unavailable_symbols))) or "n/a"
+        issue_msg = (
+            "[FAIL] Trade plan unavailable for all flat symbols "
+            f"(symbols: {skipped_list})"
+        )
+        log(issue_msg, Fore.RED)
+        send_tg(issue_msg)
+        raise RuntimeError("trade plan unavailable for all flat symbols")
 
     unprotected_positions: list[tuple[str, float]] = []
     for sym_active, payload in final_positions_map.items():
