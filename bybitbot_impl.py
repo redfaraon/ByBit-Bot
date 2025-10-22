@@ -92,6 +92,17 @@ BASE_INDICATOR_CANDIDATES = [
 
 BASE_TIMEFRAME_CANDIDATES = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"]
 PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BASE_PAIR_CANDIDATES}
+TICKER_TO_SYMBOL = {}
+for pair, ticker in PAIR_TICKER_MAP.items():
+    if not pair:
+        continue
+    if ticker:
+        upper_ticker = ticker.upper()
+        TICKER_TO_SYMBOL.setdefault(upper_ticker, pair)
+        TICKER_TO_SYMBOL.setdefault(f"{upper_ticker}USDT", pair)
+    sanitized = re.sub(r"[^A-Z0-9]", "", pair.upper())
+    if sanitized:
+        TICKER_TO_SYMBOL.setdefault(sanitized, pair)
 
 PAIR_CANDIDATE_LIMIT = int(os.getenv("PAIR_CANDIDATE_LIMIT", "25"))
 PAIR_PREFETCH_LIMIT = int(os.getenv("PAIR_PREFETCH_LIMIT", "30"))
@@ -3774,11 +3785,31 @@ def run_cycle():
                 selection_next_time = trade_next_time
         if trade_plan:
             for decision in trade_plan.get("decisions") or []:
-                sym_dec = decision.get("symbol")
-                sym_norm = normalize_symbol(sym_dec) if sym_dec else None
-                sym_key = sym_norm or sym_dec
-                if sym_key:
-                    decisions_map[sym_key] = decision
+                sym_raw = decision.get("symbol")
+                sym_dec = sym_raw.strip() if isinstance(sym_raw, str) else ""
+                sym_norm = normalize_symbol(sym_dec, record_missing=False) if sym_dec else None
+                if not sym_norm and sym_dec:
+                    sym_clean = re.sub(r"[^A-Z0-9]", "", sym_dec.upper())
+                    candidate_pair = None
+                    if sym_clean:
+                        candidate_pair = TICKER_TO_SYMBOL.get(sym_clean)
+                        if not candidate_pair and sym_clean.endswith("USDT"):
+                            candidate_pair = TICKER_TO_SYMBOL.get(sym_clean[:-4])
+                    if candidate_pair:
+                        sym_candidate = normalize_symbol(candidate_pair, record_missing=False) or candidate_pair
+                        sym_norm = sym_candidate
+                keys_to_store: set[str] = set()
+                if sym_dec:
+                    keys_to_store.add(sym_dec)
+                if sym_norm:
+                    keys_to_store.add(sym_norm)
+                    ticker_key = PAIR_TICKER_MAP.get(sym_norm)
+                    if ticker_key:
+                        keys_to_store.add(ticker_key)
+                        keys_to_store.add(f"{ticker_key}USDT")
+                for key in keys_to_store:
+                    if key:
+                        decisions_map[key] = decision
             additional_missing = trade_plan.get("missing_symbols")
             if additional_missing:
                 selection_missing_symbols.extend(list(additional_missing))
@@ -3916,6 +3947,10 @@ def run_cycle():
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
             preloaded_decision = decisions_map.get(sym)
+            if preloaded_decision is None:
+                ticker_key = PAIR_TICKER_MAP.get(sym)
+                if ticker_key:
+                    preloaded_decision = decisions_map.get(ticker_key) or decisions_map.get(f"{ticker_key}USDT")
             if preloaded_decision is not None:
                 dec = dict(preloaded_decision)
                 dec["symbol"] = sym
