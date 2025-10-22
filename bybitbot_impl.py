@@ -2370,11 +2370,9 @@ def _resolve_ai_model_for_pairs(pair_count: Optional[int]) -> str:
     if AI_MODEL_CHEAP and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
         return AI_MODEL_CHEAP
     primary = AI_MODEL_PRIMARY or AI_MODEL
-    cheap = AI_MODEL_CHEAP or ""
-    threshold = max(0, int(AI_MODEL_THRESHOLD or 0))
-    if pair_count is not None and cheap and pair_count > threshold:
-        return cheap
-    return primary or cheap or AI_MODEL
+    if primary:
+        return primary
+    return AI_MODEL_CHEAP or AI_MODEL
 
 
 def update_ai_model_for_analysis(pair_count: Optional[int]) -> str:
