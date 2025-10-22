@@ -284,6 +284,46 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
     return None
 
 
+def _update_current_branch() -> None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return
+    branch = result.stdout.strip()
+    if not branch or branch == "HEAD":
+        return
+    try:
+        subprocess.run(
+            ["git", "fetch", "--quiet", "origin", branch],
+            check=True,
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return
+    try:
+        subprocess.run(
+            ["git", "merge", "--ff-only", f"origin/{branch}"],
+            check=True,
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        print(f"[BOOT] Failed to fast-forward branch {branch}; continuing with local HEAD.", file=sys.stderr)
+    except Exception:
+        pass
+
+    return None
+
+
 def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str) -> bool:
     _, fb_header, fb_lines = _build_commit_changelog()
     fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
@@ -446,6 +486,7 @@ def _run_backups(reason: str) -> bool:
 
 
 def main():
+    _update_current_branch()
     history = _load_fallback_history()
     head_hash = _current_head()
     head_status = None
