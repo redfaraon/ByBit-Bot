@@ -345,6 +345,12 @@ def _run_script_candidate(script_path: Path, version_label: str, reason: str, so
     env["BYBITBOT_CHANGELOG_VERSION"] = version_label
     env["BYBITBOT_CHANGELOG_TEXT"] = fallback_changelog
     env["BYBITBOT_EXPECTED_VERSION"] = LATEST_VERSION
+    env["BYBITBOT_SOURCE_LABEL"] = source
+    env["BYBITBOT_SOURCE_REF"] = version_label
+    if fallback_context:
+        env["BYBITBOT_FALLBACK_CONTEXT"] = fallback_context
+    else:
+        env.pop("BYBITBOT_FALLBACK_CONTEXT", None)
     result = subprocess.run([sys.executable, str(script_path)], env=env)
     return result.returncode == 0
 
@@ -379,6 +385,10 @@ def _run_current():
     os.environ["BYBITBOT_CHANGELOG_VERSION"] = BOT_VERSION
     os.environ["BYBITBOT_CHANGELOG_TEXT"] = CURRENT_CHANGELOG
     os.environ["BYBITBOT_EXPECTED_VERSION"] = LATEST_VERSION
+    current_head = _current_head() or "unknown"
+    os.environ["BYBITBOT_SOURCE_LABEL"] = "HEAD"
+    os.environ["BYBITBOT_SOURCE_REF"] = current_head
+    os.environ.pop("BYBITBOT_FALLBACK_CONTEXT", None)
     module = importlib.import_module("bybitbot_impl")
     if hasattr(module, "apply_metadata"):
         module.apply_metadata(BOT_VERSION, CURRENT_CHANGELOG, LATEST_VERSION)
@@ -425,12 +435,14 @@ def _run_backups(reason: str) -> bool:
     stable_backup = history.get("stable_backup")
     head_hash = _current_head()
 
+    head_short = head_hash[:8] if head_hash else "unknown"
     if stable_commit and stable_commit != head_hash:
         script_path = _materialize_commit_script(stable_commit)
         if script_path:
             version_label = f"commit.{stable_commit[:8]}"
             source_label = f"stable commit {stable_commit[:8]}"
-            success = _run_script_candidate(script_path, version_label, reason, source_label)
+            context = f"{head_short} -> {stable_commit[:8]}"
+            success = _run_script_candidate(script_path, version_label, reason, source_label, fallback_context=context)
             commit_history[stable_commit] = "success" if success else "failed"
             if success:
                 history["stable_commit"] = stable_commit
@@ -444,7 +456,8 @@ def _run_backups(reason: str) -> bool:
     if stable_backup:
         backup_path = REPO_ROOT / "backups" / stable_backup
         if backup_path.exists():
-            success = _run_script_candidate(backup_path, stable_backup, reason, stable_backup)
+            context = f"{head_short} -> backup:{stable_backup}"
+            success = _run_script_candidate(backup_path, stable_backup, reason, stable_backup, fallback_context=context)
             backup_history[stable_backup] = "success" if success else "failed"
             if success:
                 history["stable_backup"] = stable_backup
@@ -466,7 +479,8 @@ def _run_backups(reason: str) -> bool:
             continue
         version_label = f"commit.{commit_hash[:8]}"
         source_label = f"commit {commit_hash[:8]}"
-        success = _run_script_candidate(script_path, version_label, reason, source_label)
+        context = f"{head_short} -> {commit_hash[:8]}"
+        success = _run_script_candidate(script_path, version_label, reason, source_label, fallback_context=context)
         commit_history[commit_hash] = "success" if success else "failed"
         if success:
             history["stable_commit"] = commit_hash
@@ -484,7 +498,8 @@ def _run_backups(reason: str) -> bool:
         if backup_history.get(backup_key) == "failed":
             continue
         candidate_version = candidate.stem.split('_v', 1)[-1]
-        success = _run_script_candidate(candidate, candidate_version, reason, candidate.name)
+        context = f"{head_short} -> backup:{backup_key}"
+        success = _run_script_candidate(candidate, candidate_version, reason, candidate.name, fallback_context=context)
         backup_history[backup_key] = "success" if success else "failed"
         if success:
             history["stable_commit"] = None

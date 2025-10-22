@@ -3540,13 +3540,23 @@ def run_cycle():
     start_banner = f"{session_separator} START SESSION {session_stamp} {session_separator}"
     log(start_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nSTART SESSION {session_stamp}\n{session_separator}")
-    commit_hash, commit_message = get_current_commit_info()
-    if commit_hash:
-        short_hash = commit_hash[:8]
-        message_text = commit_message or "no commit message"
-        git_line = f"[GIT] {short_hash} — {message_text}"
+    source_label = os.getenv("BYBITBOT_SOURCE_LABEL")
+    source_ref = os.getenv("BYBITBOT_SOURCE_REF")
+    source_context = os.getenv("BYBITBOT_FALLBACK_CONTEXT")
+    if source_label and source_ref:
+        git_line = f"[GIT] {source_ref} — {source_label}"
+        if source_context:
+            git_line += f" ({source_context})"
         log(git_line, Fore.LIGHTBLACK_EX)
         send_tg(git_line)
+    else:
+        commit_hash, commit_message = get_current_commit_info()
+        if commit_hash:
+            short_hash = commit_hash[:8]
+            message_text = commit_message or "no commit message"
+            git_line = f"[GIT] {short_hash} — {message_text}"
+            log(git_line, Fore.LIGHTBLACK_EX)
+            send_tg(git_line)
     last_equity = equity
     last_available_margin = available_margin
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
