@@ -207,29 +207,81 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
     target = branch_name.strip()
     if not target:
         return None
-    cmd = ["git", "show", f"{target}:bybitbot_impl.py"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=REPO_ROOT,
-        )
-    except Exception:
-        return None
-    content = result.stdout
-    if not content:
-        return None
-    backups_dir = REPO_ROOT / "backups"
-    backups_dir.mkdir(exist_ok=True)
-    safe_target = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in target)
-    script_path = backups_dir / f"bybitbot_impl_branch_{safe_target}.py"
-    try:
-        script_path.write_text(content, encoding="utf-8")
-    except Exception:
-        return None
-    return script_path
+
+    def try_show(ref: str) -> Path | None:
+        cmd = ["git", "show", f"{ref}:bybitbot_impl.py"]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=REPO_ROOT,
+            )
+        except Exception:
+            return None
+        content = result.stdout
+        if not content:
+            return None
+        backups_dir = REPO_ROOT / "backups"
+        backups_dir.mkdir(exist_ok=True)
+        safe_target = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in ref)
+        script_path = backups_dir / f"bybitbot_impl_branch_{safe_target}.py"
+        try:
+            script_path.write_text(content, encoding="utf-8")
+        except Exception:
+            return None
+        return script_path
+
+    candidate_refs: list[str] = []
+    commit_attempts: list[str] = []
+
+    if "/" in target:
+        candidate_refs.append(target)
+    else:
+        commit_attempts.append(target)
+        candidate_refs.append(target)
+        candidate_refs.append(f"origin/{target}")
+
+    for ref in commit_attempts + candidate_refs:
+        path = try_show(ref)
+        if path:
+            return path
+
+    if "/" not in target:
+        try:
+            subprocess.run(
+                ["git", "fetch", "--quiet", "origin", target],
+                check=True,
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+        else:
+            for ref in (target, f"origin/{target}"):
+                path = try_show(ref)
+                if path:
+                    return path
+
+    for ref in candidate_refs:
+        try:
+            subprocess.run(
+                ["git", "fetch", "--quiet", "origin", ref],
+                check=True,
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+        else:
+            path = try_show(ref)
+            if path:
+                return path
+
+    return None
 
 
 def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str) -> bool:
