@@ -4264,6 +4264,7 @@ def run_cycle():
                 initial_position_amount = 0.0
             has_position = abs(initial_position_amount) > 0
             open_orders_symbol = open_orders_prefetch.get(sym)
+            sym_confidence_text: str | None = None
             if open_orders_symbol is None:
                 try:
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
@@ -4307,6 +4308,13 @@ def run_cycle():
                     "action": default_action,
                     "reason": default_reason,
                 }
+            decision_confidence_raw = dec.get("confidence")
+            if decision_confidence_raw is not None:
+                try:
+                    sym_confidence_text = f"{float(decision_confidence_raw):.3f}"
+                except (TypeError, ValueError):
+                    sym_confidence_text = str(decision_confidence_raw)
+                log(f"[AI] {sym} confidence: {sym_confidence_text}", Fore.LIGHTBLACK_EX)
             if symbol_meta.get("notional_pct") is not None and dec.get("notional_pct") is None:
                 dec["notional_pct"] = symbol_meta.get("notional_pct")
             symbol_leverage = _resolve_symbol_leverage(dec, symbol_meta, current_position)
@@ -4746,6 +4754,8 @@ def run_cycle():
                     detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
                 else:
                     detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
+            if detail_entry and sym_confidence_text:
+                detail_entry = f"{detail_entry} [conf {sym_confidence_text}]"
             if detail_entry:
                 decisions_details.append(detail_entry)
 
