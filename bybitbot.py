@@ -284,6 +284,14 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
     return None
 
 
+def _log_fallback_event(source_desc: str, source_ref: str, target_desc: str, target_ref: str, context: str) -> None:
+    message = (
+        f"[BOOT] Fallback executed ({context}): "
+        f"{source_desc} {source_ref} -> {target_desc} {target_ref}"
+    )
+    print(message, file=sys.stderr)
+
+
 def _update_current_branch() -> None:
     try:
         result = subprocess.run(
@@ -324,13 +332,15 @@ def _update_current_branch() -> None:
     return None
 
 
-def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str) -> bool:
+def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str, *, fallback_context: str | None = None) -> bool:
     _, fb_header, fb_lines = _build_commit_changelog()
     fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
     print(
         f"[BOOT] Falling back to {source} due to {reason}",
         file=sys.stderr,
     )
+    if fallback_context:
+        _log_fallback_event("HEAD", _current_head() or "unknown", source, version_label, fallback_context)
     env = os.environ.copy()
     env["BYBITBOT_CHANGELOG_VERSION"] = version_label
     env["BYBITBOT_CHANGELOG_TEXT"] = fallback_changelog
@@ -397,7 +407,8 @@ def _run_backups(reason: str) -> bool:
         if script_path:
             version_label = f"branch.{stable_branch}"
             source_label = f"{stable_branch} branch"
-            success = _run_script_candidate(script_path, version_label, reason, source_label)
+            head_hash = _current_head() or "unknown"
+            success = _run_script_candidate(script_path, version_label, reason, source_label, fallback_context=f"{head_hash[:8]} -> branch")
             branch_history[stable_branch] = "success" if success else "failed"
             if success:
                 history["stable_branch"] = stable_branch
