@@ -737,7 +737,7 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     if not AI_KEY:
         log("[AI] OPENAI_API_KEY missing for universe update", Fore.RED)
         return None
-    client = OpenAI(api_key=AI_KEY, timeout=15)
+    client = OpenAI(api_key=AI_KEY, timeout=30)
     news_digest = news_digest or _build_news_digest(symbols)
     positions_compact: list[dict[str, Any]] = []
     for sym in symbols:
@@ -983,7 +983,7 @@ def ai_plan_trades(
     if not AI_KEY:
         log("?? �� 㪠��� OPENAI_API_KEY (stage plan)", Fore.RED)
         return None
-    client = OpenAI(api_key=AI_KEY, timeout=20)
+    client = OpenAI(api_key=AI_KEY, timeout=40)
     positions_payload = _compact_positions_snapshot(positions_snapshot)
     pending_orders_payload = _compact_orders_snapshot(pending_orders)
     payload = {
@@ -1054,9 +1054,10 @@ def ai_plan_trades(
         return None
     _log_ai_request(AI_MODEL, token_estimate, f"trade plan ({stage})")
     attempt_count = 0
-    backoff_seconds = 5
+    max_attempts = max(1, TRADE_PLAN_MAX_ATTEMPTS)
+    base_backoff = max(1.0, float(TRADE_PLAN_BACKOFF_SECONDS))
     last_error: Exception | None = None
-    while attempt_count < 3:
+    while attempt_count < max_attempts:
         attempt_count += 1
         try:
             res = client.chat.completions.create(
@@ -1068,9 +1069,10 @@ def ai_plan_trades(
         except Exception as exc:
             last_error = exc
             log(f"[ERROR] OpenAI trade plan attempt {attempt_count}: {exc}", Fore.RED)
-            if attempt_count >= 3:
+            if attempt_count >= max_attempts:
                 break
-            time.sleep(backoff_seconds * attempt_count)
+            delay = base_backoff * (attempt_count ** 2)
+            time.sleep(delay + random.uniform(0, base_backoff))
             continue
         _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
         content = res.choices[0].message.content
@@ -1079,12 +1081,16 @@ def ai_plan_trades(
         except json.JSONDecodeError as exc:
             log(f"[WARN] JSON decode (trade plan): {exc}", Fore.YELLOW)
             last_error = exc
-            if attempt_count >= 3:
+            if attempt_count >= max_attempts:
                 break
-            time.sleep(backoff_seconds * attempt_count)
+            delay = base_backoff * (attempt_count ** 2)
+            time.sleep(delay + random.uniform(0, base_backoff))
             continue
     if last_error:
-        log(f"[ERROR] OpenAI trade plan failed after retries: {last_error}", Fore.RED)
+        log(
+            f"[ERROR] OpenAI trade plan failed after {attempt_count} attempts: {last_error}",
+            Fore.RED,
+        )
     return None
 
 
@@ -1215,6 +1221,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             extra_orders,
             current_position=current_position,
             open_orders=open_orders_symbol,
+            max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
         )
         if executed:
             send_tg(f"{sym}: —?—?—?——? выполнил:\n- " + "\n- ".join(executed))
@@ -1350,6 +1357,10 @@ def refresh_settings():
     except (TypeError, ValueError):
         ORDER_MARGIN_UTILIZATION = 0.95
     ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
+    MAX_NON_REDUCE_LIMITS_PER_SIDE = env_int("BYBITBOT_MAX_NON_REDUCE_LIMITS_PER_SIDE", 1)
+    NON_REDUCE_PRICE_DECIMALS = env_int("BYBITBOT_NON_REDUCE_PRICE_DECIMALS", 4)
+    TRADE_PLAN_MAX_ATTEMPTS = env_int("BYBITBOT_TRADE_PLAN_MAX_ATTEMPTS", 5)
+    TRADE_PLAN_BACKOFF_SECONDS = float(os.getenv("BYBITBOT_TRADE_PLAN_BACKOFF", "5"))
     LOG_TIMEZONE = (os.getenv("LOG_TIMEZONE") or "").strip()
     parsed_tz = resolve_timezone(LOG_TIMEZONE)
     if LOG_TIMEZONE and parsed_tz is None:
@@ -1390,6 +1401,14 @@ AI_REQUESTS_LOG = "ai_requests.log"
 if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
+if "MAX_NON_REDUCE_LIMITS_PER_SIDE" not in globals():
+    MAX_NON_REDUCE_LIMITS_PER_SIDE = 1
+if "NON_REDUCE_PRICE_DECIMALS" not in globals():
+    NON_REDUCE_PRICE_DECIMALS = 4
+if "TRADE_PLAN_MAX_ATTEMPTS" not in globals():
+    TRADE_PLAN_MAX_ATTEMPTS = 5
+if "TRADE_PLAN_BACKOFF_SECONDS" not in globals():
+    TRADE_PLAN_BACKOFF_SECONDS = 5.0
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 100_000
@@ -1807,6 +1826,79 @@ def cancel_order_by_id(exchange, symbol, order_id: str):
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+def _cancel_orders_batch(exchange, symbol, order_ids):
+    cancelled = []
+    failures = []
+    for oid in order_ids:
+        if not oid:
+            continue
+        success, err = cancel_order_by_id(exchange, symbol, oid)
+        if success:
+            cancelled.append(oid)
+        else:
+            failures.append((oid, err))
+    return cancelled, failures
+
+
+def _cleanup_excess_non_reduce_limits(exchange, symbol, open_orders, position_side, max_per_side=1):
+    if not open_orders:
+        return open_orders or []
+    position_side = (position_side or "").lower()
+    to_cancel: list[str] = []
+    limit_groups: dict[tuple[str, float], list[dict]] = {}
+    for order in open_orders or []:
+        if not isinstance(order, dict):
+            continue
+        if _is_truthy_flag(order.get("reduceOnly")):
+            continue
+        order_type = (order.get("type") or "").lower()
+        if order_type != "limit":
+            continue
+        price = safe_float(order.get("price"))
+        if price is None or not math.isfinite(price) or price <= 0:
+            continue
+        side = (order.get("side") or "").lower()
+        same_direction = (
+            position_side in ("long", "buy") and side == "buy"
+        ) or (
+            position_side in ("short", "sell") and side == "sell"
+        )
+        oid = order.get("id")
+        if same_direction and oid:
+            to_cancel.append(str(oid))
+            continue
+        price_key = round(price, NON_REDUCE_PRICE_DECIMALS)
+        key = (side, price_key)
+        limit_groups.setdefault(key, []).append(order)
+    for key, bucket in limit_groups.items():
+        keep_count = max_per_side if max_per_side > 0 else 0
+        if len(bucket) <= keep_count:
+            continue
+        sorted_bucket = sorted(
+            bucket,
+            key=lambda o: safe_float(o.get("timestamp") or 0) or 0,
+        )
+        for order in sorted_bucket[keep_count:]:
+            oid = order.get("id")
+            if oid:
+                to_cancel.append(str(oid))
+    if not to_cancel:
+        return open_orders or []
+    cancelled, failures = _cancel_orders_batch(exchange, symbol, to_cancel)
+    if cancelled:
+        summary = ", ".join(cancelled)
+        log(f"[WARN] Cancelled excess non-reduce limits for {symbol}: {summary}", Fore.YELLOW)
+        send_tg(f"[WARN] {symbol}: cancelled non-reduce limits: {summary}")
+    if failures:
+        details = "; ".join(f"{oid}: {err}" for oid, err in failures)
+        log(f"[WARN] Failed to cancel some non-reduce limits for {symbol}: {details}", Fore.YELLOW)
+    try:
+        return fetch_open_orders_for_symbol(exchange, symbol)
+    except Exception as exc:
+        log(f"[WARN] fetch_open_orders {symbol}: {exc}", Fore.YELLOW)
+        return open_orders or []
 
 
 def get_position_idx(side: str | None) -> int | None:
@@ -2767,56 +2859,168 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     return fetch_open_orders_for_symbol(exchange, symbol)
 
 
-def execute_extra_orders(exchange, symbol, orders, current_position=None, open_orders=None):
+
+def execute_extra_orders(
+    exchange,
+    symbol,
+    orders,
+    current_position=None,
+    open_orders=None,
+    available_margin: float | None = None,
+    symbol_leverage: float | None = None,
+    max_limits_per_side: int = 1,
+):
     executed = []
     open_orders = open_orders or []
-    reduce_only_map = {}
+    position_side = ((current_position or {}).get("side") or "").lower()
+    reduce_only_map: dict[str, list[dict]] = {}
+    existing_non_reduce_limits: dict[tuple[str, float], int] = {}
     for existing in open_orders:
+        if not isinstance(existing, dict):
+            continue
         try:
-            reduce_flag = existing.get("reduceOnly")
+            reduce_flag = _is_truthy_flag(existing.get("reduceOnly"))
         except AttributeError:
             continue
-        if reduce_flag in (True, "true", "1", 1):
-            side_key = (existing.get("side") or "").lower()
+        side_key = (existing.get("side") or "").lower()
+        if reduce_flag:
             reduce_only_map.setdefault(side_key, []).append(existing)
+        else:
+            order_type_existing = (existing.get("type") or "").lower()
+            if order_type_existing == "limit":
+                price_existing = safe_float(existing.get("price"))
+                if price_existing is not None and math.isfinite(price_existing) and price_existing > 0:
+                    price_key = round(price_existing, NON_REDUCE_PRICE_DECIMALS)
+                    key = (side_key, price_key)
+                    existing_non_reduce_limits[key] = existing_non_reduce_limits.get(key, 0) + 1
+    position_amount = 0.0
+    if current_position:
+        try:
+            position_amount = float(current_position.get("amount") or 0)
+        except (TypeError, ValueError):
+            position_amount = 0.0
+    margin_buffer = None
+    if available_margin is not None:
+        try:
+            margin_buffer = max(0.0, float(available_margin) * ORDER_MARGIN_UTILIZATION)
+        except (TypeError, ValueError):
+            margin_buffer = None
+    leverage = symbol_leverage if symbol_leverage and symbol_leverage > 0 else 1.0
+    max_limits_per_side = max(0, max_limits_per_side)
     if not isinstance(orders, (list, tuple)):
-        log(f"⚠️ Некорректный формат orders для {symbol}: ожидается список", Fore.YELLOW)
+        log(f"[WARN] Invalid extra orders payload for {symbol}; skipping.", Fore.YELLOW)
         return executed, False
     cancelled_success = []
     cancel_errors = []
     for idx, order in enumerate(orders, 1):
         if not isinstance(order, dict):
-            log(f"⚠️ Пропуск order #{idx} для {symbol}: ожидается объект", Fore.YELLOW)
+            log(f"[WARN] Extra order #{idx} for {symbol} is not a dict; skipping.", Fore.YELLOW)
             continue
-        raw_type = order.get("type")
-        if not raw_type:
-            raw_type = (
-                order.get("orderType")
-                or order.get("order_type")
-                or order.get("ccxt_type")
-            )
+        raw_type = (
+            order.get("type")
+            or order.get("orderType")
+            or order.get("order_type")
+            or order.get("ccxt_type")
+        )
         order_type_key = normalize_order_type_key(raw_type)
         params = dict(order.get("params") or {})
         note = order.get("note") or order.get("comment") or ""
-        reduce_only = order.get("reduceOnly")
-        if reduce_only is not None:
-            params["reduceOnly"] = bool(reduce_only)
-        position_amount = 0.0
-        if current_position:
-            try:
-                position_amount = float(current_position.get("amount") or 0)
-            except (TypeError, ValueError):
-                position_amount = 0.0
+        reduce_only_flag = _is_truthy_flag(order.get("reduceOnly"))
+        if reduce_only_flag:
+            params["reduceOnly"] = True
+        elif "reduceOnly" in params:
+            params["reduceOnly"] = bool(params["reduceOnly"])
         side = (order.get("side") or "").lower()
-        amount = compute_order_amount(order, current_position)
-        price = order.get("price")
-        try:
-            if price is not None:
-                price = float(price)
-        except (TypeError, ValueError):
-            log(f"⚠️ Некорректная цена в order #{idx} для {symbol}", Fore.YELLOW)
+        if not side:
+            log(f"[WARN] Missing side in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
-
+        amount = compute_order_amount(order, current_position)
+        if amount is None:
+            log(f"[WARN] Unable to determine amount for extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+            continue
+        try:
+            amount = abs(float(amount))
+        except (TypeError, ValueError):
+            log(f"[WARN] Invalid amount in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+            continue
+        if amount <= 0:
+            log(f"[WARN] Invalid amount in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+            continue
+        price = safe_float(order.get("price"))
+        if price is not None and (not math.isfinite(price) or price <= 0):
+            log(f"[WARN] Invalid price in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+            continue
+        price_key = round(price, NON_REDUCE_PRICE_DECIMALS) if price is not None else None
+        is_reduce_only = _is_truthy_flag(params.get("reduceOnly"))
+        if not is_reduce_only and position_side:
+            same_direction = (
+                (position_side in ("long", "buy") and side == "buy")
+                or (position_side in ("short", "sell") and side == "sell")
+            )
+            if same_direction:
+                log(
+                    f"[WARN] Skipping additive extra order #{idx} for {symbol}: position side {position_side} vs order {side.upper()}",
+                    Fore.YELLOW,
+                )
+                continue
+        if (
+            not is_reduce_only
+            and order_type_key == "limit"
+            and price is not None
+            and max_limits_per_side > 0
+        ):
+            key = (side, price_key)
+            if existing_non_reduce_limits.get(key, 0) >= max_limits_per_side:
+                log(
+                    f"[WARN] Skipping duplicate non-reduce limit for {symbol} {side.upper()} @ {price}",
+                    Fore.YELLOW,
+                )
+                continue
+        margin_required = None
+        if not is_reduce_only and margin_buffer is not None:
+            ref_price = price
+            if ref_price is None:
+                ref_price = safe_float(
+                    order.get("triggerPrice")
+                    or order.get("stopPrice")
+                    or order.get("stop_price")
+                    or params.get("triggerPrice")
+                    or params.get("stopPrice")
+                    or params.get("stop_price")
+                )
+            if ref_price is not None and math.isfinite(ref_price) and ref_price > 0:
+                notional_estimate = amount * ref_price
+                margin_required = notional_estimate / leverage if leverage else notional_estimate
+                if margin_required > margin_buffer:
+                    log(
+                        f"[WARN] Skipping extra order #{idx} for {symbol}: margin required {margin_required:.2f} USDT exceeds available {margin_buffer:.2f} USDT",
+                        Fore.YELLOW,
+                    )
+                    continue
+        if is_reduce_only:
+            if abs(position_amount) == 0:
+                log(f"[INFO] Skipping reduce-only order for {symbol}: no active position", Fore.LIGHTBLACK_EX)
+                send_tg(f"[INFO] {symbol}: reduce-only order skipped (flat position)")
+                continue
+            existing_list = reduce_only_map.get(side)
+            if existing_list:
+                for existing_order in existing_list:
+                    oid = existing_order.get("id")
+                    if not oid:
+                        continue
+                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
+                    if success:
+                        cancelled_success.append(str(oid))
+                        log(f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}", Fore.LIGHTBLUE_EX)
+                    else:
+                        cancel_errors.append((oid, err))
+                        log(f"[WARN] Failed to cancel reduce-only order {oid} for {symbol}: {err}", Fore.YELLOW)
+                reduce_only_map[side] = []
+        position_idx = order.get("positionIdx")
+        if position_idx is None:
+            params.setdefault("positionIdx", get_position_idx(side))
+        else:
+            params["positionIdx"] = position_idx
         if order_type_key == "partial_close":
             base_order_type_raw = (
                 order.get("orderType")
@@ -2838,14 +3042,12 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
                     or order.get("stop_price")
                     or params.get("triggerPrice")
                     or params.get("stopPrice")
+                    or params.get("stop_price")
                     or price
                 )
-                try:
-                    trigger_price = float(trigger_price) if trigger_price is not None else None
-                except (TypeError, ValueError):
-                    trigger_price = None
-                if trigger_price is None:
-                    log(f"⚠️ Пропуск стоп-ордера #{idx} для {symbol}: нет triggerPrice", Fore.YELLOW)
+                trigger_price = safe_float(trigger_price)
+                if trigger_price is None or not math.isfinite(trigger_price):
+                    log(f"[WARN] Missing triggerPrice for extra order #{idx} {symbol}", Fore.YELLOW)
                     continue
                 ccxt_type = "market"
                 price = None
@@ -2863,43 +3065,9 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
                 Fore.YELLOW,
             )
             ccxt_type = fallback_type
-
-        if not side:
-            log(f"⚠️ Не указан side в order #{idx} для {symbol}", Fore.YELLOW)
-            continue
-        if amount is None:
-            log(f"⚠️ Не удалось определить объём ордера #{idx} для {symbol}", Fore.YELLOW)
-            continue
-        position_idx = order.get("positionIdx")
-        if position_idx is None:
-            params.setdefault("positionIdx", get_position_idx(side))
-        else:
-            params["positionIdx"] = position_idx
-
         if ccxt_type in ("limit", "stopLimit", "takeProfit", "stopLoss") and price is None:
-            log(f"⚠️ Нужна цена для ордера #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
+            log(f"[WARN] Missing price for extra order #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
             continue
-
-        if params.get("reduceOnly"):
-            if abs(position_amount) == 0:
-                log(f'[INFO] Пропуск reduce-only ордера по {symbol}: позиция отсутствует', Fore.LIGHTBLACK_EX)
-                send_tg(f'[INFO] {symbol}: reduce-only без позиции пропущен')
-                continue
-            existing_list = reduce_only_map.get(side)
-            if existing_list:
-                for existing_order in existing_list:
-                    oid = existing_order.get("id")
-                    if not oid:
-                        continue
-                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
-                    if success:
-                        cancelled_success.append(str(oid))
-                        log(f'[INFO] Отменён существующий reduce-only ордер {oid} для {symbol} перед заменой', Fore.LIGHTBLUE_EX)
-                    else:
-                        cancel_errors.append((oid, err))
-                        log(f'[WARN] Не удалось отменить reduce-only ордер {oid} для {symbol}: {err}', Fore.YELLOW)
-                reduce_only_map[side] = []
-
         try:
             order_id = exchange.create_order(symbol, ccxt_type, side, amount, price, params)
             display_type = "STOP-MARKET" if order_type_key == "stop_loss" else ccxt_type.upper()
@@ -2907,16 +3075,21 @@ def execute_extra_orders(exchange, symbol, orders, current_position=None, open_o
             if price:
                 desc += f" @ {price}"
             if note:
-                desc += f" — {note}"
+                desc += f" - {note}"
             executed.append(desc)
-            log(f"🛠️ Доп. ордер для {symbol}: {desc}", Fore.LIGHTBLUE_EX)
+            log(f"[INFO] Extra order placed for {symbol}: {desc}", Fore.LIGHTBLUE_EX)
+            if not is_reduce_only and order_type_key == "limit" and price is not None:
+                key = (side, price_key if price_key is not None else round(price, NON_REDUCE_PRICE_DECIMALS))
+                existing_non_reduce_limits[key] = existing_non_reduce_limits.get(key, 0) + 1
+            if margin_buffer is not None and margin_required is not None:
+                margin_buffer = max(0.0, margin_buffer - margin_required)
         except Exception as e:
-            log(f"❌ Ошибка доп. ордера #{idx} для {symbol}: {e}", Fore.RED)
+            log(f"[ERROR] Extra order #{idx} for {symbol} failed: {e}", Fore.RED)
     if cancelled_success:
-        send_tg(f"🗑️ {symbol}: отменены ордера {', '.join(cancelled_success)} перед заменой")
+        send_tg(f"[INFO] {symbol}: cancelled reduce-only orders {', '.join(cancelled_success)}")
     if cancel_errors:
         errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_errors)
-        send_tg(f"⚠️ {symbol}: ошибки отмены ордеров — {errs}")
+        send_tg(f"[WARN] {symbol}: errors cancelling orders - {errs}")
     actions_performed = bool(executed or cancelled_success or cancel_errors)
     return executed, actions_performed
 
@@ -2941,7 +3114,7 @@ def ai_decision(
     df_30m = df_primary
     extra_context = extra_context or {}
     target_meta = target_meta or {}
-    client = OpenAI(api_key=AI_KEY, timeout=15)
+    client = OpenAI(api_key=AI_KEY, timeout=30)
     df_30m["ema20"] = ema(df_30m["close"],20)
     df_30m["ema50"] = ema(df_30m["close"],50)
     df_30m["rsi"] = rsi(df_30m["close"],14)
@@ -4042,6 +4215,14 @@ def run_cycle():
                     log(f"⚠️ Не удалось получить открытые ордера для {sym}: {fetch_exc}", Fore.YELLOW)
                     open_orders_symbol = []
                 open_orders_prefetch[sym] = open_orders_symbol
+            open_orders_symbol = _cleanup_excess_non_reduce_limits(
+                ex,
+                sym,
+                open_orders_symbol,
+                (current_position or {}).get("side"),
+                MAX_NON_REDUCE_LIMITS_PER_SIDE,
+            )
+            open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
             preloaded_decision = decisions_map.get(sym)
@@ -4444,7 +4625,10 @@ def run_cycle():
                     sym,
                     extra_orders,
                     current_position=current_position,
-                    open_orders=open_orders_symbol
+                    open_orders=open_orders_symbol,
+                    available_margin=available_margin,
+                    symbol_leverage=symbol_leverage,
+                    max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
                 )
                 if executed:
                     orders_activity = True
