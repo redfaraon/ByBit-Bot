@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.20.6")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.22.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
@@ -25,6 +25,7 @@ def _resolve_commit_limit(raw_value: str | None) -> int:
 
 CHANGELOG_COMMIT_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_CHANGELOG_COMMITS"))
 FALLBACK_COMMIT_CANDIDATE_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_FALLBACK_COMMIT_LIMIT", "12"))
+DEFAULT_STABLE_BRANCH = (os.getenv("BYBITBOT_STABLE_BRANCH") or "stable").strip() or "stable"
 
 
 def _build_commit_changelog(limit: int | None = None):
@@ -113,10 +114,16 @@ def _load_fallback_history() -> dict:
         return {"commits": {}, "backups": {}}
     data.setdefault("commits", {})
     data.setdefault("backups", {})
+    data.setdefault("branches", {})
     if not isinstance(data["commits"], dict):
         data["commits"] = {}
     if not isinstance(data["backups"], dict):
         data["backups"] = {}
+    if not isinstance(data["branches"], dict):
+        data["branches"] = {}
+    stable_branch = (data.get("stable_branch") or "").strip()
+    if not stable_branch:
+        data["stable_branch"] = DEFAULT_STABLE_BRANCH
     return data
 
 
@@ -196,6 +203,35 @@ def _materialize_commit_script(commit_hash: str) -> Path | None:
     return script_path
 
 
+def _materialize_branch_script(branch_name: str) -> Path | None:
+    target = branch_name.strip()
+    if not target:
+        return None
+    cmd = ["git", "show", f"{target}:bybitbot_impl.py"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return None
+    content = result.stdout
+    if not content:
+        return None
+    backups_dir = REPO_ROOT / "backups"
+    backups_dir.mkdir(exist_ok=True)
+    safe_target = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in target)
+    script_path = backups_dir / f"bybitbot_impl_branch_{safe_target}.py"
+    try:
+        script_path.write_text(content, encoding="utf-8")
+    except Exception:
+        return None
+    return script_path
+
+
 def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str) -> bool:
     _, fb_header, fb_lines = _build_commit_changelog()
     fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
@@ -259,6 +295,29 @@ def _run_backups(reason: str) -> bool:
     history = _load_fallback_history()
     commit_history = history.setdefault("commits", {})
     backup_history = history.setdefault("backups", {})
+    branch_history = history.setdefault("branches", {})
+    stable_branch = (history.get("stable_branch") or DEFAULT_STABLE_BRANCH).strip()
+    if not stable_branch:
+        stable_branch = DEFAULT_STABLE_BRANCH
+        history["stable_branch"] = stable_branch
+    if stable_branch:
+        script_path = _materialize_branch_script(stable_branch)
+        if script_path:
+            version_label = f"branch.{stable_branch}"
+            source_label = f"{stable_branch} branch"
+            success = _run_script_candidate(script_path, version_label, reason, source_label)
+            branch_history[stable_branch] = "success" if success else "failed"
+            if success:
+                history["stable_branch"] = stable_branch
+                history.pop("stable_commit", None)
+                history.pop("stable_backup", None)
+                _save_fallback_history(history)
+                return True
+            else:
+                _save_fallback_history(history)
+        else:
+            branch_history[stable_branch] = "missing"
+            _save_fallback_history(history)
     stable_commit = history.get("stable_commit")
     stable_backup = history.get("stable_backup")
     head_hash = _current_head()

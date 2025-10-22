@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.1
+# Version: 2025.10.22.2
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.1"
+BOT_VERSION = "2025.10.22.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -3835,6 +3835,9 @@ def run_cycle():
     decisions_total = 0
     counts = {"open":0,"close":0,"skip":0}
     decisions_details: list[str] = []
+    eligible_flat_symbols = 0
+    skipped_plan_omitted_symbols = 0
+    flat_skip_symbols: list[str] = []
 
     for i,sym in enumerate(symbols_sequence,1):
         if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
@@ -3901,6 +3904,7 @@ def run_cycle():
             )
             if initial_position_amount is None or not math.isfinite(initial_position_amount):
                 initial_position_amount = 0.0
+            has_position = abs(initial_position_amount) > 0
             open_orders_symbol = open_orders_prefetch.get(sym)
             if open_orders_symbol is None:
                 try:
@@ -3916,7 +3920,6 @@ def run_cycle():
                 dec = dict(preloaded_decision)
                 dec["symbol"] = sym
             else:
-                has_position = abs(initial_position_amount) > 0
                 default_action = "hold" if has_position else "skip"
                 exposure_notes = []
                 if has_position:
@@ -3953,6 +3956,16 @@ def run_cycle():
             action = (dec.get("action") or "skip").lower()
             side = dec.get("side") or ""
             reason = dec.get("reason") or ""
+            if not has_position:
+                eligible_flat_symbols += 1
+                reason_lower = reason.lower()
+                if (
+                    action == "skip"
+                    and "trade plan omitted symbol" in reason_lower
+                    and "no active exposure" in reason_lower
+                ):
+                    skipped_plan_omitted_symbols += 1
+                    flat_skip_symbols.append(sym)
             counts[action] = counts.get(action,0)+1
             decisions_total += 1
             side_text = side.lower()
@@ -4392,6 +4405,49 @@ def run_cycle():
             detail_msg = "\n".join(decisions_details)
             log(detail_msg, Fore.LIGHTBLACK_EX)
             send_tg(detail_msg)
+
+    final_positions_map, final_positions_count = fetch_positions_snapshot(ex)
+    final_positions_available = final_positions_count is not None
+    if not final_positions_available:
+        final_positions_map = dict(positions_map)
+
+    no_active_positions = final_positions_available and final_positions_count == 0
+    flat_skipped_all = (
+        no_active_positions
+        and eligible_flat_symbols > 0
+        and skipped_plan_omitted_symbols == eligible_flat_symbols
+    )
+    if flat_skipped_all:
+        skipped_list = ", ".join(sorted(set(flat_skip_symbols))) or "n/a"
+        issue_msg = (
+            "[FAIL] Trade plan omitted every flat symbol "
+            f"(omitted symbols: {skipped_list})"
+        )
+        log(issue_msg, Fore.RED)
+        send_tg(issue_msg)
+        raise RuntimeError("trade plan omitted every flat symbol; no active exposure")
+
+    unprotected_positions: list[tuple[str, float]] = []
+    for sym_active, payload in final_positions_map.items():
+        if not isinstance(payload, dict):
+            continue
+        amount_val = safe_float(payload.get("amount") or payload.get("contracts"))
+        if amount_val is None or not math.isfinite(amount_val) or abs(amount_val) <= 1e-8:
+            continue
+        orders_snapshot = global_open_orders.get(sym_active) if 'global_open_orders' in locals() else None
+        if orders_snapshot is None:
+            orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
+        protective_orders = _extract_protection_orders(orders_snapshot)
+        has_stop = any(_has_stop_flag(order) or _has_trailing_flag(order) for order in protective_orders)
+        if not has_stop:
+            unprotected_positions.append((sym_active, amount_val))
+
+    if unprotected_positions:
+        details = ", ".join(f"{sym} ({amt:.4f})" for sym, amt in unprotected_positions)
+        alert_msg = f"[FAIL] Positions without stop/trailing orders: {details}"
+        log(alert_msg, Fore.RED)
+        send_tg(alert_msg)
+        raise ProtectionMissingError("open positions without protective stops detected")
 
     if AI_TOKEN_USAGE_BY_MODEL:
         usage_lines = [

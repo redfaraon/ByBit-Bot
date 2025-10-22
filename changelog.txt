@@ -75,3 +75,7 @@ Recent commits (last 8)
 - Модель задаёт объёмы: используем переданные лоты/нотионал при открытиях, сохраняя маржинальные проверки.
 2025.10.20.6
 - Лимит открытых позиций задаёт модель: используем значение из первого запроса вместо жёсткого конфига.
+
+2025.10.22.2
+- Launcher now falls back to the dedicated `stable` branch whenever the latest commit fails validation, keeping prior commit/backups as secondary safeguards.
+- Trading cycle aborts when every flat symbol is skipped by the trade plan or when open positions lack stop/trailing protection, triggering an automatic rollback to stable.
