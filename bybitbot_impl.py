@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.4
+# Version: 2025.10.22.5
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.4"
+BOT_VERSION = "2025.10.22.5"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -5079,6 +5079,10 @@ if __name__ == "__main__":
     ensure_version_backup()
     try:
         main()
+    except KeyboardInterrupt:
+        log("Startup interrupted by user.", Fore.YELLOW)
+        _write_runtime_status(None, None, "stopped")
+        sys.exit(0)
     except Exception as exc:
         log(f"Startup failed for version {BOT_VERSION}: {exc}", Fore.RED)
         traceback.print_exc()
