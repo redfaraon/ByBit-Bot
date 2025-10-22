@@ -4854,12 +4854,76 @@ def run_cycle():
         if not has_stop:
             unprotected_positions.append((sym_active, amount_val))
 
-    if unprotected_positions:
-        details = ", ".join(f"{sym} ({amt:.4f})" for sym, amt in unprotected_positions)
-        alert_msg = f"[FAIL] Positions without stop/trailing orders: {details}"
+    unresolved_unprotected: list[str] = []
+    for sym_unprotected, amount_unprotected in unprotected_positions:
+        restored = False
+        position_payload = final_positions_map.get(sym_unprotected) or {}
+        try:
+            df_attempt = fetch_df(ex, sym_unprotected, TIMEFRAME)
+        except Exception as exc_fetch_df:
+            log(f"[WARN] Failed to fetch primary timeframe for {sym_unprotected}: {exc_fetch_df}", Fore.YELLOW)
+            df_attempt = None
+        try:
+            open_orders_attempt = fetch_open_orders_for_symbol(ex, sym_unprotected)
+        except Exception as exc_fetch_orders:
+            log(f"[WARN] Failed to refresh open orders for {sym_unprotected}: {exc_fetch_orders}", Fore.YELLOW)
+            open_orders_attempt = []
+        if df_attempt is not None and position_payload:
+            try:
+                updated_orders = ensure_position_protection(
+                    ex,
+                    sym_unprotected,
+                    position_payload,
+                    df_attempt,
+                    open_orders_attempt,
+                )
+                if isinstance(updated_orders, list):
+                    open_orders_attempt = updated_orders
+            except Exception as exc_protect:
+                log(f"[WARN] Failed to restore protection for {sym_unprotected}: {exc_protect}", Fore.YELLOW)
+        try:
+            refreshed_orders = fetch_open_orders_for_symbol(ex, sym_unprotected)
+        except Exception as exc_refresh_orders:
+            log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
+            refreshed_orders = open_orders_attempt
+        protective_orders_after = _extract_protection_orders(refreshed_orders)
+        has_stop_after = any(_has_stop_flag(order) or _has_trailing_flag(order) for order in protective_orders_after)
+        if has_stop_after:
+            restored = True
+            continue
+
+        close_side = "sell" if amount_unprotected > 0 else "buy"
+        qty_close = abs(amount_unprotected)
+        params_close = {"reduceOnly": True}
+        position_idx = get_position_idx(close_side)
+        if position_idx is not None:
+            params_close["positionIdx"] = position_idx
+        try:
+            ex.create_order(sym_unprotected, "market", close_side, qty_close, None, params_close)
+            log(f"[INFO] Closed position for {sym_unprotected} {close_side.upper()} {qty_close:.4f} due to missing protection", Fore.YELLOW)
+            send_tg(f"[WARN] {sym_unprotected}: position closed due to missing protection")
+            latest_positions, _ = fetch_positions_snapshot(ex, symbols_filter=[sym_unprotected])
+            final_positions_map.update(latest_positions)
+            restored = True
+            continue
+        except Exception as exc_close:
+            log(f"[ERROR] Failed to close unprotected position {sym_unprotected}: {exc_close}", Fore.RED)
+            send_tg(f"[ERROR] {sym_unprotected}: failed to close unprotected position - {exc_close}")
+
+        latest_positions, _ = fetch_positions_snapshot(ex, symbols_filter=[sym_unprotected])
+        pos_check = latest_positions.get(sym_unprotected)
+        amt_check = safe_float((pos_check or {}).get("amount") or (pos_check or {}).get("contracts"))
+        if amt_check is None or not math.isfinite(amt_check) or abs(amt_check) <= 1e-8:
+            restored = True
+        if not restored:
+            unresolved_unprotected.append(sym_unprotected)
+
+    if unresolved_unprotected:
+        details = ", ".join(sorted(set(unresolved_unprotected)))
+        alert_msg = f"[FAIL] Positions remain without protection or close-out: {details}"
         log(alert_msg, Fore.RED)
         send_tg(alert_msg)
-        raise ProtectionMissingError("open positions without protective stops detected")
+        raise ProtectionMissingError("unprotected positions could not be safeguarded or closed")
 
     if AI_TOKEN_USAGE_BY_MODEL:
         usage_lines = [
