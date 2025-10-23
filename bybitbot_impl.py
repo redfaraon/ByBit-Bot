@@ -2858,6 +2858,55 @@ def get_current_commit_info() -> tuple[str | None, str | None]:
     return commit_hash or None, commit_message or None
 
 
+def _sync_with_remote() -> None:
+    git_dir = REPO_ROOT / ".git"
+    if not git_dir.exists():
+        return
+    try:
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        working_tree_dirty = bool(status_proc.stdout.strip())
+    except Exception as exc:
+        log(f"[WARN] Git status failed before sync: {exc}", Fore.YELLOW)
+        return
+    try:
+        fetch_proc = subprocess.run(
+            ["git", "fetch", "--all", "--prune"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        fetch_output = (fetch_proc.stdout or "").strip()
+        if fetch_output:
+            log(f"[GIT] fetch: {fetch_output}", Fore.LIGHTBLACK_EX)
+    except subprocess.CalledProcessError as exc:
+        log(f"[WARN] Git fetch failed: {exc.stderr or exc.stdout or exc}", Fore.YELLOW)
+        return
+    if working_tree_dirty:
+        log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
+        return
+    try:
+        pull_proc = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pull_output = (pull_proc.stdout or pull_proc.stderr or "").strip()
+        if pull_output:
+            log(f"[GIT] pull: {pull_output}", Fore.LIGHTBLACK_EX)
+    except subprocess.CalledProcessError as exc:
+        details = exc.stderr or exc.stdout or str(exc)
+        log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
+
+
 def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_side, position_qty, is_long):
     """Remove surplus reduce-only stop orders that exceed current position coverage."""
     if (
@@ -4001,6 +4050,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
 
 # --- Основная логика ---
 def run_cycle():
+    _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
     _init_ai_cycle_usage()
@@ -4377,11 +4427,11 @@ def run_cycle():
             extra_symbols=extra_symbols_candidates,
         )
         selection_needs_payload = (selection or {}).get("needs") or []
-            if selection_needs_payload:
-                bundle = augment_bundle_with_needs(
-                    ex,
-                    bundle,
-                    selection_needs_payload,
+        if selection_needs_payload:
+            bundle = augment_bundle_with_needs(
+                ex,
+                bundle,
+                selection_needs_payload,
                 news_cache=news_cache,
                 news_full=news_full_cache,
             )
@@ -4390,37 +4440,38 @@ def run_cycle():
             summary_timeframes: list[str] = []
             summary_indicators: list[str] = []
             for need in selection_needs_payload:
-                if isinstance(need, dict):
-                    single_tf = need.get("timeframe")
-                    if single_tf:
-                        mapped_single = normalize_requested_timeframe(single_tf, default=TIMEFRAME)
-                        if mapped_single and mapped_single not in summary_timeframes:
-                            summary_timeframes.append(mapped_single)
-                    single_indicator = need.get("indicator")
-                    if single_indicator:
-                        ind_name_single = str(single_indicator).strip()
-                        if ind_name_single and ind_name_single not in summary_indicators:
-                            summary_indicators.append(ind_name_single)
-                    raw_timeframes = need.get("timeframes")
-                    if raw_timeframes:
-                        if isinstance(raw_timeframes, (list, tuple, set)):
-                            tf_iterable = raw_timeframes
-                        else:
-                            tf_iterable = [raw_timeframes]
-                        for tf in tf_iterable:
-                            mapped = normalize_requested_timeframe(tf, default=TIMEFRAME)
-                            if mapped and mapped not in summary_timeframes:
-                                summary_timeframes.append(mapped)
-                    indicator_fields = need.get("indicators")
-                    if indicator_fields:
-                        if isinstance(indicator_fields, (list, tuple, set)):
-                            ind_iterable = indicator_fields
-                        else:
-                            ind_iterable = [indicator_fields]
-                        for ind in ind_iterable:
-                            ind_name = str(ind).strip()
-                            if ind_name and ind_name not in summary_indicators:
-                                summary_indicators.append(ind_name)
+                if not isinstance(need, dict):
+                    continue
+                single_tf = need.get("timeframe")
+                if single_tf:
+                    mapped_single = normalize_requested_timeframe(single_tf, default=TIMEFRAME)
+                    if mapped_single and mapped_single not in summary_timeframes:
+                        summary_timeframes.append(mapped_single)
+                single_indicator = need.get("indicator")
+                if single_indicator:
+                    ind_name_single = str(single_indicator).strip()
+                    if ind_name_single and ind_name_single not in summary_indicators:
+                        summary_indicators.append(ind_name_single)
+                raw_timeframes = need.get("timeframes")
+                if raw_timeframes:
+                    if isinstance(raw_timeframes, (list, tuple, set)):
+                        tf_iterable = raw_timeframes
+                    else:
+                        tf_iterable = [raw_timeframes]
+                    for tf in tf_iterable:
+                        mapped = normalize_requested_timeframe(tf, default=TIMEFRAME)
+                        if mapped and mapped not in summary_timeframes:
+                            summary_timeframes.append(mapped)
+                indicator_fields = need.get("indicators")
+                if indicator_fields:
+                    if isinstance(indicator_fields, (list, tuple, set)):
+                        ind_iterable = indicator_fields
+                    else:
+                        ind_iterable = [indicator_fields]
+                    for ind in ind_iterable:
+                        ind_name = str(ind).strip()
+                        if ind_name and ind_name not in summary_indicators:
+                            summary_indicators.append(ind_name)
             if summary_timeframes and NEEDS_MAX_TIMEFRAMES:
                 summary_timeframes = summary_timeframes[:NEEDS_MAX_TIMEFRAMES]
             if summary_indicators and NEEDS_MAX_INDICATORS:
