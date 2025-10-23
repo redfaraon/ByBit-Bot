@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.7"
+BOT_VERSION = "2025.10.23.1"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -3646,7 +3646,11 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         log(f"ℹ️ Причина skip дополнена индикаторами для {symbol}", Fore.LIGHTBLACK_EX)
         return decision_obj
 
-        decision = initial_decision
+    decision = (
+        dict(initial_decision)
+        if isinstance(initial_decision, dict)
+        else initial_decision
+    )
     confidence_value = None
     confidence_raw = None
     confidence_display = None
