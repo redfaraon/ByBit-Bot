@@ -1312,6 +1312,7 @@ def refresh_settings():
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
     global SUPPORT_CONTEXT_TIMEFRAMES, SUPPORT_CONTEXT_INDICATORS, SUPPORT_CONTEXT_LIMIT
     global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
+    global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -1452,6 +1453,24 @@ def refresh_settings():
         LOW_CONFIDENCE_SERIALIZE_LIMIT = min(40, SUPPORT_CONTEXT_LIMIT)
     LOW_CONFIDENCE_SERIALIZE_LIMIT = max(10, min(LOW_CONFIDENCE_SERIALIZE_LIMIT, SUPPORT_CONTEXT_LIMIT))
 
+    try:
+        NEEDS_MAX_TIMEFRAMES = int(os.getenv("BYBITBOT_NEEDS_MAX_TF", "2"))
+    except (TypeError, ValueError):
+        NEEDS_MAX_TIMEFRAMES = 2
+    NEEDS_MAX_TIMEFRAMES = max(1, NEEDS_MAX_TIMEFRAMES)
+
+    try:
+        NEEDS_MAX_INDICATORS = int(os.getenv("BYBITBOT_NEEDS_MAX_INDICATORS", "4"))
+    except (TypeError, ValueError):
+        NEEDS_MAX_INDICATORS = 4
+    NEEDS_MAX_INDICATORS = max(1, NEEDS_MAX_INDICATORS)
+
+    try:
+        NEEDS_SERIALIZE_DEFAULT_LIMIT = int(os.getenv("BYBITBOT_NEEDS_BARS_LIMIT", "10"))
+    except (TypeError, ValueError):
+        NEEDS_SERIALIZE_DEFAULT_LIMIT = 10
+    NEEDS_SERIALIZE_DEFAULT_LIMIT = max(5, NEEDS_SERIALIZE_DEFAULT_LIMIT)
+
     PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
     PAIR_PREFETCH_LIMIT = env_int("PAIR_PREFETCH_LIMIT", PAIR_PREFETCH_LIMIT)
 
@@ -1554,7 +1573,11 @@ if "LOW_CONFIDENCE_INDICATORS" not in globals():
 if "LOW_CONFIDENCE_SERIALIZE_LIMIT" not in globals():
     LOW_CONFIDENCE_SERIALIZE_LIMIT = min(40, SUPPORT_CONTEXT_LIMIT)
 if "NEEDS_SERIALIZE_DEFAULT_LIMIT" not in globals():
-    NEEDS_SERIALIZE_DEFAULT_LIMIT = 80
+    NEEDS_SERIALIZE_DEFAULT_LIMIT = 10
+if "NEEDS_MAX_TIMEFRAMES" not in globals():
+    NEEDS_MAX_TIMEFRAMES = 2
+if "NEEDS_MAX_INDICATORS" not in globals():
+    NEEDS_MAX_INDICATORS = 4
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -3690,11 +3713,15 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             tf_clean = str(tf).strip()
             if tf_clean and tf_clean not in structured_timeframes:
                 structured_timeframes.append(tf_clean)
+        if structured_timeframes and NEEDS_MAX_TIMEFRAMES:
+            structured_timeframes = structured_timeframes[:NEEDS_MAX_TIMEFRAMES]
         structured_indicators: list[str] = []
         for ind in LOW_CONFIDENCE_INDICATORS:
             ind_clean = str(ind).strip()
             if ind_clean and ind_clean not in structured_indicators:
                 structured_indicators.append(ind_clean)
+        if structured_indicators and NEEDS_MAX_INDICATORS:
+            structured_indicators = structured_indicators[:NEEDS_MAX_INDICATORS]
         existing_auto_struct = any(
             isinstance(item, dict) and item.get("_auto_low_confidence") for item in needs
         )
@@ -3761,6 +3788,8 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                         higher_tf_list = [str(tf) for tf in higher_tf_raw if tf]
                     else:
                         higher_tf_list = [str(higher_tf_raw)]
+                if higher_tf_list and NEEDS_MAX_TIMEFRAMES:
+                    higher_tf_list = higher_tf_list[:NEEDS_MAX_TIMEFRAMES]
                 for tf in higher_tf_list:
                     mapped_tf = normalize_requested_timeframe(tf, default="4h")
                     try:
@@ -3788,6 +3817,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 indicators_requested = [ind for ind in dict.fromkeys(indicators_requested) if ind]
                 if not tf_values:
                     tf_values = [TIMEFRAME]
+                if tf_values and NEEDS_MAX_TIMEFRAMES:
+                    tf_values = tf_values[:NEEDS_MAX_TIMEFRAMES]
+                if indicators_requested and NEEDS_MAX_INDICATORS:
+                    indicators_requested = indicators_requested[:NEEDS_MAX_INDICATORS]
                 if indicators_requested:
                     indicator_extra = extra.setdefault(
                         "indicator_extra",
@@ -4302,8 +4335,17 @@ def run_cycle():
             log(f"[INFO] Portfolio rationale: {selection_reason}", Fore.CYAN)
             send_tg(f"[INFO] Portfolio analysis: {selection_reason}")
         confidence = selection.get("confidence")
-        if confidence:
-            log(f"[INFO] Model confidence: {confidence}", Fore.LIGHTBLACK_EX)
+        if confidence is not None:
+            conf_text = str(confidence)
+            try:
+                conf_val = float(confidence)
+            except (TypeError, ValueError):
+                conf_val = None
+            else:
+                conf_text = f"{conf_val:.3f}"
+            confidence_msg = f"[AI] Portfolio selection confidence: {conf_text}"
+            log(confidence_msg, Fore.LIGHTBLACK_EX)
+            send_tg(confidence_msg)
     if selection:
         raw_next_run = selection.get("next_run_minutes")
         if raw_next_run is not None:
@@ -4334,6 +4376,59 @@ def run_cycle():
             news_cache=news_cache,
             extra_symbols=extra_symbols_candidates,
         )
+        selection_needs_payload = (selection or {}).get("needs") or []
+            if selection_needs_payload:
+                bundle = augment_bundle_with_needs(
+                    ex,
+                    bundle,
+                    selection_needs_payload,
+                news_cache=news_cache,
+                news_full=news_full_cache,
+            )
+            bundle_meta = bundle.setdefault("meta", {})
+            bundle_meta.setdefault("selection_needs", selection_needs_payload)
+            summary_timeframes: list[str] = []
+            summary_indicators: list[str] = []
+            for need in selection_needs_payload:
+                if isinstance(need, dict):
+                    single_tf = need.get("timeframe")
+                    if single_tf:
+                        mapped_single = normalize_requested_timeframe(single_tf, default=TIMEFRAME)
+                        if mapped_single and mapped_single not in summary_timeframes:
+                            summary_timeframes.append(mapped_single)
+                    single_indicator = need.get("indicator")
+                    if single_indicator:
+                        ind_name_single = str(single_indicator).strip()
+                        if ind_name_single and ind_name_single not in summary_indicators:
+                            summary_indicators.append(ind_name_single)
+                    raw_timeframes = need.get("timeframes")
+                    if raw_timeframes:
+                        if isinstance(raw_timeframes, (list, tuple, set)):
+                            tf_iterable = raw_timeframes
+                        else:
+                            tf_iterable = [raw_timeframes]
+                        for tf in tf_iterable:
+                            mapped = normalize_requested_timeframe(tf, default=TIMEFRAME)
+                            if mapped and mapped not in summary_timeframes:
+                                summary_timeframes.append(mapped)
+                    indicator_fields = need.get("indicators")
+                    if indicator_fields:
+                        if isinstance(indicator_fields, (list, tuple, set)):
+                            ind_iterable = indicator_fields
+                        else:
+                            ind_iterable = [indicator_fields]
+                        for ind in ind_iterable:
+                            ind_name = str(ind).strip()
+                            if ind_name and ind_name not in summary_indicators:
+                                summary_indicators.append(ind_name)
+            if summary_timeframes and NEEDS_MAX_TIMEFRAMES:
+                summary_timeframes = summary_timeframes[:NEEDS_MAX_TIMEFRAMES]
+            if summary_indicators and NEEDS_MAX_INDICATORS:
+                summary_indicators = summary_indicators[:NEEDS_MAX_INDICATORS]
+            if summary_timeframes:
+                bundle_meta["selection_timeframes"] = summary_timeframes
+            if summary_indicators:
+                bundle_meta["selection_indicators"] = summary_indicators
         if bundle_orders:
             open_orders_cache.update(bundle_orders)
         bundle_meta = bundle.setdefault("meta", {})
@@ -4476,8 +4571,11 @@ def run_cycle():
             df = timeframe_dfs[primary_tf].copy()
             timeframes_payload = {}
             for tf, tf_df in timeframe_dfs.items():
-                effective_limit = SUPPORT_CONTEXT_LIMIT if tf in SUPPORT_CONTEXT_TIMEFRAMES else NEEDS_SERIALIZE_DEFAULT_LIMIT
                 if tf == primary_tf:
+                    effective_limit = max(NEEDS_SERIALIZE_DEFAULT_LIMIT, DEFAULT_CONTEXT_30M)
+                elif tf in SUPPORT_CONTEXT_TIMEFRAMES:
+                    effective_limit = SUPPORT_CONTEXT_LIMIT
+                else:
                     effective_limit = NEEDS_SERIALIZE_DEFAULT_LIMIT
                 payload = {"bars": _serialize_df(tf_df, limit=effective_limit)}
                 if tf in SUPPORT_CONTEXT_TIMEFRAMES:
@@ -4570,7 +4668,9 @@ def run_cycle():
                 else:
                     sym_confidence_tag = "UNKNOWN"
                 tag_display = f" ({sym_confidence_tag})" if sym_confidence_tag else ""
-                log(f"[AI] {sym} confidence: {sym_confidence_text}{tag_display}", Fore.LIGHTBLACK_EX)
+                confidence_msg = f"[AI] {sym} confidence: {sym_confidence_text}{tag_display}"
+                log(confidence_msg, Fore.LIGHTBLACK_EX)
+                send_tg(confidence_msg)
             else:
                 sym_confidence_tag = None
             low_confidence_flag = (
