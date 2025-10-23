@@ -95,3 +95,7 @@ Recent commits (last 8)
 
 2025.10.22.6
 - Fixed manage/hold extra orders: default to reduce-only, allow additive scaling only with explicit intent; normalized ticker aliases across data fetches to prevent BNB/POL lookup errors.
+
+2025.10.22.7
+- Added low-confidence telemetry: per-symbol confidence logged, extra context auto-requested when below threshold, with configurable needs list.
+- Skipped re-creating existing manage orders and canonicalized order payloads to prevent invalid-price/qty errors.

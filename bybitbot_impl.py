@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.6
+# Version: 2025.10.22.7
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.22.6"
+BOT_VERSION = "2025.10.22.7"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -832,12 +832,6 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     news_requests = result.get("news_requests") or []
     if isinstance(selection_payload, dict):
         selection_payload["_news_digest"] = news_digest
-        selection_payload["_position_snapshot"] = _compact_positions_snapshot(positions_map)
-        selection_payload["_order_snapshot"] = _compact_orders_snapshot(open_orders_cache)
-        selection_payload["_global_timeframes"] = list(global_timeframes)
-        selection_payload["_global_indicators"] = list(global_indicators)
-        selection_payload.setdefault("global_timeframes", list(global_timeframes))
-        selection_payload.setdefault("global_indicators", list(global_indicators))
     if not universe_payload.get("pairs"):
         fallback_pairs = selection_payload.get("pairs") or [
             item.get("symbol")
@@ -1385,6 +1379,22 @@ def refresh_settings():
     except (TypeError, ValueError):
         TRADE_PLAN_BACKOFF_SECONDS = 5.0
     TRADE_PLAN_BACKOFF_SECONDS = max(1.0, TRADE_PLAN_BACKOFF_SECONDS)
+    try:
+        AI_CONFIDENCE_THRESHOLD = float(os.getenv("BYBITBOT_CONFIDENCE_THRESHOLD", "0.55"))
+    except (TypeError, ValueError):
+        AI_CONFIDENCE_THRESHOLD = 0.55
+    low_conf_needs_env = os.getenv("BYBITBOT_CONFIDENCE_NEEDS")
+    if low_conf_needs_env:
+        try:
+            parsed_needs = json.loads(low_conf_needs_env)
+            if isinstance(parsed_needs, (list, tuple)):
+                LOW_CONFIDENCE_NEEDS = [str(item).strip() for item in parsed_needs if str(item).strip()]
+            else:
+                raise ValueError
+        except Exception:
+            LOW_CONFIDENCE_NEEDS = [item.strip() for item in low_conf_needs_env.split(',') if item.strip()]
+    else:
+        LOW_CONFIDENCE_NEEDS = ["funding", "open_interest", "news"]
     LOG_TIMEZONE = (os.getenv("LOG_TIMEZONE") or "").strip()
     parsed_tz = resolve_timezone(LOG_TIMEZONE)
     if LOG_TIMEZONE and parsed_tz is None:
@@ -1433,6 +1443,10 @@ if "TRADE_PLAN_MAX_ATTEMPTS" not in globals():
     TRADE_PLAN_MAX_ATTEMPTS = 5
 if "TRADE_PLAN_BACKOFF_SECONDS" not in globals():
     TRADE_PLAN_BACKOFF_SECONDS = 5.0
+if "AI_CONFIDENCE_THRESHOLD" not in globals():
+    AI_CONFIDENCE_THRESHOLD = 0.55
+if "LOW_CONFIDENCE_NEEDS" not in globals():
+    LOW_CONFIDENCE_NEEDS = ["funding", "open_interest", "news"]
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -2527,7 +2541,7 @@ def _maybe_switch_model_after_usage() -> None:
 def _current_request_token_cap() -> Optional[int]:
     if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
         return 0
-    if AI_SECONDARY_BUDGET_START and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
+    if False:
         return AI_PER_REQUEST_TOKEN_CAP
     return None
 
@@ -2992,6 +3006,9 @@ def execute_extra_orders(
         if not isinstance(order, dict):
             log(f"[WARN] Extra order #{idx} for {symbol} is not a dict; skipping.", Fore.YELLOW)
             continue
+        if order.get("status") is not None and order.get("id"):
+            log(f"[INFO] Retaining existing order {order.get('id')} for {symbol}; skipping extra placement.", Fore.LIGHTBLACK_EX)
+            continue
         raw_type = (
             order.get("type")
             or order.get("orderType")
@@ -3448,6 +3465,9 @@ def ai_decision(
         return decision_obj
 
         decision = initial_decision
+    confidence_value = None
+    confidence_raw = None
+    low_confidence = False
     auto_needs_triggered = False
     needs = []
     if decision is None:
@@ -3476,7 +3496,19 @@ def ai_decision(
         msg = res.choices[0].message.content
         decision = json.loads(msg)
         needs = decision.get("needs", [])
+        confidence_raw = decision.get("confidence")
+        try:
+            confidence_value = float(confidence_raw) if confidence_raw is not None else None
+        except (TypeError, ValueError):
+            confidence_value = None
+        low_confidence = (
+            confidence_value is not None
+            and confidence_value < AI_CONFIDENCE_THRESHOLD
+        )
         action_initial = (decision.get("action") or "").lower()
+        if not isinstance(needs, list):
+            needs = list(needs) if isinstance(needs, (tuple, set)) else []
+            decision["needs"] = needs
         if not needs and action_initial == "skip":
             reason_text = (decision.get("reason") or "").lower()
             keywords_auto_needs = ("запрос", "needs", "дополнитель", "подтвержд")
@@ -3485,6 +3517,16 @@ def ai_decision(
                 decision["needs"] = auto_needs
                 needs = auto_needs
                 auto_needs_triggered = True
+        if low_confidence:
+            additional_needs = [item for item in LOW_CONFIDENCE_NEEDS if item not in needs]
+            if additional_needs:
+                needs.extend(additional_needs)
+                decision["needs"] = needs
+                confidence_display = f"{confidence_value:.3f}" if confidence_value is not None else str(confidence_raw)
+                msg_low = f"🤖 Автозапрос дополнительного контекста ({confidence_display}) для {symbol}: {', '.join(additional_needs)}"
+                log(msg_low, Fore.LIGHTBLACK_EX)
+                send_tg(msg_low)
+
         save_json_line(
             AI_REQUESTS_LOG,
             {
@@ -3502,6 +3544,15 @@ def ai_decision(
         )
     else:
         needs = decision.get("needs", []) if isinstance(decision, dict) else []
+        confidence_raw = decision.get("confidence") if isinstance(decision, dict) else None
+        try:
+            confidence_value = float(confidence_raw) if confidence_raw is not None else None
+        except (TypeError, ValueError):
+            confidence_value = None
+        low_confidence = (
+            confidence_value is not None
+            and confidence_value < AI_CONFIDENCE_THRESHOLD
+        )
 
 
 
@@ -3677,7 +3728,7 @@ def ai_decision(
         log("✅ Контекст собран: " + ", ".join(stats_report), Fore.LIGHTBLACK_EX)
         send_tg("✅ Контекст собран для " + symbol + ":\n" + "\n".join(stats_report))
 
-        if AI_SECONDARY_BUDGET_START and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
+        if False:
             log(f"⚠️ {symbol}: пропуск допконтекста из-за достигнутого лимита токенов", Fore.YELLOW)
             decision["needs_followup"] = needs
             decision.pop("needs", None)
@@ -4265,6 +4316,7 @@ def run_cycle():
             has_position = abs(initial_position_amount) > 0
             open_orders_symbol = open_orders_prefetch.get(sym)
             sym_confidence_text: str | None = None
+            sym_confidence_value: float | None = None
             if open_orders_symbol is None:
                 try:
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
@@ -4311,10 +4363,24 @@ def run_cycle():
             decision_confidence_raw = dec.get("confidence")
             if decision_confidence_raw is not None:
                 try:
-                    sym_confidence_text = f"{float(decision_confidence_raw):.3f}"
+                    sym_confidence_value = float(decision_confidence_raw)
+                    sym_confidence_text = f"{sym_confidence_value:.3f}"
                 except (TypeError, ValueError):
+                    sym_confidence_value = None
                     sym_confidence_text = str(decision_confidence_raw)
                 log(f"[AI] {sym} confidence: {sym_confidence_text}", Fore.LIGHTBLACK_EX)
+            low_confidence_flag = (
+                sym_confidence_value is not None
+                and sym_confidence_value < AI_CONFIDENCE_THRESHOLD
+            )
+            needs_list = dec.get("needs")
+            if not isinstance(needs_list, list):
+                needs_list = []
+                dec["needs"] = needs_list
+            if low_confidence_flag:
+                for item in LOW_CONFIDENCE_NEEDS:
+                    if item not in needs_list:
+                        needs_list.append(item)
             if symbol_meta.get("notional_pct") is not None and dec.get("notional_pct") is None:
                 dec["notional_pct"] = symbol_meta.get("notional_pct")
             symbol_leverage = _resolve_symbol_leverage(dec, symbol_meta, current_position)
