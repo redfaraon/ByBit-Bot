@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.23.1"
+BOT_VERSION = "2025.10.23.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1579,6 +1579,12 @@ if "NEEDS_MAX_TIMEFRAMES" not in globals():
     NEEDS_MAX_TIMEFRAMES = 2
 if "NEEDS_MAX_INDICATORS" not in globals():
     NEEDS_MAX_INDICATORS = 4
+if "SUMMARY_TIMEFRAME_SHORTLIST" not in globals():
+    SUMMARY_TIMEFRAME_SHORTLIST = ["30m", "4h"]
+if "SUMMARY_INDICATOR_SHORTLIST" not in globals():
+    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "macd"]
+if "NEEDS_LONG_BARS_LIMIT" not in globals():
+    NEEDS_LONG_BARS_LIMIT = 10
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -3902,10 +3908,14 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                         effective_limit = serialize_limit_override
                         if effective_limit is None and tf in SUPPORT_CONTEXT_TIMEFRAMES:
                             effective_limit = SUPPORT_CONTEXT_LIMIT
-                        bars_limit = effective_limit or NEEDS_SERIALIZE_DEFAULT_LIMIT
-                        tf_payload = {"bars": _serialize_df(df_tf, limit=bars_limit)}
+                        base_limit = int(max(1, NEEDS_LONG_BARS_LIMIT or NEEDS_SERIALIZE_DEFAULT_LIMIT or 10))
+                        bars_limit = base_limit
                         if effective_limit is not None:
-                            tf_payload["limit"] = effective_limit
+                            bars_limit = max(1, min(int(effective_limit), base_limit))
+                        elif NEEDS_SERIALIZE_DEFAULT_LIMIT:
+                            bars_limit = max(1, min(int(NEEDS_SERIALIZE_DEFAULT_LIMIT), base_limit))
+                        tf_payload = {"bars": _serialize_df(df_tf, limit=bars_limit)}
+                        tf_payload["limit"] = bars_limit
                         if applied_cols:
                             indicator_values = {}
                             for col in applied_cols:
@@ -4431,8 +4441,85 @@ def run_cycle():
             news_cache=news_cache,
             extra_symbols=extra_symbols_candidates,
         )
-        selection_needs_payload = (selection or {}).get("needs") or []
-        if selection_needs_payload:
+        selection_needs_raw = (selection or {}).get("needs") or []
+        if selection_needs_raw:
+            allowed_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or [])
+            allowed_indicators = list(SUMMARY_INDICATOR_SHORTLIST or [])
+            allowed_indicator_map = {item.lower(): item for item in allowed_indicators}
+            cleaned_needs: list[Any] = []
+            for need_entry in selection_needs_raw:
+                if isinstance(need_entry, dict):
+                    cleaned_need: dict[str, Any] = {}
+                    symbol_value = need_entry.get("symbol")
+                    if symbol_value:
+                        cleaned_need["symbol"] = symbol_value
+                    tf_candidates: list[Any] = []
+                    single_tf = need_entry.get("timeframe")
+                    if single_tf:
+                        tf_candidates.append(single_tf)
+                    raw_timeframes = need_entry.get("timeframes")
+                    if raw_timeframes:
+                        if isinstance(raw_timeframes, (list, tuple, set)):
+                            tf_candidates.extend(raw_timeframes)
+                        else:
+                            tf_candidates.append(raw_timeframes)
+                    higher_tf_values = need_entry.get("higher_tf")
+                    if higher_tf_values:
+                        if isinstance(higher_tf_values, (list, tuple, set)):
+                            tf_candidates.extend(higher_tf_values)
+                        else:
+                            tf_candidates.append(higher_tf_values)
+                    normalized_tfs: list[str] = []
+                    for tf_candidate in tf_candidates:
+                        mapped_tf = normalize_requested_timeframe(tf_candidate, default=TIMEFRAME)
+                        if mapped_tf and mapped_tf in allowed_timeframes and mapped_tf not in normalized_tfs:
+                            normalized_tfs.append(mapped_tf)
+                    if not normalized_tfs and allowed_timeframes:
+                        normalized_tfs = allowed_timeframes[:NEEDS_MAX_TIMEFRAMES or len(allowed_timeframes)]
+                    if normalized_tfs and NEEDS_MAX_TIMEFRAMES:
+                        normalized_tfs = normalized_tfs[:NEEDS_MAX_TIMEFRAMES]
+                    if normalized_tfs:
+                        cleaned_need["timeframes"] = normalized_tfs
+                    indicator_candidates: list[str] = []
+                    for key in ("indicator", "indicators", "indicator_set"):
+                        if key in need_entry:
+                            indicator_candidates.extend(_expand_indicator_entries(need_entry[key]))
+                    shorthand_fields = {
+                        k: v for k, v in need_entry.items()
+                        if isinstance(k, str) and k.lower() in ("ema", "sma", "rsi", "atr", "stoch", "vol")
+                    }
+                    for k, v in shorthand_fields.items():
+                        indicator_candidates.extend(_expand_indicator_entries({"indicator": k, "length": v}))
+                    filtered_indicators: list[str] = []
+                    for ind_candidate in indicator_candidates:
+                        name = str(ind_candidate).strip()
+                        if not name:
+                            continue
+                        name_key = name.lower()
+                        if name_key == "volume":
+                            name_key = "vol"
+                            name = "vol"
+                        if allowed_indicators:
+                            canonical = allowed_indicator_map.get(name_key)
+                            if not canonical:
+                                continue
+                            name = canonical
+                        if name not in filtered_indicators:
+                            filtered_indicators.append(name)
+                    if not filtered_indicators and allowed_indicators:
+                        filtered_indicators = allowed_indicators[:NEEDS_MAX_INDICATORS or len(allowed_indicators)]
+                    if filtered_indicators and NEEDS_MAX_INDICATORS:
+                        filtered_indicators = filtered_indicators[:NEEDS_MAX_INDICATORS]
+                    if filtered_indicators:
+                        cleaned_need["indicators"] = filtered_indicators
+                    for flag in ("funding", "open_interest", "news"):
+                        if need_entry.get(flag):
+                            cleaned_need[flag] = True
+                    if cleaned_need:
+                        cleaned_needs.append(cleaned_need)
+                elif isinstance(need_entry, str) and need_entry in ("news", "funding", "open_interest"):
+                    cleaned_needs.append(need_entry)
+            selection_needs_payload = cleaned_needs
             bundle = augment_bundle_with_needs(
                 ex,
                 bundle,
@@ -4442,44 +4529,11 @@ def run_cycle():
             )
             bundle_meta = bundle.setdefault("meta", {})
             bundle_meta.setdefault("selection_needs", selection_needs_payload)
-            summary_timeframes: list[str] = []
-            summary_indicators: list[str] = []
-            for need in selection_needs_payload:
-                if not isinstance(need, dict):
-                    continue
-                single_tf = need.get("timeframe")
-                if single_tf:
-                    mapped_single = normalize_requested_timeframe(single_tf, default=TIMEFRAME)
-                    if mapped_single and mapped_single not in summary_timeframes:
-                        summary_timeframes.append(mapped_single)
-                single_indicator = need.get("indicator")
-                if single_indicator:
-                    ind_name_single = str(single_indicator).strip()
-                    if ind_name_single and ind_name_single not in summary_indicators:
-                        summary_indicators.append(ind_name_single)
-                raw_timeframes = need.get("timeframes")
-                if raw_timeframes:
-                    if isinstance(raw_timeframes, (list, tuple, set)):
-                        tf_iterable = raw_timeframes
-                    else:
-                        tf_iterable = [raw_timeframes]
-                    for tf in tf_iterable:
-                        mapped = normalize_requested_timeframe(tf, default=TIMEFRAME)
-                        if mapped and mapped not in summary_timeframes:
-                            summary_timeframes.append(mapped)
-                indicator_fields = need.get("indicators")
-                if indicator_fields:
-                    if isinstance(indicator_fields, (list, tuple, set)):
-                        ind_iterable = indicator_fields
-                    else:
-                        ind_iterable = [indicator_fields]
-                    for ind in ind_iterable:
-                        ind_name = str(ind).strip()
-                        if ind_name and ind_name not in summary_indicators:
-                            summary_indicators.append(ind_name)
-            if summary_timeframes and NEEDS_MAX_TIMEFRAMES:
+            summary_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or [])
+            if NEEDS_MAX_TIMEFRAMES and summary_timeframes:
                 summary_timeframes = summary_timeframes[:NEEDS_MAX_TIMEFRAMES]
-            if summary_indicators and NEEDS_MAX_INDICATORS:
+            summary_indicators = list(SUMMARY_INDICATOR_SHORTLIST or [])
+            if NEEDS_MAX_INDICATORS and summary_indicators:
                 summary_indicators = summary_indicators[:NEEDS_MAX_INDICATORS]
             if summary_timeframes:
                 bundle_meta["selection_timeframes"] = summary_timeframes
@@ -4633,9 +4687,12 @@ def run_cycle():
                     effective_limit = SUPPORT_CONTEXT_LIMIT
                 else:
                     effective_limit = NEEDS_SERIALIZE_DEFAULT_LIMIT
-                payload = {"bars": _serialize_df(tf_df, limit=effective_limit)}
-                if tf in SUPPORT_CONTEXT_TIMEFRAMES:
-                    payload["limit"] = effective_limit
+                base_limit = int(max(1, NEEDS_LONG_BARS_LIMIT or NEEDS_SERIALIZE_DEFAULT_LIMIT or 10))
+                bars_limit = base_limit
+                if effective_limit:
+                    bars_limit = max(1, min(int(effective_limit), base_limit))
+                payload = {"bars": _serialize_df(tf_df, limit=bars_limit)}
+                payload["limit"] = bars_limit
                 timeframes_payload[tf] = payload
             extra_serialized = {
                 "timeframes": timeframes_payload,
