@@ -45,6 +45,7 @@ BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR
 CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
 _LAST_COMMIT_HASH: Optional[str] = None
 
