@@ -1310,6 +1310,8 @@ def refresh_settings():
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
+    global SUPPORT_CONTEXT_TIMEFRAMES, SUPPORT_CONTEXT_INDICATORS, SUPPORT_CONTEXT_LIMIT
+    global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -1357,6 +1359,98 @@ def refresh_settings():
     DEFAULT_CONTEXT_4H = max(MIN_CONTEXT_4H, env_int("AI_CONTEXT_4H", 40))
     CONTEXT_STEP_30M = max(1, env_int("AI_CONTEXT_30M_STEP", 4))
     CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
+
+    support_tf_env = os.getenv("AI_SUPPORT_TIMEFRAMES")
+    if support_tf_env:
+        parsed_support_tf = None
+        try:
+            parsed_support_tf = json.loads(support_tf_env)
+        except json.JSONDecodeError:
+            parsed_support_tf = None
+        if isinstance(parsed_support_tf, (list, tuple, set)):
+            SUPPORT_CONTEXT_TIMEFRAMES = [
+                str(item).strip() for item in parsed_support_tf if str(item).strip()
+            ]
+        elif isinstance(parsed_support_tf, str):
+            SUPPORT_CONTEXT_TIMEFRAMES = [parsed_support_tf.strip()] if parsed_support_tf.strip() else []
+        else:
+            SUPPORT_CONTEXT_TIMEFRAMES = [item.strip() for item in support_tf_env.split(",") if item.strip()]
+    else:
+        SUPPORT_CONTEXT_TIMEFRAMES = ["15m", "1h", "4h"]
+    if not SUPPORT_CONTEXT_TIMEFRAMES:
+        SUPPORT_CONTEXT_TIMEFRAMES = ["15m", "1h", "4h"]
+
+    support_ind_env = os.getenv("AI_SUPPORT_INDICATORS")
+    if support_ind_env:
+        parsed_support_ind = None
+        try:
+            parsed_support_ind = json.loads(support_ind_env)
+        except json.JSONDecodeError:
+            parsed_support_ind = None
+        if isinstance(parsed_support_ind, (list, tuple, set)):
+            SUPPORT_CONTEXT_INDICATORS = [
+                str(item).strip() for item in parsed_support_ind if str(item).strip()
+            ]
+        elif isinstance(parsed_support_ind, str):
+            SUPPORT_CONTEXT_INDICATORS = [parsed_support_ind.strip()] if parsed_support_ind.strip() else []
+        else:
+            SUPPORT_CONTEXT_INDICATORS = [item.strip() for item in support_ind_env.split(",") if item.strip()]
+    else:
+        SUPPORT_CONTEXT_INDICATORS = ["ema20", "ema50", "ema100", "rsi14", "atr14"]
+    if not SUPPORT_CONTEXT_INDICATORS:
+        SUPPORT_CONTEXT_INDICATORS = ["ema20", "ema50", "ema100", "rsi14", "atr14"]
+
+    try:
+        SUPPORT_CONTEXT_LIMIT = int(os.getenv("AI_SUPPORT_CONTEXT_LIMIT", "48"))
+    except (TypeError, ValueError):
+        SUPPORT_CONTEXT_LIMIT = 48
+    SUPPORT_CONTEXT_LIMIT = max(12, SUPPORT_CONTEXT_LIMIT)
+
+    low_conf_tf_env = os.getenv("BYBITBOT_LOW_CONF_TIMEFRAMES")
+    if low_conf_tf_env:
+        parsed_low_conf_tf = None
+        try:
+            parsed_low_conf_tf = json.loads(low_conf_tf_env)
+        except json.JSONDecodeError:
+            parsed_low_conf_tf = None
+        if isinstance(parsed_low_conf_tf, (list, tuple, set)):
+            LOW_CONFIDENCE_TIMEFRAMES = [
+                str(item).strip() for item in parsed_low_conf_tf if str(item).strip()
+            ]
+        elif isinstance(parsed_low_conf_tf, str):
+            LOW_CONFIDENCE_TIMEFRAMES = [parsed_low_conf_tf.strip()] if parsed_low_conf_tf.strip() else []
+        else:
+            LOW_CONFIDENCE_TIMEFRAMES = [item.strip() for item in low_conf_tf_env.split(",") if item.strip()]
+    else:
+        LOW_CONFIDENCE_TIMEFRAMES = list(SUPPORT_CONTEXT_TIMEFRAMES)
+    if not LOW_CONFIDENCE_TIMEFRAMES:
+        LOW_CONFIDENCE_TIMEFRAMES = list(SUPPORT_CONTEXT_TIMEFRAMES)
+
+    low_conf_ind_env = os.getenv("BYBITBOT_LOW_CONF_INDICATORS")
+    if low_conf_ind_env:
+        parsed_low_conf_ind = None
+        try:
+            parsed_low_conf_ind = json.loads(low_conf_ind_env)
+        except json.JSONDecodeError:
+            parsed_low_conf_ind = None
+        if isinstance(parsed_low_conf_ind, (list, tuple, set)):
+            LOW_CONFIDENCE_INDICATORS = [
+                str(item).strip() for item in parsed_low_conf_ind if str(item).strip()
+            ]
+        elif isinstance(parsed_low_conf_ind, str):
+            LOW_CONFIDENCE_INDICATORS = [parsed_low_conf_ind.strip()] if parsed_low_conf_ind.strip() else []
+        else:
+            LOW_CONFIDENCE_INDICATORS = [item.strip() for item in low_conf_ind_env.split(",") if item.strip()]
+    else:
+        LOW_CONFIDENCE_INDICATORS = list(SUPPORT_CONTEXT_INDICATORS)
+    if not LOW_CONFIDENCE_INDICATORS:
+        LOW_CONFIDENCE_INDICATORS = list(SUPPORT_CONTEXT_INDICATORS)
+
+    try:
+        LOW_CONFIDENCE_SERIALIZE_LIMIT = int(os.getenv("BYBITBOT_LOW_CONF_LIMIT", str(min(40, SUPPORT_CONTEXT_LIMIT))))
+    except (TypeError, ValueError):
+        LOW_CONFIDENCE_SERIALIZE_LIMIT = min(40, SUPPORT_CONTEXT_LIMIT)
+    LOW_CONFIDENCE_SERIALIZE_LIMIT = max(10, min(LOW_CONFIDENCE_SERIALIZE_LIMIT, SUPPORT_CONTEXT_LIMIT))
 
     PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
     PAIR_PREFETCH_LIMIT = env_int("PAIR_PREFETCH_LIMIT", PAIR_PREFETCH_LIMIT)
@@ -1447,6 +1541,20 @@ if "AI_CONFIDENCE_THRESHOLD" not in globals():
     AI_CONFIDENCE_THRESHOLD = 0.55
 if "LOW_CONFIDENCE_NEEDS" not in globals():
     LOW_CONFIDENCE_NEEDS = ["funding", "open_interest", "news"]
+if "SUPPORT_CONTEXT_TIMEFRAMES" not in globals():
+    SUPPORT_CONTEXT_TIMEFRAMES = ["15m", "1h", "4h"]
+if "SUPPORT_CONTEXT_INDICATORS" not in globals():
+    SUPPORT_CONTEXT_INDICATORS = ["ema20", "ema50", "ema100", "rsi14", "atr14"]
+if "SUPPORT_CONTEXT_LIMIT" not in globals():
+    SUPPORT_CONTEXT_LIMIT = 48
+if "LOW_CONFIDENCE_TIMEFRAMES" not in globals():
+    LOW_CONFIDENCE_TIMEFRAMES = list(SUPPORT_CONTEXT_TIMEFRAMES)
+if "LOW_CONFIDENCE_INDICATORS" not in globals():
+    LOW_CONFIDENCE_INDICATORS = list(SUPPORT_CONTEXT_INDICATORS)
+if "LOW_CONFIDENCE_SERIALIZE_LIMIT" not in globals():
+    LOW_CONFIDENCE_SERIALIZE_LIMIT = min(40, SUPPORT_CONTEXT_LIMIT)
+if "NEEDS_SERIALIZE_DEFAULT_LIMIT" not in globals():
+    NEEDS_SERIALIZE_DEFAULT_LIMIT = 80
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -3262,7 +3370,8 @@ def ai_decision(
 Для частичных закрытий, дополнительных лимитов/стопов, трейлингов и других операций используй массив 'orders', 
 описывая ордера в стиле CCXT (type, side, amount/percent, price, params). 
 Если выбираешь action="skip", обязательно укажи причину, опираясь на показания этих индикаторов. 
-Ответ строго в формате JSON без текста."""
+Ответ строго в формате JSON без текста.
+Decide decisively. Always include a numeric "confidence" between 0 and 1 and target values >=0.70 when signals align. If confidence would fall below the threshold, request the missing context via "needs" with concrete items instead of hesitating. Make recommendations with clear reasoning."""
     # >>>>>>>>>>>> конец исправления <<<<<<<<<<<<
 
     ema_trend_bias = None
@@ -3467,8 +3576,10 @@ def ai_decision(
         decision = initial_decision
     confidence_value = None
     confidence_raw = None
+    confidence_display = None
     low_confidence = False
     auto_needs_triggered = False
+    auto_low_confidence_needs_triggered = False
     needs = []
     if decision is None:
         messages_init, tokens_init, _ = prepare_messages(stage="initial")
@@ -3501,6 +3612,11 @@ def ai_decision(
             confidence_value = float(confidence_raw) if confidence_raw is not None else None
         except (TypeError, ValueError):
             confidence_value = None
+        confidence_display = (
+            f"{confidence_value:.3f}"
+            if confidence_value is not None
+            else (str(confidence_raw) if confidence_raw is not None else None)
+        )
         low_confidence = (
             confidence_value is not None
             and confidence_value < AI_CONFIDENCE_THRESHOLD
@@ -3522,8 +3638,8 @@ def ai_decision(
             if additional_needs:
                 needs.extend(additional_needs)
                 decision["needs"] = needs
-                confidence_display = f"{confidence_value:.3f}" if confidence_value is not None else str(confidence_raw)
-                msg_low = f"🤖 Автозапрос дополнительного контекста ({confidence_display}) для {symbol}: {', '.join(additional_needs)}"
+                display = confidence_display or "n/a"
+                msg_low = f"?? Low confidence ({display}) for {symbol}: requesting {', '.join(additional_needs)}"
                 log(msg_low, Fore.LIGHTBLACK_EX)
                 send_tg(msg_low)
 
@@ -3539,7 +3655,9 @@ def ai_decision(
                 "context_counts": context_counts.copy(),
                 "context": current_context,
                 "needs": needs,
-                "auto_needs": auto_needs_triggered
+                "auto_needs": auto_needs_triggered,
+                "low_confidence": low_confidence,
+                "auto_low_confidence": auto_low_confidence_needs_triggered
             }
         )
     else:
@@ -3549,26 +3667,82 @@ def ai_decision(
             confidence_value = float(confidence_raw) if confidence_raw is not None else None
         except (TypeError, ValueError):
             confidence_value = None
+        confidence_display = (
+            f"{confidence_value:.3f}"
+            if confidence_value is not None
+            else (str(confidence_raw) if confidence_raw is not None else None)
+        )
         low_confidence = (
             confidence_value is not None
             and confidence_value < AI_CONFIDENCE_THRESHOLD
         )
 
+    if not isinstance(needs, list):
+        if isinstance(needs, (tuple, set)):
+            needs = list(needs)
+        else:
+            needs = []
+        decision["needs"] = needs
 
+    if low_confidence:
+        structured_timeframes: list[str] = []
+        for tf in LOW_CONFIDENCE_TIMEFRAMES:
+            tf_clean = str(tf).strip()
+            if tf_clean and tf_clean not in structured_timeframes:
+                structured_timeframes.append(tf_clean)
+        structured_indicators: list[str] = []
+        for ind in LOW_CONFIDENCE_INDICATORS:
+            ind_clean = str(ind).strip()
+            if ind_clean and ind_clean not in structured_indicators:
+                structured_indicators.append(ind_clean)
+        existing_auto_struct = any(
+            isinstance(item, dict) and item.get("_auto_low_confidence") for item in needs
+        )
+        if (structured_timeframes or structured_indicators) and not existing_auto_struct:
+            structured_need = {"_auto_low_confidence": True}
+            if structured_timeframes:
+                structured_need["timeframes"] = structured_timeframes
+            if structured_indicators:
+                structured_need["indicators"] = structured_indicators
+            structured_need["limit"] = LOW_CONFIDENCE_SERIALIZE_LIMIT
+            needs.insert(0, structured_need)
+            decision["needs"] = needs
+            auto_low_confidence_needs_triggered = True
+            display = confidence_display or "n/a"
+            tf_text = ", ".join(structured_timeframes) if structured_timeframes else "none"
+            ind_text = ", ".join(structured_indicators) if structured_indicators else "none"
+            msg_auto = (
+                f"?? Low confidence ({display}) for {symbol}: requesting extra TFs [{tf_text}] "
+                f"and indicators [{ind_text}]"
+            )
+            log(msg_auto, Fore.LIGHTBLACK_EX)
+            send_tg(msg_auto)
 
     # --- Если запрошен контекст ---
     if needs:
-        if auto_needs_triggered:
-            log(f"🤖 Автозапрос дополнительного контекста по причине низкой уверенности: {needs}", Fore.CYAN)
-            send_tg(f"🤖 Автозапрос данных для {symbol}: {needs}")
+        if auto_low_confidence_needs_triggered:
+            display = confidence_display or "n/a"
+            msg_auto_low = f"?? Low-confidence auto context ({display}) for {symbol}: {needs}"
+            log(msg_auto_low, Fore.CYAN)
+            send_tg(msg_auto_low)
+        elif auto_needs_triggered:
+            msg_auto_needs = f"?? Auto-requested context after skip reason for {symbol}: {needs}"
+            log(msg_auto_needs, Fore.CYAN)
+            send_tg(msg_auto_needs)
         else:
-            log(f"🤖 Модель запросила дополнительный контекст: {needs}", Fore.CYAN)
-            send_tg(f"🤖 Модель запросила контекст для {symbol}: {needs}")
+            msg_manual = f"?? Model requested extra context for {symbol}: {needs}"
+            log(msg_manual, Fore.CYAN)
+            send_tg(msg_manual)
         extra = {}
         needs_followup = []
         indicator_extra = None
         for n in needs:
             if isinstance(n, dict):
+                serialize_limit_override = safe_int(
+                    n.get("limit") or n.get("depth") or n.get("bars")
+                )
+                if serialize_limit_override is None and n.get("_auto_low_confidence"):
+                    serialize_limit_override = LOW_CONFIDENCE_SERIALIZE_LIMIT
                 tf_values: list[str] = []
                 indicators_requested: list[str] = []
                 if "timeframe" in n and n.get("timeframe"):
@@ -3638,7 +3812,13 @@ def ai_decision(
                             col = _apply_indicator_to_df(df_tf, ind_name)
                             if col:
                                 applied_cols.append(col)
-                        tf_payload = {"bars": _serialize_df(df_tf)}
+                        effective_limit = serialize_limit_override
+                        if effective_limit is None and tf in SUPPORT_CONTEXT_TIMEFRAMES:
+                            effective_limit = SUPPORT_CONTEXT_LIMIT
+                        bars_limit = effective_limit or NEEDS_SERIALIZE_DEFAULT_LIMIT
+                        tf_payload = {"bars": _serialize_df(df_tf, limit=bars_limit)}
+                        if effective_limit is not None:
+                            tf_payload["limit"] = effective_limit
                         if applied_cols:
                             indicator_values = {}
                             for col in applied_cols:
@@ -4265,10 +4445,15 @@ def run_cycle():
                 available_margin = last_available_margin
             symbol_meta = dict(target_map.get(sym, {}) or {})
             requested_timeframes = list(dict.fromkeys(
-                [TIMEFRAME] + list(global_timeframes) + list(symbol_meta.get("timeframes") or [])
+                [TIMEFRAME]
+                + list(global_timeframes)
+                + list(symbol_meta.get("timeframes") or [])
+                + list(SUPPORT_CONTEXT_TIMEFRAMES or [])
             ))
             requested_indicators = list(dict.fromkeys(
-                list(global_indicators) + list(symbol_meta.get("indicators") or [])
+                list(global_indicators)
+                + list(symbol_meta.get("indicators") or [])
+                + list(SUPPORT_CONTEXT_INDICATORS or [])
             ))
             timeframe_dfs = {}
             for tf in requested_timeframes:
@@ -4289,11 +4474,17 @@ def run_cycle():
                     log(f"?? не удалось получить базовый таймфрейм {primary_tf} для {sym}: {exc_fetch}", Fore.RED)
                     continue
             df = timeframe_dfs[primary_tf].copy()
+            timeframes_payload = {}
+            for tf, tf_df in timeframe_dfs.items():
+                effective_limit = SUPPORT_CONTEXT_LIMIT if tf in SUPPORT_CONTEXT_TIMEFRAMES else NEEDS_SERIALIZE_DEFAULT_LIMIT
+                if tf == primary_tf:
+                    effective_limit = NEEDS_SERIALIZE_DEFAULT_LIMIT
+                payload = {"bars": _serialize_df(tf_df, limit=effective_limit)}
+                if tf in SUPPORT_CONTEXT_TIMEFRAMES:
+                    payload["limit"] = effective_limit
+                timeframes_payload[tf] = payload
             extra_serialized = {
-                "timeframes": {
-                    tf: {"bars": _serialize_df(tf_df)}
-                    for tf, tf_df in timeframe_dfs.items()
-                },
+                "timeframes": timeframes_payload,
                 "indicators": requested_indicators,
                 "primary": primary_tf,
             }
@@ -4317,6 +4508,7 @@ def run_cycle():
             open_orders_symbol = open_orders_prefetch.get(sym)
             sym_confidence_text: str | None = None
             sym_confidence_value: float | None = None
+            sym_confidence_tag: str | None = None
             if open_orders_symbol is None:
                 try:
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
@@ -4368,7 +4560,19 @@ def run_cycle():
                 except (TypeError, ValueError):
                     sym_confidence_value = None
                     sym_confidence_text = str(decision_confidence_raw)
-                log(f"[AI] {sym} confidence: {sym_confidence_text}", Fore.LIGHTBLACK_EX)
+                if sym_confidence_value is not None:
+                    if sym_confidence_value >= 0.8:
+                        sym_confidence_tag = "HIGH"
+                    elif sym_confidence_value >= AI_CONFIDENCE_THRESHOLD:
+                        sym_confidence_tag = "MEDIUM"
+                    else:
+                        sym_confidence_tag = "LOW"
+                else:
+                    sym_confidence_tag = "UNKNOWN"
+                tag_display = f" ({sym_confidence_tag})" if sym_confidence_tag else ""
+                log(f"[AI] {sym} confidence: {sym_confidence_text}{tag_display}", Fore.LIGHTBLACK_EX)
+            else:
+                sym_confidence_tag = None
             low_confidence_flag = (
                 sym_confidence_value is not None
                 and sym_confidence_value < AI_CONFIDENCE_THRESHOLD
@@ -4821,7 +5025,8 @@ def run_cycle():
                 else:
                     detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
             if detail_entry and sym_confidence_text:
-                detail_entry = f"{detail_entry} [conf {sym_confidence_text}]"
+                tag_suffix = f" {sym_confidence_tag}" if sym_confidence_tag else ""
+                detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
             if detail_entry:
                 decisions_details.append(detail_entry)
 
