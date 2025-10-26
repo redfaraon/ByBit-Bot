@@ -99,3 +99,8 @@ Recent commits (last 8)
 2025.10.22.7
 - Added low-confidence telemetry: per-symbol confidence logged, extra context auto-requested when below threshold, with configurable needs list.
 - Skipped re-creating existing manage orders and canonicalized order payloads to prevent invalid-price/qty errors.
+
+2025.10.23.3
+- Added TELEGRAM_TOPIC_ID support and thread-aware send_tg helper so alerts land in the desired group topic.
+- Clamped portfolio needs to a fixed shortlist (30m/4h, ema20/ema50/vol/rsi14/macd) and trimmed context to 10 bars for leaner prompts.
+- Misc tuning for low-confidence follow-ups and version bump to keep loader/changelog in sync.

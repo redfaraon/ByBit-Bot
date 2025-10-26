@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.23.2"
+BOT_VERSION = "2025.10.23.3"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1306,7 +1306,7 @@ def refresh_settings():
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
-    global TG_TOKEN, TG_CHAT, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
+    global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
@@ -1336,6 +1336,7 @@ def refresh_settings():
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
+    TG_TOPIC_ID = safe_int(os.getenv("TELEGRAM_TOPIC_ID"))
     AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4o-mini"))
     try:
@@ -1582,7 +1583,7 @@ if "NEEDS_MAX_INDICATORS" not in globals():
 if "SUMMARY_TIMEFRAME_SHORTLIST" not in globals():
     SUMMARY_TIMEFRAME_SHORTLIST = ["30m", "4h"]
 if "SUMMARY_INDICATOR_SHORTLIST" not in globals():
-    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "macd"]
+    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "macd", "atr14"]
 if "NEEDS_LONG_BARS_LIMIT" not in globals():
     NEEDS_LONG_BARS_LIMIT = 10
 
@@ -1696,8 +1697,16 @@ def send_tg(msg: str, **extra):
     if not TG_TOKEN or not TG_CHAT:
         return None
     payload = {"chat_id": TG_CHAT, "text": msg}
-    if extra:
-        payload.update(extra)
+    extra_payload = dict(extra) if extra else {}
+    thread_override = extra_payload.pop("thread_id", None)
+    if "message_thread_id" in extra_payload:
+        payload.update(extra_payload)
+    else:
+        thread_id = thread_override if thread_override is not None else TG_TOPIC_ID
+        thread_id_int = safe_int(thread_id) if thread_id is not None else None
+        if thread_id_int is not None:
+            payload["message_thread_id"] = thread_id_int
+        payload.update(extra_payload)
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
