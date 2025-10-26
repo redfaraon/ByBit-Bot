@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.23.3"
+BOT_VERSION = "2025.10.26.1"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -750,9 +750,11 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         log("[AI] OPENAI_API_KEY missing for universe update", Fore.RED)
         return None
     client = OpenAI(api_key=AI_KEY, timeout=30)
-    news_digest = news_digest or _build_news_digest(symbols)
+    if not news_digest:
+        news_digest = _build_news_digest(symbols)
     positions_compact: list[dict[str, Any]] = []
-    for sym in symbols:
+    symbol_set = set(symbols) | set(positions_map.keys())
+    for sym in sorted(symbol_set):
         pos = positions_map.get(sym)
         if not pos:
             continue
@@ -766,15 +768,27 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
                 "unrealizedPnl": pos.get("unrealizedPnl"),
             }
         )
+    timestamp_now = datetime.datetime.now(datetime.timezone.utc)
     request_payload = {
-        "candidate_pairs": symbols,
-        "indicator_candidates": BASE_INDICATOR_CANDIDATES,
-        "timeframe_candidates": BASE_TIMEFRAME_CANDIDATES,
+        "candidate_pairs": sorted(symbol_set),
+        "indicator_candidates": [
+            {"indicator": "ema", "length": 20},
+            {"indicator": "ema", "length": 50},
+            "volume",
+            "rsi14",
+            "macd",
+            "atr14",
+            "stoch14",
+        ],
+        "timeframe_candidates": ["15m", "30m", "1h", "2h", "4h"],
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
         "positions": positions_compact,
         "news_headlines": news_digest,
-        "universe_cache": universe_cache or {},
+        "session_timestamp": timestamp_now.isoformat(),
+        "session_weekday": timestamp_now.strftime("%A"),
+        "session_hour": timestamp_now.strftime("%H:%M"),
+        "universe_cache": None,
     }
     system_msg = (
         "You are an AI portfolio strategist for Bybit. Update the trading universe based on the provided "
@@ -1306,7 +1320,8 @@ def refresh_settings():
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
-    global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
+    global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
+    global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
@@ -1337,6 +1352,26 @@ def refresh_settings():
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
     TG_TOPIC_ID = safe_int(os.getenv("TELEGRAM_TOPIC_ID"))
+    try:
+        TG_MIN_INTERVAL = float(os.getenv("TELEGRAM_MIN_INTERVAL", "1.5"))
+    except (TypeError, ValueError):
+        TG_MIN_INTERVAL = 1.5
+    TG_MIN_INTERVAL = max(0.1, TG_MIN_INTERVAL)
+    try:
+        TG_DUP_WINDOW = float(os.getenv("TELEGRAM_DUP_WINDOW", "10"))
+    except (TypeError, ValueError):
+        TG_DUP_WINDOW = 10.0
+    TG_DUP_WINDOW = max(0.0, TG_DUP_WINDOW)
+    try:
+        TG_RETRY_ATTEMPTS = int(os.getenv("TELEGRAM_RETRY_ATTEMPTS", "3"))
+    except (TypeError, ValueError):
+        TG_RETRY_ATTEMPTS = 3
+    TG_RETRY_ATTEMPTS = max(1, TG_RETRY_ATTEMPTS)
+    try:
+        TG_RETRY_BACKOFF = float(os.getenv("TELEGRAM_RETRY_BACKOFF", "1.5"))
+    except (TypeError, ValueError):
+        TG_RETRY_BACKOFF = 1.5
+    TG_RETRY_BACKOFF = max(0.5, TG_RETRY_BACKOFF)
     AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4o-mini"))
     try:
@@ -1462,9 +1497,9 @@ def refresh_settings():
     NEEDS_MAX_TIMEFRAMES = max(1, NEEDS_MAX_TIMEFRAMES)
 
     try:
-        NEEDS_MAX_INDICATORS = int(os.getenv("BYBITBOT_NEEDS_MAX_INDICATORS", "4"))
+        NEEDS_MAX_INDICATORS = int(os.getenv("BYBITBOT_NEEDS_MAX_INDICATORS", "6"))
     except (TypeError, ValueError):
-        NEEDS_MAX_INDICATORS = 4
+        NEEDS_MAX_INDICATORS = 6
     NEEDS_MAX_INDICATORS = max(1, NEEDS_MAX_INDICATORS)
 
     try:
@@ -1579,13 +1614,21 @@ if "NEEDS_SERIALIZE_DEFAULT_LIMIT" not in globals():
 if "NEEDS_MAX_TIMEFRAMES" not in globals():
     NEEDS_MAX_TIMEFRAMES = 2
 if "NEEDS_MAX_INDICATORS" not in globals():
-    NEEDS_MAX_INDICATORS = 4
+    NEEDS_MAX_INDICATORS = 6
 if "SUMMARY_TIMEFRAME_SHORTLIST" not in globals():
     SUMMARY_TIMEFRAME_SHORTLIST = ["30m", "4h"]
 if "SUMMARY_INDICATOR_SHORTLIST" not in globals():
     SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "macd", "atr14"]
 if "NEEDS_LONG_BARS_LIMIT" not in globals():
     NEEDS_LONG_BARS_LIMIT = 10
+if "TG_MIN_INTERVAL" not in globals():
+    TG_MIN_INTERVAL = 1.5
+if "TG_DUP_WINDOW" not in globals():
+    TG_DUP_WINDOW = 10.0
+if "TG_RETRY_ATTEMPTS" not in globals():
+    TG_RETRY_ATTEMPTS = 3
+if "TG_RETRY_BACKOFF" not in globals():
+    TG_RETRY_BACKOFF = 1.5
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -1693,41 +1736,79 @@ def log(msg: str, color=Fore.WHITE):
         stamp = f"{stamp} {tz_suffix}"
     print(color + f"[{stamp}] {msg}" + Style.RESET_ALL)
 
-def send_tg(msg: str, **extra):
+_TG_LAST_SEND_TS = 0.0
+_TG_LAST_MESSAGE: str | None = None
+_TG_LAST_MESSAGE_TS = 0.0
+
+
+def send_tg(msg: str | Sequence[str], **extra):
     if not TG_TOKEN or not TG_CHAT:
         return None
-    payload = {"chat_id": TG_CHAT, "text": msg}
+    global _TG_LAST_SEND_TS, _TG_LAST_MESSAGE, _TG_LAST_MESSAGE_TS
+    if isinstance(msg, (list, tuple, set)):
+        message_text = "\n".join(str(part) for part in msg if part)
+    else:
+        message_text = str(msg)
+    if not message_text:
+        return None
+    now_ts = time.time()
+    if (
+        _TG_LAST_MESSAGE == message_text
+        and (now_ts - _TG_LAST_MESSAGE_TS) < TG_DUP_WINDOW
+    ):
+        return None
+    delay_needed = TG_MIN_INTERVAL - (now_ts - _TG_LAST_SEND_TS)
+    if delay_needed > 0:
+        time.sleep(delay_needed)
+        now_ts = time.time()
+    payload = {"chat_id": TG_CHAT, "text": message_text}
     extra_payload = dict(extra) if extra else {}
     thread_override = extra_payload.pop("thread_id", None)
     if "message_thread_id" in extra_payload:
         payload.update(extra_payload)
     else:
-        thread_id = thread_override if thread_override is not None else TG_TOPIC_ID
+        thread_id = thread_override if thread_id is not None else TG_TOPIC_ID
         thread_id_int = safe_int(thread_id) if thread_id is not None else None
         if thread_id_int is not None:
             payload["message_thread_id"] = thread_id_int
         payload.update(extra_payload)
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json=payload,
-            timeout=5,
-        )
-    except Exception as exc:
-        log(f"⚠️ Ошибка Telegram: {exc}", Fore.YELLOW)
-        return None
-    try:
-        data = response.json()
-    except Exception:
-        log(f"⚠️ Telegram: неожиданный ответ {response.status_code} {response.text}", Fore.YELLOW)
-        return None
-    if not isinstance(data, dict) or not data.get("ok"):
-        log(f"⚠️ Telegram API вернул ошибку: {data}", Fore.YELLOW)
-        return None
-    result = data.get("result") or {}
-    message_id = result.get("message_id")
-    return message_id
-
+    attempt = 0
+    last_error = None
+    while attempt < TG_RETRY_ATTEMPTS:
+        attempt += 1
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                json=payload,
+                timeout=5,
+            )
+        except Exception as exc:
+            last_error = exc
+            log(f"?? ?????? Telegram ({attempt}/{TG_RETRY_ATTEMPTS}): {exc}", Fore.YELLOW)
+        else:
+            try:
+                data = response.json()
+            except Exception:
+                last_error = f"{response.status_code} {response.text}"
+                log(f"?? Telegram: ?????????? ??? {last_error}", Fore.YELLOW)
+            else:
+                if isinstance(data, dict) and data.get("ok"):
+                    result = data.get("result") or {}
+                    message_id = result.get("message_id")
+                    _TG_LAST_SEND_TS = time.time()
+                    _TG_LAST_MESSAGE = message_text
+                    _TG_LAST_MESSAGE_TS = _TG_LAST_SEND_TS
+                    return message_id
+                last_error = data
+                log(f"?? Telegram API ???? ????: {data}", Fore.YELLOW)
+                if isinstance(data, dict) and data.get("error_code") == 429:
+                    retry_after = data.get("parameters", {}).get("retry_after")
+                    sleep_for = float(retry_after or (TG_RETRY_BACKOFF * attempt))
+                    time.sleep(max(TG_MIN_INTERVAL, sleep_for))
+                    continue
+        time.sleep(TG_RETRY_BACKOFF * attempt)
+    log(f"?? Telegram send failed after {TG_RETRY_ATTEMPTS} attempts: {last_error}", Fore.RED)
+    return None
 
 def _load_changelog_state() -> dict:
     try:
@@ -2851,7 +2932,7 @@ def _protection_orders_signature(orders) -> tuple:
     return tuple(snapshot)
 
 
-def get_current_commit_info() -> tuple[str | None, str | None]:
+def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
     try:
         commit_hash = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -2860,7 +2941,17 @@ def get_current_commit_info() -> tuple[str | None, str | None]:
             text=True,
         ).strip()
     except Exception:
-        return None, None
+        return None, None, None
+    commit_timestamp = None
+    try:
+        commit_timestamp = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%cI"],
+            cwd=str(SCRIPT_DIR),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        commit_timestamp = None
     commit_message = None
     try:
         commit_message = subprocess.check_output(
@@ -2871,7 +2962,7 @@ def get_current_commit_info() -> tuple[str | None, str | None]:
         ).strip()
     except Exception:
         commit_message = None
-    return commit_hash or None, commit_message or None
+    return commit_hash or None, commit_message or None, commit_timestamp or None
 
 
 def _sync_with_remote() -> None:
@@ -4137,11 +4228,12 @@ def run_cycle():
         log(git_line, Fore.LIGHTBLACK_EX)
         send_tg(git_line)
     else:
-        commit_hash, commit_message = get_current_commit_info()
+        commit_hash, commit_message, commit_ts = get_current_commit_info()
         if commit_hash:
             short_hash = commit_hash[:8]
             message_text = commit_message or "no commit message"
-            git_line = f"[GIT] {short_hash} — {message_text}"
+            timestamp_text = commit_ts or "timestamp unavailable"
+            git_line = f"[GIT] {short_hash} @ {timestamp_text} - {message_text} (version {BOT_VERSION})"
             log(git_line, Fore.LIGHTBLACK_EX)
             send_tg(git_line)
     last_equity = equity
@@ -4450,85 +4542,9 @@ def run_cycle():
             news_cache=news_cache,
             extra_symbols=extra_symbols_candidates,
         )
-        selection_needs_raw = (selection or {}).get("needs") or []
-        if selection_needs_raw:
-            allowed_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or [])
-            allowed_indicators = list(SUMMARY_INDICATOR_SHORTLIST or [])
-            allowed_indicator_map = {item.lower(): item for item in allowed_indicators}
-            cleaned_needs: list[Any] = []
-            for need_entry in selection_needs_raw:
-                if isinstance(need_entry, dict):
-                    cleaned_need: dict[str, Any] = {}
-                    symbol_value = need_entry.get("symbol")
-                    if symbol_value:
-                        cleaned_need["symbol"] = symbol_value
-                    tf_candidates: list[Any] = []
-                    single_tf = need_entry.get("timeframe")
-                    if single_tf:
-                        tf_candidates.append(single_tf)
-                    raw_timeframes = need_entry.get("timeframes")
-                    if raw_timeframes:
-                        if isinstance(raw_timeframes, (list, tuple, set)):
-                            tf_candidates.extend(raw_timeframes)
-                        else:
-                            tf_candidates.append(raw_timeframes)
-                    higher_tf_values = need_entry.get("higher_tf")
-                    if higher_tf_values:
-                        if isinstance(higher_tf_values, (list, tuple, set)):
-                            tf_candidates.extend(higher_tf_values)
-                        else:
-                            tf_candidates.append(higher_tf_values)
-                    normalized_tfs: list[str] = []
-                    for tf_candidate in tf_candidates:
-                        mapped_tf = normalize_requested_timeframe(tf_candidate, default=TIMEFRAME)
-                        if mapped_tf and mapped_tf in allowed_timeframes and mapped_tf not in normalized_tfs:
-                            normalized_tfs.append(mapped_tf)
-                    if not normalized_tfs and allowed_timeframes:
-                        normalized_tfs = allowed_timeframes[:NEEDS_MAX_TIMEFRAMES or len(allowed_timeframes)]
-                    if normalized_tfs and NEEDS_MAX_TIMEFRAMES:
-                        normalized_tfs = normalized_tfs[:NEEDS_MAX_TIMEFRAMES]
-                    if normalized_tfs:
-                        cleaned_need["timeframes"] = normalized_tfs
-                    indicator_candidates: list[str] = []
-                    for key in ("indicator", "indicators", "indicator_set"):
-                        if key in need_entry:
-                            indicator_candidates.extend(_expand_indicator_entries(need_entry[key]))
-                    shorthand_fields = {
-                        k: v for k, v in need_entry.items()
-                        if isinstance(k, str) and k.lower() in ("ema", "sma", "rsi", "atr", "stoch", "vol")
-                    }
-                    for k, v in shorthand_fields.items():
-                        indicator_candidates.extend(_expand_indicator_entries({"indicator": k, "length": v}))
-                    filtered_indicators: list[str] = []
-                    for ind_candidate in indicator_candidates:
-                        name = str(ind_candidate).strip()
-                        if not name:
-                            continue
-                        name_key = name.lower()
-                        if name_key == "volume":
-                            name_key = "vol"
-                            name = "vol"
-                        if allowed_indicators:
-                            canonical = allowed_indicator_map.get(name_key)
-                            if not canonical:
-                                continue
-                            name = canonical
-                        if name not in filtered_indicators:
-                            filtered_indicators.append(name)
-                    if not filtered_indicators and allowed_indicators:
-                        filtered_indicators = allowed_indicators[:NEEDS_MAX_INDICATORS or len(allowed_indicators)]
-                    if filtered_indicators and NEEDS_MAX_INDICATORS:
-                        filtered_indicators = filtered_indicators[:NEEDS_MAX_INDICATORS]
-                    if filtered_indicators:
-                        cleaned_need["indicators"] = filtered_indicators
-                    for flag in ("funding", "open_interest", "news"):
-                        if need_entry.get(flag):
-                            cleaned_need[flag] = True
-                    if cleaned_need:
-                        cleaned_needs.append(cleaned_need)
-                elif isinstance(need_entry, str) and need_entry in ("news", "funding", "open_interest"):
-                    cleaned_needs.append(need_entry)
-            selection_needs_payload = cleaned_needs
+        bundle_meta = bundle.setdefault("meta", {})
+        selection_needs_payload = (selection or {}).get("needs") or []
+        if selection_needs_payload:
             bundle = augment_bundle_with_needs(
                 ex,
                 bundle,
@@ -4536,21 +4552,20 @@ def run_cycle():
                 news_cache=news_cache,
                 news_full=news_full_cache,
             )
-            bundle_meta = bundle.setdefault("meta", {})
             bundle_meta.setdefault("selection_needs", selection_needs_payload)
-            summary_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or [])
-            if NEEDS_MAX_TIMEFRAMES and summary_timeframes:
-                summary_timeframes = summary_timeframes[:NEEDS_MAX_TIMEFRAMES]
-            summary_indicators = list(SUMMARY_INDICATOR_SHORTLIST or [])
-            if NEEDS_MAX_INDICATORS and summary_indicators:
-                summary_indicators = summary_indicators[:NEEDS_MAX_INDICATORS]
-            if summary_timeframes:
-                bundle_meta["selection_timeframes"] = summary_timeframes
-            if summary_indicators:
-                bundle_meta["selection_indicators"] = summary_indicators
+        bundle_meta = bundle.setdefault("meta", bundle_meta if isinstance(bundle_meta, dict) else {})
+        summary_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or [])
+        if NEEDS_MAX_TIMEFRAMES and summary_timeframes:
+            summary_timeframes = summary_timeframes[:NEEDS_MAX_TIMEFRAMES]
+        summary_indicators = list(SUMMARY_INDICATOR_SHORTLIST or [])
+        if NEEDS_MAX_INDICATORS and summary_indicators:
+            summary_indicators = summary_indicators[:NEEDS_MAX_INDICATORS]
+        if summary_timeframes:
+            bundle_meta["selection_timeframes"] = summary_timeframes
+        if summary_indicators:
+            bundle_meta["selection_indicators"] = summary_indicators
         if bundle_orders:
             open_orders_cache.update(bundle_orders)
-        bundle_meta = bundle.setdefault("meta", {})
         bundle_meta["active_symbols"] = sorted(position_symbols)
         bundle_meta["pending_symbols"] = sorted(order_symbols_non_reduce)
         trade_plan = ai_plan_trades(
@@ -4658,17 +4673,16 @@ def run_cycle():
             else:
                 available_margin = last_available_margin
             symbol_meta = dict(target_map.get(sym, {}) or {})
-            requested_timeframes = list(dict.fromkeys(
-                [TIMEFRAME]
-                + list(global_timeframes)
-                + list(symbol_meta.get("timeframes") or [])
-                + list(SUPPORT_CONTEXT_TIMEFRAMES or [])
-            ))
-            requested_indicators = list(dict.fromkeys(
-                list(global_indicators)
-                + list(symbol_meta.get("indicators") or [])
-                + list(SUPPORT_CONTEXT_INDICATORS or [])
-            ))
+            base_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or []) or [TIMEFRAME, "4h"]
+            requested_timeframes = list(dict.fromkeys(base_timeframes))
+            if NEEDS_MAX_TIMEFRAMES and requested_timeframes:
+                requested_timeframes = requested_timeframes[:NEEDS_MAX_TIMEFRAMES]
+            base_indicators = list(SUMMARY_INDICATOR_SHORTLIST or [])
+            if not base_indicators:
+                base_indicators = ["ema20", "ema50", "vol", "rsi14", "macd", "atr14"]
+            requested_indicators = list(dict.fromkeys(base_indicators))
+            if NEEDS_MAX_INDICATORS and requested_indicators:
+                requested_indicators = requested_indicators[:NEEDS_MAX_INDICATORS]
             timeframe_dfs = {}
             for tf in requested_timeframes:
                 try:

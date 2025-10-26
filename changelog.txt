@@ -104,3 +104,13 @@ Recent commits (last 8)
 - Added TELEGRAM_TOPIC_ID support and thread-aware send_tg helper so alerts land in the desired group topic.
 - Clamped portfolio needs to a fixed shortlist (30m/4h, ema20/ema50/vol/rsi14/macd) and trimmed context to 10 bars for leaner prompts.
 - Misc tuning for low-confidence follow-ups and version bump to keep loader/changelog in sync.
+
+2025.10.24.1
+- Universe prompt now rebuilds every cycle with a curated shortlist (EMA20/EMA50, vol, RSI, MACD, ATR, Stoch; TF 15m-4h) and includes session timestamp/day/hour.
+- Initial context always uses compact 30m/4h + six indicators; extra needs honour model requests with a 10-bar cap.
+- Telegram logging now includes commit timestamp + version, uses thread IDs, rate-limits messages, de-duplicates repeats, and retries gracefully on 429/transport errors.
+
+2025.10.26.1
+- Universe prompt now re-generates every run from scratch using session time/day, news-only context, and a curated TF/indicator shortlist (2x EMA, vol, RSI, MACD, ATR, Stoch).
+- Initial per-symbol context is clamped to 30m/4h + those six indicators with ~10 bars, while extra needs pass through whatever the model requests.
+- Telegram notifications gained duplicate suppression, minimum interval, topic-aware routing, and retry/backoff handling (avoiding 429s); logs now include commit timestamp + version.
