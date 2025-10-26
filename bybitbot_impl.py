@@ -770,7 +770,7 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         )
     timestamp_now = datetime.datetime.now(datetime.timezone.utc)
     request_payload = {
-        "candidate_pairs": sorted(symbol_set),
+        "candidate_pairs": [],
         "indicator_candidates": [
             {"indicator": "ema", "length": 20},
             {"indicator": "ema", "length": 50},
@@ -788,13 +788,20 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         "session_timestamp": timestamp_now.isoformat(),
         "session_weekday": timestamp_now.strftime("%A"),
         "session_hour": timestamp_now.strftime("%H:%M"),
+        "session_timezone": timestamp_now.tzname() or "UTC",
         "universe_cache": None,
     }
     system_msg = (
-        "You are an AI portfolio strategist for Bybit. Update the trading universe based on the provided "
-        "candidate pairs, the existing universe cache, and the supplied news headlines. "
-        "Respond strictly in JSON with keys: universe (pairs, global_timeframes, global_indicators, notes), "
-        "targets (per-symbol recommendations), and news_requests (symbols that require full news text)."
+        "You are an AI portfolio strategist for Bybit. Build the trading universe for the next cycle using ONLY:"
+        " (1) the current session date/time/timezone, (2) the supplied news headlines, and (3) any open exposure listed."
+        " Do NOT reuse previous universes or cached pairs; every run must produce a fresh shortlist."
+        " Respond strictly in JSON with keys:\n"
+        '  "pairs": list of up to 8 symbols to analyze this cycle (mix bullish/bearish narratives based on news),\n'
+        '  "timeframes": list of exactly two short timeframes (e.g., "30m","4h"),\n'
+        '  "indicators": list containing exactly six items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one additional momentum/volatility indicator),\n'
+        '  "next_run_minutes": float delay before the next cycle (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
+        '  "notes": optional rationale.'
+        " Also include optional field 'news_requests' (symbols needing full news text)."
     )
     messages = [
         {"role": "system", "content": system_msg},
@@ -842,21 +849,25 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     except json.JSONDecodeError as exc:
         log(f"[WARN] JSON decode (universe update): {exc}", Fore.YELLOW)
         return None
-    selection_payload = result.get("selection") or result
-    universe_payload = result.get("universe") or {}
-    news_requests = result.get("news_requests") or []
-    if isinstance(selection_payload, dict):
-        selection_payload["_news_digest"] = news_digest
-    if not universe_payload.get("pairs"):
-        fallback_pairs = selection_payload.get("pairs") or [
-            item.get("symbol")
-            for item in (selection_payload.get("targets") or [])
-            if isinstance(item, dict) and item.get("symbol")
+    # Normalize the response into a simple dict
+    universe_payload = {}
+    universe_payload["pairs"] = (result.get("pairs") or result.get("symbols") or [])[:8]
+    universe_payload["timeframes"] = (result.get("timeframes") or ["30m","4h"])[:2]
+    indicators_raw = result.get("indicators") or []
+    if not indicators_raw:
+        indicators_raw = [
+            {"indicator": "ema", "length": 20},
+            {"indicator": "ema", "length": 50},
+            "volume",
+            "rsi14",
+            "macd",
+            "atr14",
         ]
-        universe_payload["pairs"] = fallback_pairs
-    universe_payload.setdefault("global_timeframes", selection_payload.get("global_timeframes") or [])
-    universe_payload.setdefault("global_indicators", selection_payload.get("global_indicators") or [])
-    return selection_payload, universe_payload, news_requests
+    universe_payload["indicators"] = indicators_raw[:6]
+    universe_payload["next_run_minutes"] = result.get("next_run_minutes")
+    universe_payload["notes"] = result.get("notes")
+    news_requests = result.get("news_requests") or []
+    return universe_payload, news_requests
 
 
 def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None, extra_symbols=None):
