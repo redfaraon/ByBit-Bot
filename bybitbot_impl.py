@@ -867,7 +867,20 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     universe_payload["next_run_minutes"] = result.get("next_run_minutes")
     universe_payload["notes"] = result.get("notes")
     news_requests = result.get("news_requests") or []
-    return universe_payload, news_requests
+    selection_result = {
+        "pairs": universe_payload["pairs"],
+        "global_timeframes": universe_payload["timeframes"],
+        "global_indicators": universe_payload["indicators"],
+        "next_run_minutes": universe_payload.get("next_run_minutes"),
+        "reason": universe_payload.get("notes"),
+    }
+    selection_result["_news_digest"] = news_digest
+    universe_state = {
+        "pairs": universe_payload["pairs"],
+        "global_timeframes": universe_payload["timeframes"],
+        "global_indicators": universe_payload["indicators"],
+    }
+    return selection_result, universe_state, news_requests
 
 
 def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None, extra_symbols=None):
