@@ -4863,7 +4863,7 @@ def run_cycle():
                 },
             )
             action = (dec.get("action") or "skip").lower()
-            side = dec.get("side") or ""
+            side = (dec.get("side") or "").strip().lower()
             reason = dec.get("reason") or ""
             if not has_position:
                 eligible_flat_symbols += 1
