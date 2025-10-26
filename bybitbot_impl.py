@@ -18,7 +18,7 @@ os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 # --- Импорты ---
 import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
 from pathlib import Path
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, Sequence
 import pandas as pd
 import ccxt
 import requests
