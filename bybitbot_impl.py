@@ -1761,21 +1761,22 @@ def send_tg(msg: str | Sequence[str], **extra):
     if delay_needed > 0:
         time.sleep(delay_needed)
         now_ts = time.time()
-    payload = {"chat_id": TG_CHAT, "text": message_text}
+    base_payload = {"chat_id": TG_CHAT, "text": message_text}
     extra_payload = dict(extra) if extra else {}
     thread_override = extra_payload.pop("thread_id", None)
     if "message_thread_id" in extra_payload:
-        payload.update(extra_payload)
+        base_payload.update(extra_payload)
     else:
         thread_candidate = thread_override if thread_override is not None else TG_TOPIC_ID
         thread_id_int = safe_int(thread_candidate) if thread_candidate is not None else None
         if thread_id_int is not None:
-            payload["message_thread_id"] = thread_id_int
-        payload.update(extra_payload)
+            base_payload["message_thread_id"] = thread_id_int
+        base_payload.update(extra_payload)
     attempt = 0
     last_error = None
     while attempt < TG_RETRY_ATTEMPTS:
         attempt += 1
+        payload = dict(base_payload)
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
@@ -1805,6 +1806,15 @@ def send_tg(msg: str | Sequence[str], **extra):
                     retry_after = data.get("parameters", {}).get("retry_after")
                     sleep_for = float(retry_after or (TG_RETRY_BACKOFF * attempt))
                     time.sleep(max(TG_MIN_INTERVAL, sleep_for))
+                    continue
+                if (
+                    isinstance(data, dict)
+                    and data.get("error_code") == 400
+                    and "thread not found" in (data.get("description") or "").lower()
+                ):
+                    base_payload.pop("message_thread_id", None)
+                    log("[WARN] Telegram topic not found, retrying without thread.", Fore.YELLOW)
+                    time.sleep(TG_RETRY_BACKOFF * attempt)
                     continue
         time.sleep(TG_RETRY_BACKOFF * attempt)
     log(f"?? Telegram send failed after {TG_RETRY_ATTEMPTS} attempts: {last_error}", Fore.RED)
