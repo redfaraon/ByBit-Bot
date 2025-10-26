@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.26.1"
+BOT_VERSION = "2025.10.26.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1320,7 +1320,7 @@ def refresh_settings():
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
-    global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
+    global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
     global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
@@ -1352,6 +1352,7 @@ def refresh_settings():
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
     TG_TOPIC_ID = safe_int(os.getenv("TELEGRAM_TOPIC_ID"))
+    TG_GIT_TOPIC_ID = safe_int(os.getenv("TELEGRAM_GIT_TOPIC_ID", "581"))
     try:
         TG_MIN_INTERVAL = float(os.getenv("TELEGRAM_MIN_INTERVAL", "1.5"))
     except (TypeError, ValueError):
@@ -1629,6 +1630,8 @@ if "TG_RETRY_ATTEMPTS" not in globals():
     TG_RETRY_ATTEMPTS = 3
 if "TG_RETRY_BACKOFF" not in globals():
     TG_RETRY_BACKOFF = 1.5
+if "TG_GIT_TOPIC_ID" not in globals():
+    TG_GIT_TOPIC_ID = 581
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -1739,6 +1742,11 @@ def log(msg: str, color=Fore.WHITE):
 _TG_LAST_SEND_TS = 0.0
 _TG_LAST_MESSAGE: str | None = None
 _TG_LAST_MESSAGE_TS = 0.0
+
+def _send_git_notification(message: str):
+    log(message, Fore.LIGHTBLACK_EX)
+    thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
+    send_tg(message, thread_id=thread_target)
 
 
 def send_tg(msg: str | Sequence[str], **extra):
@@ -3001,16 +3009,17 @@ def _sync_with_remote() -> None:
         )
         fetch_output = (fetch_proc.stdout or "").strip()
         if fetch_output:
-            log(f"[GIT] fetch: {fetch_output}", Fore.LIGHTBLACK_EX)
+            _send_git_notification(f"[GIT] fetch: {fetch_output}")
     except subprocess.CalledProcessError as exc:
         log(f"[WARN] Git fetch failed: {exc.stderr or exc.stdout or exc}", Fore.YELLOW)
         return
+    pull_cmd = ["git", "pull", "--ff-only"]
     if working_tree_dirty:
-        log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
-        return
+        _send_git_notification("[GIT] Working tree dirty, pulling with --autostash.")
+        pull_cmd.append("--autostash")
     try:
         pull_proc = subprocess.run(
-            ["git", "pull", "--ff-only"],
+            pull_cmd,
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -3018,7 +3027,7 @@ def _sync_with_remote() -> None:
         )
         pull_output = (pull_proc.stdout or pull_proc.stderr or "").strip()
         if pull_output:
-            log(f"[GIT] pull: {pull_output}", Fore.LIGHTBLACK_EX)
+            _send_git_notification(f"[GIT] pull: {pull_output}")
     except subprocess.CalledProcessError as exc:
         details = exc.stderr or exc.stdout or str(exc)
         log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
@@ -4232,11 +4241,10 @@ def run_cycle():
     source_ref = os.getenv("BYBITBOT_SOURCE_REF")
     source_context = os.getenv("BYBITBOT_FALLBACK_CONTEXT")
     if source_label and source_ref:
-        git_line = f"[GIT] {source_ref} — {source_label}"
+        git_line = f"[GIT] {source_ref} - {source_label}"
         if source_context:
             git_line += f" ({source_context})"
-        log(git_line, Fore.LIGHTBLACK_EX)
-        send_tg(git_line)
+        _send_git_notification(git_line)
     else:
         commit_hash, commit_message, commit_ts = get_current_commit_info()
         if commit_hash:
@@ -4244,8 +4252,7 @@ def run_cycle():
             message_text = commit_message or "no commit message"
             timestamp_text = commit_ts or "timestamp unavailable"
             git_line = f"[GIT] {short_hash} @ {timestamp_text} - {message_text} (version {BOT_VERSION})"
-            log(git_line, Fore.LIGHTBLACK_EX)
-            send_tg(git_line)
+            _send_git_notification(git_line)
     last_equity = equity
     last_available_margin = available_margin
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)

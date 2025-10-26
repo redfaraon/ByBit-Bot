@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.26.1")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.26.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"

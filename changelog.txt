@@ -114,3 +114,8 @@ Recent commits (last 8)
 - Universe prompt now re-generates every run from scratch using session time/day, news-only context, and a curated TF/indicator shortlist (2x EMA, vol, RSI, MACD, ATR, Stoch).
 - Initial per-symbol context is clamped to 30m/4h + those six indicators with ~10 bars, while extra needs pass through whatever the model requests.
 - Telegram notifications gained duplicate suppression, minimum interval, topic-aware routing, and retry/backoff handling (avoiding 429s); logs now include commit timestamp + version.
+
+2025.10.26.2
+- `_sync_with_remote` now runs `git fetch`/`git pull --ff-only --autostash` even on dirty trees and reports every git action to a dedicated Telegram topic (ID 581 by default).
+- Added `_send_git_notification` helper so commit banners and git outputs always include timestamp/message and land in the git thread.
+- Telegram thread failures (400 thread not found) now fall back to the main chat automatically, preventing stuck retries.
