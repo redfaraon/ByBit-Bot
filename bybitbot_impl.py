@@ -1767,8 +1767,8 @@ def send_tg(msg: str | Sequence[str], **extra):
     if "message_thread_id" in extra_payload:
         payload.update(extra_payload)
     else:
-        thread_id = thread_override if thread_id is not None else TG_TOPIC_ID
-        thread_id_int = safe_int(thread_id) if thread_id is not None else None
+        thread_candidate = thread_override if thread_override is not None else TG_TOPIC_ID
+        thread_id_int = safe_int(thread_candidate) if thread_candidate is not None else None
         if thread_id_int is not None:
             payload["message_thread_id"] = thread_id_int
         payload.update(extra_payload)
