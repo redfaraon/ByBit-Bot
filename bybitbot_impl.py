@@ -1381,7 +1381,8 @@ def refresh_settings():
     RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.015)))
     SL_ATR = float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
     TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
-    TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", 0.0)))
+    TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
+    TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
     MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
@@ -1557,6 +1558,11 @@ def refresh_settings():
 
     PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
     PAIR_PREFETCH_LIMIT = env_int("PAIR_PREFETCH_LIMIT", PAIR_PREFETCH_LIMIT)
+    try:
+        NEW_IDEAS_LIMIT = int(os.getenv("BYBITBOT_NEW_IDEAS_LIMIT", "6"))
+    except (TypeError, ValueError):
+        NEW_IDEAS_LIMIT = 6
+    NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
 
     NEWS_PROVIDER = (os.getenv("CRYPTO_NEWS_PROVIDER") or "cryptocompare").strip().lower()
     NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
@@ -1678,6 +1684,9 @@ if "TG_RETRY_BACKOFF" not in globals():
     TG_RETRY_BACKOFF = 1.5
 if "TG_GIT_TOPIC_ID" not in globals():
     TG_GIT_TOPIC_ID = 581
+if "NEW_IDEAS_LIMIT" not in globals():
+    NEW_IDEAS_LIMIT = 6
+NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -4600,17 +4609,6 @@ def run_cycle():
     selected_symbols: list[str] = []
     seen_available: set[str] = set()
 
-    news_sorted = sorted(news_priority)
-    if max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
-        _append_unique(available_pairs, sorted(position_symbols), seen_available)
-        _append_unique(available_pairs, sorted(order_symbols), seen_available)
-    else:
-        _append_unique(available_pairs, news_sorted, seen_available)
-        _append_unique(available_pairs, sorted(position_symbols), seen_available)
-        _append_unique(available_pairs, sorted(order_symbols), seen_available)
-        remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
-        _append_unique(available_pairs, remaining_pairs, seen_available)
-
     raw_universe_pairs = universe_state.get("pairs") or []
     selection_pairs = raw_universe_pairs
     selection_pairs_normalized: list[str] = []
@@ -4620,6 +4618,17 @@ def run_cycle():
         resolved_pair = normalize_symbol(raw_pair, record_missing=False)
         selection_pairs_normalized.append(resolved_pair or raw_pair)
     selection_pairs = [p for p in selection_pairs_normalized if p]
+
+    new_universe_candidates = [p for p in selection_pairs if p not in position_symbols][:NEW_IDEAS_LIMIT]
+    new_universe_set = set(new_universe_candidates)
+
+    news_sorted = sorted(news_priority)
+    _append_unique(available_pairs, sorted(position_symbols), seen_available)
+    _append_unique(available_pairs, sorted(order_symbols), seen_available)
+    _append_unique(available_pairs, new_universe_candidates, seen_available)
+    _append_unique(available_pairs, news_sorted, seen_available)
+    remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
+    _append_unique(available_pairs, remaining_pairs, seen_available)
 
     if not available_pairs:
         available_pairs = normalized_pair_list[:PAIR_CANDIDATE_LIMIT]
@@ -4634,6 +4643,8 @@ def run_cycle():
         MAX_SYMBOLS_PER_CYCLE,
         len(selection_pairs),
         len(raw_universe_pairs),
+        len(position_symbols) + len(new_universe_candidates),
+        len(position_symbols) + len(order_symbols_non_reduce) + len(new_universe_candidates),
     )
     if missing_symbols:
         missing_desc = ', '.join(sorted(missing_symbols))
@@ -4843,6 +4854,10 @@ def run_cycle():
     seen_priority: set[str] = set()
     for sym_order in symbols_sequence:
         if sym_order in position_symbols and sym_order not in seen_priority:
+            priority_sequence.append(sym_order)
+            seen_priority.add(sym_order)
+    for sym_order in symbols_sequence:
+        if sym_order in new_universe_set and sym_order not in seen_priority:
             priority_sequence.append(sym_order)
             seen_priority.add(sym_order)
     for sym_order in symbols_sequence:
