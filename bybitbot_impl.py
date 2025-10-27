@@ -4945,7 +4945,9 @@ def run_cycle():
             else:
                 available_margin = last_available_margin
             symbol_meta = dict(target_map.get(sym, {}) or {})
-            decision_target = decision.get("target") if isinstance(decision, dict) else {}
+            canonical_lookup = _canonical_decision_symbol(sym)
+            preloaded_decision = decisions_map.get(canonical_lookup)
+            decision_target = preloaded_decision.get("target") if isinstance(preloaded_decision, dict) else {}
             if isinstance(decision_target, dict) and decision_target:
                 merged_target = dict(symbol_meta.get("target") or {})
                 merged_target.update(decision_target)
