@@ -896,7 +896,8 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
 def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache=None, extra_symbols=None):
     targets = (selection_result or {}).get("targets") or []
     global_timeframes = set((selection_result or {}).get("global_timeframes") or [])
-    global_indicators = set((selection_result or {}).get("global_indicators") or [])
+    raw_global_indicators = (selection_result or {}).get("global_indicators") or []
+    global_indicators = _dedupe_preserve_order(raw_global_indicators)
     bundle = {"symbols": [], "meta": {}}
     open_orders_cache = {}
     processed_symbols: set[str] = set()
@@ -906,9 +907,10 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
             continue
         base_timeframes = list(global_timeframes)
         timeframes = list(dict.fromkeys(base_timeframes + (target.get("timeframes") or [])))
-        baseline_indicators = (list(global_indicators) or list(BASE_INDICATOR_CANDIDATES))[:3]
-        indicator_candidates = (target.get("indicators") or []) + list(global_indicators)
-        indicators = list(dict.fromkeys(baseline_indicators + indicator_candidates))
+        baseline_source = list(global_indicators) if global_indicators else list(BASE_INDICATOR_CANDIDATES)
+        baseline_indicators = baseline_source[:3]
+        indicator_candidates = list(target.get("indicators") or [])
+        indicators = _dedupe_preserve_order(baseline_indicators + indicator_candidates + global_indicators)
         dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
         dataset["target"] = {
             "notional_pct": target.get("notional_pct"),
@@ -2764,29 +2766,61 @@ def _is_truthy_flag(value: Any) -> bool:
     return False
 
 
+def _make_dedupe_key(value: Any) -> str:
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except TypeError:
+            return repr(sorted(value.items()))
+    if isinstance(value, (list, tuple)):
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except TypeError:
+            return repr(value)
+    return str(value)
+
+
+def _dedupe_preserve_order(values: Sequence[Any] | None) -> list[Any]:
+    seen: set[str] = set()
+    result: list[Any] = []
+    for item in values or []:
+        key = _make_dedupe_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
 def _resolve_symbol_alias(symbol: str | None) -> str | None:
     if not symbol:
         return None
     sym = str(symbol).strip()
     if not sym:
         return None
-    if sym in SYMBOL_ALIASES:
-        sym = SYMBOL_ALIASES[sym]
-    if "/" in sym and ":" in sym:
-        return sym
+    alias_target = SYMBOL_ALIASES.get(sym) or SYMBOL_ALIASES.get(sym.upper())
+    if alias_target:
+        sym = alias_target
     sym_upper = sym.upper()
+    if ":" in sym_upper:
+        return sym_upper
     mapped = TICKER_TO_SYMBOL.get(sym_upper)
     if mapped:
         return mapped
+    if "/" in sym_upper:
+        base, quote = sym_upper.split("/", 1)
+        if ":" in quote:
+            return f"{base}/{quote}"
+        quote = quote or "USDT"
+        if quote == "USDT":
+            return f"{base}/USDT:USDT"
+        return f"{base}/{quote}"
     if sym_upper.endswith("USDT"):
         base = sym_upper[:-4]
         mapped = TICKER_TO_SYMBOL.get(base)
         if mapped:
             return mapped
         return f"{base}/USDT:USDT"
-    mapped = TICKER_TO_SYMBOL.get(sym_upper)
-    if mapped:
-        return mapped
     return f"{sym_upper}/USDT:USDT"
 
 
@@ -4245,10 +4279,20 @@ def run_cycle():
             return None
         if sym in markets_set:
             return sym
-        alias_target = SYMBOL_ALIASES.get(sym)
+        sym_upper = sym.upper()
+        if sym_upper in markets_set:
+            if sym_upper != sym:
+                symbol_alias_hits[sym] = sym_upper
+            return sym_upper
+        alias_target = SYMBOL_ALIASES.get(sym) or SYMBOL_ALIASES.get(sym_upper)
         if alias_target and alias_target in markets_set:
             symbol_alias_hits[sym] = alias_target
             return alias_target
+        resolved = _resolve_symbol_alias(sym)
+        if resolved and resolved in markets_set:
+            if resolved != sym:
+                symbol_alias_hits[sym] = resolved
+            return resolved
         if record_missing:
             missing_symbols.add(sym)
         return None
