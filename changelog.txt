@@ -119,3 +119,6 @@ Recent commits (last 8)
 - `_sync_with_remote` now runs `git fetch`/`git pull --ff-only --autostash` even on dirty trees and reports every git action to a dedicated Telegram topic (ID 581 by default).
 - Added `_send_git_notification` helper so commit banners and git outputs always include timestamp/message and land in the git thread.
 - Telegram thread failures (400 thread not found) now fall back to the main chat automatically, preventing stuck retries.
+
+2025.10.27.3
+- Normalized Bybit extra-order payloads and updated version metadata.

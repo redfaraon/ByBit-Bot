@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.27.2
+# Version: 2025.10.27.3
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.27.2"
+BOT_VERSION = "2025.10.27.3"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -2511,11 +2511,11 @@ def get_trigger_direction_for_side(side: str) -> str:
     """Return trigger direction flag understood by ccxt/bybit for a closing order."""
     side_lower = (side or "").lower()
     if side_lower == "sell":
-        return "descending"
+        return "below"
     if side_lower == "buy":
-        return "ascending"
+        return "above"
     # Default to trigger on downside to avoid missing protection for long positions.
-    return "descending"
+    return "below"
 
 
 def _resolve_ai_model_for_pairs(pair_count: Optional[int]) -> str:
@@ -3198,6 +3198,8 @@ def execute_extra_orders(
         )
         order_type_key = normalize_order_type_key(raw_type)
         params = dict(order.get("params") or {})
+        for cleanup_key in ("orderType", "order_type", "type", "ccxt_type"):
+            params.pop(cleanup_key, None)
         note = order.get("note") or order.get("comment") or ""
         reduce_only_flag = _is_truthy_flag(order.get("reduceOnly"))
         if reduce_only_flag:
@@ -3226,6 +3228,14 @@ def execute_extra_orders(
             continue
         price_key = round(price, NON_REDUCE_PRICE_DECIMALS) if price is not None else None
         is_reduce_only = _is_truthy_flag(params.get("reduceOnly"))
+        trigger_price = safe_float(
+            order.get("triggerPrice")
+            or order.get("stopPrice")
+            or order.get("stop_price")
+            or params.get("triggerPrice")
+            or params.get("stopPrice")
+            or params.get("stop_price")
+        )
         if not is_reduce_only and position_side:
             same_direction = (
                 (position_side in ("long", "buy") and side == "buy")
@@ -3316,17 +3326,7 @@ def execute_extra_orders(
                 params.pop("take_profit", None)
                 params.pop("tp", None)
                 ccxt_type = "limit"
-            if order_type_key == "stop_loss":
-                trigger_price = (
-                    order.get("triggerPrice")
-                    or order.get("stopPrice")
-                    or order.get("stop_price")
-                    or params.get("triggerPrice")
-                    or params.get("stopPrice")
-                    or params.get("stop_price")
-                    or price
-                )
-                trigger_price = safe_float(trigger_price)
+            elif order_type_key in {"stop_loss", "stop"}:
                 if trigger_price is None or not math.isfinite(trigger_price):
                     log(f"[WARN] Missing triggerPrice for extra order #{idx} {symbol}", Fore.YELLOW)
                     continue
@@ -3339,6 +3339,23 @@ def execute_extra_orders(
                 params.pop("stopLoss", None)
                 params.pop("stopPrice", None)
                 params.pop("stop_price", None)
+            elif order_type_key == "stop_limit":
+                if trigger_price is None or not math.isfinite(trigger_price):
+                    log(f"[WARN] Missing triggerPrice for extra order #{idx} {symbol}", Fore.YELLOW)
+                    continue
+                if price is None:
+                    log(f"[WARN] Missing price for extra order #{idx} (stop-limit) {symbol}", Fore.YELLOW)
+                    continue
+                ccxt_type = "limit"
+                params.setdefault("reduceOnly", True)
+                params["triggerPrice"] = trigger_price
+                params.setdefault("triggerDirection", get_trigger_direction_for_side(side))
+                params.pop("stopLoss", None)
+                params.pop("stopPrice", None)
+                params.pop("stop_price", None)
+            elif trigger_price is not None and math.isfinite(trigger_price):
+                params.setdefault("triggerPrice", trigger_price)
+                params.setdefault("triggerDirection", get_trigger_direction_for_side(side))
         if ccxt_type not in VALID_ORDER_TYPES:
             fallback_type = "limit" if price is not None else "market"
             log(
@@ -3346,13 +3363,43 @@ def execute_extra_orders(
                 Fore.YELLOW,
             )
             ccxt_type = fallback_type
-        if ccxt_type in ("limit", "stopLimit", "takeProfit", "stopLoss") and price is None:
+        allowed_types = {"limit", "market", "trailingStop"}
+        if ccxt_type not in allowed_types:
+            fallback_type = "limit" if price is not None else "market"
+            log(
+                f"[WARN] Adjusting unsupported order type '{ccxt_type}' for extra order #{idx} {symbol} to {fallback_type}",
+                Fore.YELLOW,
+            )
+            ccxt_type = fallback_type
+        if ccxt_type == "limit" and price is None:
             log(f"[WARN] Missing price for extra order #{idx} ({ccxt_type}) {symbol}", Fore.YELLOW)
             continue
+        if ccxt_type == "market":
+            price = None
+        if ccxt_type in {"limit", "market"}:
+            params["orderType"] = ccxt_type.capitalize()
+        if (
+            is_reduce_only
+            and ccxt_type == "market"
+            and order_type_key not in {"partial_close"}
+        ):
+            effective_trigger = safe_float(
+                params.get("triggerPrice")
+                or params.get("stopLossPrice")
+                or params.get("takeProfitPrice")
+            )
+            if effective_trigger is None:
+                log(
+                    f"[WARN] Skipping reduce-only market order without trigger for {symbol} (extra #{idx})",
+                    Fore.YELLOW,
+                )
+                continue
         try:
             order_id = exchange.create_order(exchange_symbol, ccxt_type, side, amount, price, params)
-            if order_type_key == "stop_loss":
+            if order_type_key in {"stop_loss", "stop"}:
                 display_type = "STOP-MARKET"
+            elif order_type_key == "stop_limit":
+                display_type = "STOP-LIMIT"
             elif order_type_key == "take_profit":
                 display_type = "TAKE-PROFIT"
             else:
