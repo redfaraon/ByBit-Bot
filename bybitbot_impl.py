@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.27.6
+# Version: 2025.10.27.7
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.27.6"
+BOT_VERSION = "2025.10.27.7"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1422,6 +1422,15 @@ def refresh_settings():
     TG_RETRY_BACKOFF = max(0.5, TG_RETRY_BACKOFF)
     AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4o-mini"))
+    primary_env = (os.getenv("OPENAI_MODEL_PRIMARY") or os.getenv("OPENAI_MODEL"))
+    AI_MODEL_PRIMARY = primary_env.strip() if isinstance(primary_env, str) and primary_env.strip() else "gpt-4.1-mini"
+    cheap_env = (os.getenv("OPENAI_MODEL_CHEAP") or os.getenv("OPENAI_MODEL_BACKUP"))
+    AI_MODEL_CHEAP = cheap_env.strip() if isinstance(cheap_env, str) and cheap_env.strip() else "gpt-4o-mini"
+    if AI_MODEL_PRIMARY == AI_MODEL_CHEAP:
+        if AI_MODEL_PRIMARY.lower().startswith("gpt-4o"):
+            AI_MODEL_PRIMARY = "gpt-4.1-mini"
+        elif AI_MODEL_PRIMARY.lower().startswith("gpt-4.1"):
+            AI_MODEL_CHEAP = "gpt-4o-mini"
     try:
         AI_MODEL_THRESHOLD = int(os.getenv("OPENAI_MODEL_CHEAP_THRESHOLD", "5"))
     except (TypeError, ValueError):
@@ -1692,7 +1701,11 @@ NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
 AI_TOKEN_BUDGET_CYCLE = 170_000
 AI_TOKEN_USAGE_TOTAL = 0
 AI_TOKEN_USAGE_BY_MODEL: dict[str, dict[str, int]] = {}
-AI_SECONDARY_BUDGET_START = 80_000
+try:
+    AI_SECONDARY_BUDGET_START = int(os.getenv("OPENAI_SECONDARY_BUDGET_START", "70000"))
+except (TypeError, ValueError):
+    AI_SECONDARY_BUDGET_START = 70_000
+AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
 AI_PER_REQUEST_TOKEN_CAP = 50_000
 AI_HARD_STOP_BUDGET = 200_000
 MAX_SYMBOLS_PER_CYCLE = 15
@@ -2695,8 +2708,11 @@ def get_trigger_direction_for_side(
 
 
 def _resolve_ai_model_for_pairs(pair_count: Optional[int]) -> str:
-    if AI_MODEL_CHEAP and AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
-        return AI_MODEL_CHEAP
+    if AI_MODEL_CHEAP:
+        if pair_count is not None and AI_MODEL_THRESHOLD and pair_count >= AI_MODEL_THRESHOLD:
+            return AI_MODEL_CHEAP
+        if AI_TOKEN_USAGE_TOTAL >= AI_SECONDARY_BUDGET_START:
+            return AI_MODEL_CHEAP
     primary = AI_MODEL_PRIMARY or AI_MODEL
     if primary:
         return primary
@@ -3289,12 +3305,41 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         log(f"⚠️ {symbol}: нет валидных значений ATR/цены для защиты позиции", Fore.YELLOW)
         return open_orders or []
 
+    target_spec = cfg.get("target") if isinstance(cfg.get("target"), dict) else {}
+    explicit_entry = safe_float(target_spec.get("entryPrice") or target_spec.get("entry_price"))
+    reference_price = explicit_entry if explicit_entry and math.isfinite(explicit_entry) else price
+
     if is_long:
         stop_price = price - sl_mult * atrv
         take_price = price + tp_mult * atrv
     else:
         stop_price = price + sl_mult * atrv
         take_price = price - tp_mult * atrv
+
+    explicit_stop = safe_float(target_spec.get("stopLoss") or target_spec.get("stop_loss"))
+    explicit_take = safe_float(target_spec.get("takeProfit") or target_spec.get("take_profit"))
+    if explicit_stop is not None and math.isfinite(explicit_stop):
+        stop_price = explicit_stop
+    if explicit_take is not None and math.isfinite(explicit_take):
+        take_price = explicit_take
+
+    trailing_offset = None
+    explicit_trailing = safe_float(target_spec.get("trailingStop") or target_spec.get("trailing_stop"))
+    if explicit_trailing is not None and math.isfinite(explicit_trailing):
+        trailing_offset = abs(explicit_trailing)
+    if trailing_offset is None:
+        trailing_percent = safe_float(target_spec.get("trailingPercent") or target_spec.get("trailing_percent"))
+        if trailing_percent is not None and math.isfinite(trailing_percent) and trailing_percent > 0:
+            base_price = reference_price if reference_price and math.isfinite(reference_price) else price
+            trailing_offset = abs(base_price) * (trailing_percent / 100.0) if base_price else None
+    if trailing_offset is None:
+        trailing_callback = safe_float(target_spec.get("trailingCallback") or target_spec.get("trailing_callback"))
+        if trailing_callback is not None and math.isfinite(trailing_callback) and trailing_callback > 0:
+            trailing_offset = trailing_callback
+    if trailing_offset is None and trailing_mult > 0 and math.isfinite(trailing_mult):
+        trailing_offset = trailing_mult * atrv
+    if trailing_offset is not None and trailing_offset <= 0:
+        trailing_offset = None
     qty = position_qty
     if not math.isfinite(qty) or qty <= 0:
         return open_orders or []
@@ -3334,12 +3379,14 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     except Exception as exc:
         log(f"⚠️ {symbol}: не удалось выставить тейк-профит позиции: {exc}", Fore.YELLOW)
 
-    if trailing_mult > 0 and math.isfinite(trailing_mult):
+    if trailing_offset is not None:
         try:
             trailing_params = dict(base_params)
-            trailing_params["trailingStop"] = trailing_mult * atrv
+            trailing_params["trailingStop"] = trailing_offset
+            if reference_price and math.isfinite(reference_price):
+                trailing_params.setdefault("triggerPrice", reference_price)
             exchange.create_order(exchange_symbol, "trailingStop", protection_side, qty, None, trailing_params)
-            created_orders.append(("trailingStop", trailing_mult * atrv))
+            created_orders.append(("trailingStop", trailing_offset))
         except Exception as exc:
             log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп: {exc}", Fore.YELLOW)
 
@@ -4644,7 +4691,7 @@ def run_cycle():
         len(selection_pairs),
         len(raw_universe_pairs),
         len(position_symbols) + len(new_universe_candidates),
-        len(position_symbols) + len(order_symbols_non_reduce) + len(new_universe_candidates),
+        len(position_symbols) + len(order_symbols_non_reduce),
     )
     if missing_symbols:
         missing_desc = ', '.join(sorted(missing_symbols))
@@ -4900,6 +4947,11 @@ def run_cycle():
             else:
                 available_margin = last_available_margin
             symbol_meta = dict(target_map.get(sym, {}) or {})
+            decision_target = decision.get("target") if isinstance(decision, dict) else {}
+            if isinstance(decision_target, dict) and decision_target:
+                merged_target = dict(symbol_meta.get("target") or {})
+                merged_target.update(decision_target)
+                symbol_meta["target"] = merged_target
             base_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or []) or [TIMEFRAME, "4h"]
             requested_timeframes = list(dict.fromkeys(base_timeframes))
             if NEEDS_MAX_TIMEFRAMES and requested_timeframes:
@@ -5286,7 +5338,7 @@ def run_cycle():
                 log(f"⏳ Удерживаем {sym} ({reason})", Fore.BLUE)
                 send_tg(f"⏳ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
-                    updated_orders = ensure_position_protection(ex, sym, current_position, df, open_orders_symbol)
+                    updated_orders = ensure_position_protection(ex, sym, current_position, df, open_orders_symbol, config=symbol_meta)
                     if updated_orders is not None:
                         open_orders_symbol = updated_orders
                         open_orders_cache[sym] = updated_orders
@@ -5310,7 +5362,7 @@ def run_cycle():
                             current_position,
                             protection_df,
                             open_orders_symbol,
-                            config=target_map.get(sym),
+                            config=symbol_meta,
                         )
                         if isinstance(updated_orders, list):
                             open_orders_symbol = updated_orders

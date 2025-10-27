@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.27.6")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.27.7")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
@@ -412,6 +412,8 @@ def _run_current():
     os.environ["BYBITBOT_SOURCE_REF"] = current_head
     os.environ.pop("BYBITBOT_FALLBACK_CONTEXT", None)
     module = importlib.import_module("bybitbot_impl")
+    module_path = Path(getattr(module, "__file__", "<unknown>")).resolve() if hasattr(module, "__file__") else Path("bybitbot_impl.py").resolve()
+    print(f"[BOOT] Using implementation from {module_path}", file=sys.stderr)
     if hasattr(module, "apply_metadata"):
         module.apply_metadata(BOT_VERSION, CURRENT_CHANGELOG, LATEST_VERSION)
     else:

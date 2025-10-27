@@ -1,3 +1,8 @@
+2025.10.27.7
+- Restore GPT-4.1-mini as the primary model until 70k tokens and keep GPT-4o-mini as the fallback per cycle.
+- Reapply AI-provided stop/take targets when skipping opens and improve trailing-stop placement defaults.
+- Analyse up to six new universe symbols per run in addition to current positions.
+
 2025.10.27.6
 - Process the entire AI universe each cycle so up to 8 symbols are analysed even when the list exceeds prior limits.
 - Refresh protective TP/SL orders whenever an open signal lands on an already-held position.
