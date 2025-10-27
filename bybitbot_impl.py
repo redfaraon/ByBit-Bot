@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.27.4
+# Version: 2025.10.27.5
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.27.4"
+BOT_VERSION = "2025.10.27.5"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -5037,6 +5037,7 @@ def run_cycle():
             side_text = side.lower()
             detail_entry: str | None = None
             orders_activity = False
+            open_error: str | None = None
 
             extra_orders_raw = dec.get("orders") or dec.get("adjustments") or dec.get("extra_orders") or []
             if isinstance(extra_orders_raw, dict):
@@ -5362,6 +5363,7 @@ def run_cycle():
                         current_position = positions_map.get(sym)
                     except Exception as e:
                         err_text = str(e)
+                        open_error = err_text
                         log(f"❌ Ошибка ордера: {err_text}", Fore.RED)
                         send_tg(f"❌ Ошибка ордера для {sym}: {err_text}")
             else:
@@ -5416,8 +5418,11 @@ def run_cycle():
 
             if detail_entry is None:
                 if action == "open":
-                    direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
-                    detail_entry = f"[{sym}] - открыт {direction or 'позиция'} (плечо x{symbol_leverage})"
+                    if open_error:
+                        detail_entry = f"[{sym}] - failed to open position (error: {open_error})"
+                    else:
+                        direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
+                        detail_entry = f"[{sym}] - opened {direction or 'position'} (lev x{symbol_leverage})"
                 elif action == "close":
                     direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
                     detail_entry = f"[{sym}] - закрыт {direction or 'позиция'} (плечо x{symbol_leverage})"
@@ -5832,4 +5837,6 @@ if __name__ == "__main__":
         if exit_code != 0:
             log(f"Fallback version exited with code {exit_code}", Fore.RED)
         sys.exit(exit_code)
+
+
 

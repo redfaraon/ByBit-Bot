@@ -127,3 +127,8 @@ Recent commits (last 8)
 - Skip replacement reduce-only market orders lacking triggers to prevent unintended flat exits.
 - Normalize planner actions such as replace_orders into manage/hold flows and log the mapping.
 - Updated default version metadata in loader and implementation.
+
+2025.10.27.5
+- Detect failed open orders and mark them as such in session summaries, surfacing the exchange error text.
+- Log planner aliases but avoid claiming a position opened when the order was rejected.
+- Version metadata bumped for loader, impl, and stable builds.
