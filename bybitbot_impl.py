@@ -853,9 +853,19 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     universe_payload = {}
     universe_payload["pairs"] = (result.get("pairs") or result.get("symbols") or [])[:8]
     universe_payload["timeframes"] = (result.get("timeframes") or ["30m","4h"])[:2]
-    indicators_raw = result.get("indicators") or []
-    if not indicators_raw:
-        indicators_raw = [
+    raw_indicators = result.get("indicators") or []
+    normalized_indicators = []
+    for item in raw_indicators:
+        if isinstance(item, dict):
+            indicator_name = item.get("indicator") or item.get("name")
+            length = item.get("length") or item.get("period") or item.get("window")
+            if indicator_name:
+                normalized_indicators.append({"indicator": str(indicator_name).lower(), "length": safe_int(length)})
+        else:
+            normalized_indicators.append(str(item).lower())
+    normalized_indicators = [ind for ind in normalized_indicators if ind]
+    if not normalized_indicators:
+        normalized_indicators = [
             {"indicator": "ema", "length": 20},
             {"indicator": "ema", "length": 50},
             "volume",
@@ -863,7 +873,7 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
             "macd",
             "atr14",
         ]
-    universe_payload["indicators"] = indicators_raw[:6]
+    universe_payload["indicators"] = normalized_indicators[:6]
     universe_payload["next_run_minutes"] = result.get("next_run_minutes")
     universe_payload["notes"] = result.get("notes")
     news_requests = result.get("news_requests") or []
