@@ -3,15 +3,17 @@
 import importlib
 import json
 import os
+import random
 import subprocess
 import sys
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
 BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.27.7")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
-FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 
 
@@ -27,9 +29,30 @@ CHANGELOG_COMMIT_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_CHANGELOG_COM
 FALLBACK_COMMIT_CANDIDATE_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_FALLBACK_COMMIT_LIMIT", "12"))
 DEFAULT_STABLE_BRANCH = (os.getenv("BYBITBOT_STABLE_BRANCH") or "stable").strip() or "stable"
 DEFAULT_LEGACY_BRANCH = (os.getenv("BYBITBOT_LEGACY_BRANCH") or "legacy").strip() or "legacy"
+DEFAULT_CURRENT_TAG = (os.getenv("BYBITBOT_CURRENT_TAG") or "current").strip() or "current"
+FAULT_TAG_NAME = (os.getenv("BYBITBOT_FAULT_TAG") or "fault").strip() or "fault"
 
 
 FALLBACK_PROBE_INTERVAL = max(1, int(os.getenv("BYBITBOT_FALLBACK_PROBE_INTERVAL", "10")))
+
+
+@dataclass
+class BackupCandidate:
+    script_path: Path
+    version_label: str
+    source_label: str
+    reason: str
+    context: str | None
+    cycle_kind: str
+    cycle_mode: str
+    cycle_counter: int
+    commit_hash: str | None = None
+    commit_message: str | None = None
+    on_result: Callable[[bool], None] | None = None
+
+    def finalize(self, success: bool) -> None:
+        if self.on_result:
+            self.on_result(success)
 
 def _build_commit_changelog(limit: int | None = None):
     limit = CHANGELOG_COMMIT_LIMIT if limit is None else _resolve_commit_limit(str(limit))
@@ -93,15 +116,6 @@ _update_changelog_file(BOT_VERSION, CHANGELOG_HEADER, CHANGELOG_LINES)
 LATEST_VERSION = BOT_VERSION
 
 
-def _parse_version_tuple(version: str) -> tuple:
-    parts = []
-    for chunk in version.split('.'):
-        digits = ''.join(ch for ch in chunk if ch.isdigit())
-        if digits:
-            parts.append(int(digits))
-    return tuple(parts) if parts else (0,)
-
-
 def _load_fallback_history() -> dict:
     try:
         raw = FALLBACK_HISTORY_FILE.read_text(encoding="utf-8")
@@ -124,6 +138,9 @@ def _load_fallback_history() -> dict:
         data["backups"] = {}
     if not isinstance(data["branches"], dict):
         data["branches"] = {}
+    data.setdefault("tags", {})
+    if not isinstance(data["tags"], dict):
+        data["tags"] = {}
     stable_branch = (data.get("stable_branch") or "").strip()
     if not stable_branch:
         data["stable_branch"] = DEFAULT_STABLE_BRANCH
@@ -307,6 +324,277 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
     return None
 
 
+def _resolve_ref_commit(ref: str | None) -> str | None:
+    target = (ref or "").strip()
+    if not target:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", target],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def _sanitize_commit_message(message: str | None) -> str | None:
+    if not message:
+        return None
+    first_line = message.strip().splitlines()[0].strip()
+    return first_line or None
+
+
+def _resolve_commit_details(ref: str | None) -> tuple[str | None, str | None]:
+    target = (ref or "").strip()
+    if not target:
+        return None, None
+    cmd = ["git", "show", "-s", "--format=%H%x1f%s", target]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+    except Exception:
+        return None, None
+    raw = result.stdout.strip()
+    if not raw:
+        return None, None
+    if "\x1f" in raw:
+        commit_hash, commit_msg = raw.split("\x1f", 1)
+    else:
+        commit_hash, commit_msg = raw, ""
+    return (commit_hash.strip() or None, _sanitize_commit_message(commit_msg))
+
+
+def _build_backup_candidates(
+    history: dict,
+    *,
+    head_hash: str | None,
+    reason: str,
+    cycle_kind: str,
+    cycle_counter: int,
+    record_fallback: bool,
+) -> list[BackupCandidate]:
+    commit_history = history.setdefault("commits", {})
+    history.setdefault("backups", {})
+    branch_history = history.setdefault("branches", {})
+    tag_history = history.setdefault("tags", {})
+    stable_branch = (history.get("stable_branch") or DEFAULT_STABLE_BRANCH).strip() or DEFAULT_STABLE_BRANCH
+    legacy_branch = (history.get("legacy_branch") or DEFAULT_LEGACY_BRANCH).strip() or DEFAULT_LEGACY_BRANCH
+    current_tag = (history.get("current_tag") or DEFAULT_CURRENT_TAG).strip() or DEFAULT_CURRENT_TAG
+    head_short = head_hash[:8] if head_hash else "unknown"
+
+    candidates: list[BackupCandidate] = []
+
+    def add_branch(branch_name: str, mode_label: str) -> None:
+        name = (branch_name or "").strip()
+        if not name:
+            return
+        script_path = _materialize_branch_script(name)
+        if not script_path:
+            branch_history[name] = "missing"
+            _save_fallback_history(history)
+            return
+        commit_hash, commit_message = _resolve_commit_details(name)
+        if not commit_hash:
+            branch_history[name] = "missing"
+            _save_fallback_history(history)
+            return
+        version_label = f"branch.{name}"
+        base_source_label = f"{name} branch"
+        if cycle_kind == "normal":
+            source_label = f"{base_source_label} (routine)"
+            context = None
+            candidate_reason = f"{reason} ({mode_label})"
+        else:
+            source_label = base_source_label
+            context = f"{head_short} -> branch:{name}"
+            candidate_reason = reason
+
+        def on_result(success: bool, branch=name, label=mode_label, source=base_source_label, version=version_label) -> None:
+            branch_history[branch] = "success" if success else "failed"
+            if success:
+                if label == "stable":
+                    history["stable_branch"] = branch
+                elif label == "legacy":
+                    history["legacy_branch"] = branch
+                history.pop("stable_commit", None)
+                history.pop("stable_backup", None)
+                history["fallback_branch_next"] = "legacy" if label == "stable" else "stable"
+                if record_fallback:
+                    _record_fallback(history, head_hash=head_hash, source_label=source, target_label=version)
+                else:
+                    _save_fallback_history(history)
+            else:
+                _save_fallback_history(history)
+
+        candidates.append(
+            BackupCandidate(
+                script_path=script_path,
+                version_label=version_label,
+                source_label=source_label,
+                reason=candidate_reason,
+                context=context,
+                cycle_kind=cycle_kind,
+                cycle_mode=mode_label,
+                cycle_counter=cycle_counter,
+                commit_hash=commit_hash,
+                commit_message=commit_message,
+                on_result=on_result,
+            )
+        )
+
+    def add_current_tag(tag_name: str) -> None:
+        name = (tag_name or "").strip()
+        if not name:
+            return
+        commit_hash = _resolve_ref_commit(name)
+        if not commit_hash:
+            return
+        script_path = _materialize_commit_script(commit_hash)
+        if not script_path:
+            return
+        _, commit_message = _resolve_commit_details(commit_hash)
+        version_label = f"tag.{name}"
+        source_label = f"{name} tag"
+        if cycle_kind == "normal":
+            context = None
+            candidate_reason = f"{reason} ({name})"
+        else:
+            context = f"{head_short} -> tag:{name}"
+            candidate_reason = reason
+
+        def on_result(success: bool, tag=name, commit=commit_hash, version=version_label, source=source_label) -> None:
+            tag_history[tag] = "success" if success else "failed"
+            if success:
+                history["stable_commit"] = commit
+                history.pop("stable_backup", None)
+                if record_fallback:
+                    _record_fallback(history, head_hash=head_hash, source_label=source, target_label=version)
+                else:
+                    _save_fallback_history(history)
+            else:
+                _save_fallback_history(history)
+
+        candidates.append(
+            BackupCandidate(
+                script_path=script_path,
+                version_label=version_label,
+                source_label=source_label,
+                reason=candidate_reason,
+                context=context,
+                cycle_kind=cycle_kind,
+                cycle_mode="current",
+                cycle_counter=cycle_counter,
+                commit_hash=commit_hash,
+                commit_message=commit_message,
+                on_result=on_result,
+            )
+        )
+
+    def add_random_commit() -> None:
+        fault_commit = _resolve_ref_commit(FAULT_TAG_NAME) if FAULT_TAG_NAME else None
+        commit_candidates = [
+            commit
+            for commit in _list_past_commits()
+            if commit_history.get(commit) != "failed"
+        ]
+        if head_hash:
+            commit_candidates = [commit for commit in commit_candidates if commit != head_hash]
+        if fault_commit:
+            commit_candidates = [commit for commit in commit_candidates if commit != fault_commit]
+        if not commit_candidates:
+            return
+        selected_commit = random.choice(commit_candidates)
+        script_path = _materialize_commit_script(selected_commit)
+        if not script_path:
+            commit_history[selected_commit] = "missing"
+            _save_fallback_history(history)
+            return
+        _, commit_message = _resolve_commit_details(selected_commit)
+        version_label = f"commit.{selected_commit[:8]}"
+        source_label = f"commit {selected_commit[:8]}"
+        if cycle_kind == "normal":
+            context = None
+            candidate_reason = f"{reason} (commit)"
+        else:
+            context = f"{head_short} -> {selected_commit[:8]}"
+            candidate_reason = reason
+
+        def on_result(success: bool, commit=selected_commit, version=version_label, source=source_label) -> None:
+            commit_history[commit] = "success" if success else "failed"
+            if success:
+                history["stable_commit"] = commit
+                history.pop("stable_backup", None)
+                if record_fallback:
+                    _record_fallback(history, head_hash=head_hash, source_label=source, target_label=version)
+                else:
+                    _save_fallback_history(history)
+            else:
+                _save_fallback_history(history)
+
+        candidates.append(
+            BackupCandidate(
+                script_path=script_path,
+                version_label=version_label,
+                source_label=source_label,
+                reason=candidate_reason,
+                context=context,
+                cycle_kind=cycle_kind,
+                cycle_mode="random",
+                cycle_counter=cycle_counter,
+                commit_hash=selected_commit,
+                commit_message=commit_message,
+                on_result=on_result,
+            )
+        )
+
+    add_branch(stable_branch, "stable")
+    add_branch(legacy_branch, "legacy")
+    add_current_tag(current_tag)
+    add_random_commit()
+
+    # ensure cycle modes are present
+    return [candidate for candidate in candidates if candidate.script_path]
+
+
+def _run_routine_backup(history: dict, routine_counter: int) -> bool:
+    head_hash = _current_head()
+    candidates = _build_backup_candidates(
+        history,
+        head_hash=head_hash,
+        reason=f"scheduled routine backup cycle {routine_counter}",
+        cycle_kind="normal",
+        cycle_counter=routine_counter,
+        record_fallback=False,
+    )
+    if not candidates:
+        return False
+    candidate = random.choice(candidates)
+    success = _run_script_candidate(
+        candidate.script_path,
+        candidate.version_label,
+        candidate.reason,
+        candidate.source_label,
+        fallback_context=candidate.context,
+        commit_hash=candidate.commit_hash,
+        commit_message=candidate.commit_message,
+        cycle_kind=candidate.cycle_kind,
+        cycle_mode=candidate.cycle_mode,
+        cycle_counter=candidate.cycle_counter,
+    )
+    candidate.finalize(success)
+    return success
+
+
 def _log_fallback_event(source_desc: str, source_ref: str, target_desc: str, target_ref: str, context: str) -> None:
     message = (
         f"[BOOT] Fallback executed ({context}): "
@@ -355,13 +643,23 @@ def _update_current_branch() -> None:
     return None
 
 
-def _run_script_candidate(script_path: Path, version_label: str, reason: str, source: str, *, fallback_context: str | None = None) -> bool:
+def _run_script_candidate(
+    script_path: Path,
+    version_label: str,
+    reason: str,
+    source: str,
+    *,
+    fallback_context: str | None = None,
+    commit_hash: str | None = None,
+    commit_message: str | None = None,
+    cycle_kind: str | None = None,
+    cycle_mode: str | None = None,
+    cycle_counter: int | None = None,
+) -> bool:
     _, fb_header, fb_lines = _build_commit_changelog()
     fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
-    print(
-        f"[BOOT] Falling back to {source} due to {reason}",
-        file=sys.stderr,
-    )
+    message_prefix = "[BOOT] Falling back" if cycle_kind != "normal" else "[BOOT] Routine launch"
+    print(f"{message_prefix} to {source} due to {reason}", file=sys.stderr)
     if fallback_context:
         _log_fallback_event("HEAD", _current_head() or "unknown", source, version_label, fallback_context)
     env = os.environ.copy()
@@ -369,7 +667,29 @@ def _run_script_candidate(script_path: Path, version_label: str, reason: str, so
     env["BYBITBOT_CHANGELOG_TEXT"] = fallback_changelog
     env["BYBITBOT_EXPECTED_VERSION"] = LATEST_VERSION
     env["BYBITBOT_SOURCE_LABEL"] = source
-    env["BYBITBOT_SOURCE_REF"] = version_label
+    env["BYBITBOT_VERSION_LABEL"] = version_label
+    if commit_hash:
+        env["BYBITBOT_SOURCE_REF"] = commit_hash
+        env["BYBITBOT_SOURCE_HASH"] = commit_hash
+    else:
+        env["BYBITBOT_SOURCE_REF"] = version_label
+        env.pop("BYBITBOT_SOURCE_HASH", None)
+    if commit_message:
+        env["BYBITBOT_SOURCE_MESSAGE"] = commit_message
+    else:
+        env.pop("BYBITBOT_SOURCE_MESSAGE", None)
+    if cycle_kind:
+        env["BYBITBOT_CYCLE_KIND"] = cycle_kind
+    else:
+        env.pop("BYBITBOT_CYCLE_KIND", None)
+    if cycle_mode:
+        env["BYBITBOT_CYCLE_MODE"] = cycle_mode
+    else:
+        env.pop("BYBITBOT_CYCLE_MODE", None)
+    if cycle_counter is not None:
+        env["BYBITBOT_CYCLE_COUNTER"] = str(cycle_counter)
+    else:
+        env.pop("BYBITBOT_CYCLE_COUNTER", None)
     if fallback_context:
         env["BYBITBOT_FALLBACK_CONTEXT"] = fallback_context
     else:
@@ -378,39 +698,29 @@ def _run_script_candidate(script_path: Path, version_label: str, reason: str, so
     return result.returncode == 0
 
 
-def _iter_backups():
-    backups_dir = Path(__file__).with_name("backups")
-    if not backups_dir.exists():
-        return []
-    candidates = []
-    patterns = [
-        "bybitbot_v*.py",
-        "bybit_intraday_30m_5pairs_v*.py",
-        "bybitbot_impl_v*.py",
-    ]
-    seen = set()
-    for pattern in patterns:
-        for path in backups_dir.glob(pattern):
-            try:
-                version_str = path.stem.split("_v", 1)[-1]
-            except Exception:
-                continue
-            key = (version_str, path)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append((_parse_version_tuple(version_str), version_str, path))
-    candidates.sort(reverse=True)
-    return [p for _, _, p in candidates]
-
-
 def _run_current():
     os.environ["BYBITBOT_CHANGELOG_VERSION"] = BOT_VERSION
     os.environ["BYBITBOT_CHANGELOG_TEXT"] = CURRENT_CHANGELOG
     os.environ["BYBITBOT_EXPECTED_VERSION"] = LATEST_VERSION
-    current_head = _current_head() or "unknown"
+    os.environ["BYBITBOT_VERSION_LABEL"] = BOT_VERSION
+    current_head = _current_head()
+    commit_hash, commit_message = _resolve_commit_details(current_head or "HEAD")
+    if not commit_hash:
+        commit_hash = current_head or "unknown"
     os.environ["BYBITBOT_SOURCE_LABEL"] = "HEAD"
-    os.environ["BYBITBOT_SOURCE_REF"] = current_head
+    os.environ["BYBITBOT_SOURCE_REF"] = commit_hash
+    if current_head:
+        os.environ["BYBITBOT_SOURCE_HASH"] = current_head
+    else:
+        os.environ.pop("BYBITBOT_SOURCE_HASH", None)
+    if commit_message:
+        os.environ["BYBITBOT_SOURCE_MESSAGE"] = commit_message
+    else:
+        os.environ.pop("BYBITBOT_SOURCE_MESSAGE", None)
+    os.environ["BYBITBOT_CYCLE_KIND"] = os.environ.get("BYBITBOT_CYCLE_KIND", "normal")
+    os.environ["BYBITBOT_CYCLE_MODE"] = "last"
+    if "BYBITBOT_CYCLE_COUNTER" not in os.environ:
+        os.environ["BYBITBOT_CYCLE_COUNTER"] = "0"
     os.environ.pop("BYBITBOT_FALLBACK_CONTEXT", None)
     module = importlib.import_module("bybitbot_impl")
     module_path = Path(getattr(module, "__file__", "<unknown>")).resolve() if hasattr(module, "__file__") else Path("bybitbot_impl.py").resolve()
@@ -430,149 +740,41 @@ def _run_current():
 
 def _run_backups(reason: str) -> bool:
     history = _load_fallback_history()
-    commit_history = history.setdefault("commits", {})
-    backup_history = history.setdefault("backups", {})
-    branch_history = history.setdefault("branches", {})
-    stable_branch = (history.get("stable_branch") or DEFAULT_STABLE_BRANCH).strip()
-    if not stable_branch:
-        stable_branch = DEFAULT_STABLE_BRANCH
-        history["stable_branch"] = stable_branch
-    legacy_branch = (history.get("legacy_branch") or DEFAULT_LEGACY_BRANCH).strip()
-    if not legacy_branch:
-        legacy_branch = DEFAULT_LEGACY_BRANCH
-        history["legacy_branch"] = legacy_branch
-
+    fallback_cycle = int(history.get("fallback_cycles") or 0)
     head_hash = _current_head()
-    head_short = head_hash[:8] if head_hash else "unknown"
-
-    fallback_next = history.get("fallback_branch_next")
-    if fallback_next not in {"stable", "legacy"}:
-        fallback_next = "stable"
-
-    branch_map = {"stable": stable_branch, "legacy": legacy_branch}
-    branch_seen: set[str] = set()
-    branch_order = []
-    for label in (fallback_next, "legacy" if fallback_next == "stable" else "stable"):
-        name = branch_map.get(label)
-        if name and name not in branch_seen:
-            branch_order.append((name, label))
-            branch_seen.add(name)
-
-    for branch_name, label in branch_order:
-        if not branch_name:
-            continue
-        script_path = _materialize_branch_script(branch_name)
-        if script_path:
-            version_label = f"branch.{branch_name}"
-            source_label = f"{branch_name} branch"
-            success = _run_script_candidate(
-                script_path,
-                version_label,
-                reason,
-                source_label,
-                fallback_context=f"{head_short} -> branch:{branch_name}",
-            )
-            branch_history[branch_name] = "success" if success else "failed"
-            if success:
-                if label == "stable":
-                    history["stable_branch"] = branch_name
-                else:
-                    history["legacy_branch"] = branch_name
-                history.pop("stable_commit", None)
-                history.pop("stable_backup", None)
-                history["fallback_branch_next"] = "legacy" if label == "stable" else "stable"
-                _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
-                return True
-            else:
-                _save_fallback_history(history)
-        else:
-            branch_history[branch_name] = "missing"
-            _save_fallback_history(history)
-
-    stable_commit = history.get("stable_commit")
-    stable_backup = history.get("stable_backup")
-    head_hash = _current_head()
-
-    head_short = head_hash[:8] if head_hash else "unknown"
-    if stable_commit and stable_commit != head_hash:
-        script_path = _materialize_commit_script(stable_commit)
-        if script_path:
-            version_label = f"commit.{stable_commit[:8]}"
-            source_label = f"stable commit {stable_commit[:8]}"
-            context = f"{head_short} -> {stable_commit[:8]}"
-            success = _run_script_candidate(script_path, version_label, reason, source_label, fallback_context=context)
-            commit_history[stable_commit] = "success" if success else "failed"
-            if success:
-                history["stable_commit"] = stable_commit
-                history.pop("stable_backup", None)
-                _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
-                return True
-            else:
-                history["stable_commit"] = None
-                _save_fallback_history(history)
-
-    if stable_backup:
-        backup_path = REPO_ROOT / "backups" / stable_backup
-        if backup_path.exists():
-            context = f"{head_short} -> backup:{stable_backup}"
-            success = _run_script_candidate(backup_path, stable_backup, reason, stable_backup, fallback_context=context)
-            backup_history[stable_backup] = "success" if success else "failed"
-            if success:
-                history["stable_backup"] = stable_backup
-                history["stable_commit"] = None
-                _record_fallback(history, head_hash=head_hash, source_label=stable_backup, target_label=stable_backup)
-                return True
-            else:
-                history["stable_backup"] = None
-                _save_fallback_history(history)
-
-    commit_hashes = _list_past_commits()
-    for commit_hash in commit_hashes:
-        if commit_hash == head_hash:
-            continue
-        if commit_history.get(commit_hash) == "failed":
-            continue
-        script_path = _materialize_commit_script(commit_hash)
-        if not script_path:
-            continue
-        version_label = f"commit.{commit_hash[:8]}"
-        source_label = f"commit {commit_hash[:8]}"
-        context = f"{head_short} -> {commit_hash[:8]}"
-        success = _run_script_candidate(script_path, version_label, reason, source_label, fallback_context=context)
-        commit_history[commit_hash] = "success" if success else "failed"
-        if success:
-            history["stable_commit"] = commit_hash
-            history.pop("stable_backup", None)
-            _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
-            return True
-        _save_fallback_history(history)
-
-    backups = _iter_backups()
-    if not backups:
-        print("[BOOT] No backups available.", file=sys.stderr)
+    candidates = _build_backup_candidates(
+        history,
+        head_hash=head_hash,
+        reason=reason,
+        cycle_kind="backup",
+        cycle_counter=fallback_cycle,
+        record_fallback=True,
+    )
+    if not candidates:
+        print("[BOOT] No backup candidates available.", file=sys.stderr)
         return False
-    for candidate in backups:
-        backup_key = candidate.name
-        if backup_history.get(backup_key) == "failed":
-            continue
-        candidate_version = candidate.stem.split('_v', 1)[-1]
-        context = f"{head_short} -> backup:{backup_key}"
-        success = _run_script_candidate(candidate, candidate_version, reason, candidate.name, fallback_context=context)
-        backup_history[backup_key] = "success" if success else "failed"
-        if success:
-            history["stable_commit"] = None
-            history["stable_backup"] = backup_key
-            _record_fallback(history, head_hash=head_hash, source_label=candidate.name, target_label=candidate_version)
-            return True
-        _save_fallback_history(history)
-    print("[BOOT] All backups failed.", file=sys.stderr)
-    return False
+    candidate = random.choice(candidates)
+    success = _run_script_candidate(
+        candidate.script_path,
+        candidate.version_label,
+        candidate.reason,
+        candidate.source_label,
+        fallback_context=candidate.context,
+        commit_hash=candidate.commit_hash,
+        commit_message=candidate.commit_message,
+        cycle_kind=candidate.cycle_kind,
+        cycle_mode=candidate.cycle_mode,
+        cycle_counter=candidate.cycle_counter,
+    )
+    candidate.finalize(success)
+    return success
 
 
 def main():
     _update_current_branch()
     history = _load_fallback_history()
-    branch_history = history.setdefault("branches", {})
+    history.setdefault("branches", {})
+    routine_counter: int | None = None
 
     if history.get("fallback_active"):
         cycles = int(history.get("fallback_cycles") or 0) + 1
@@ -589,37 +791,29 @@ def main():
                 context = f"probe {short}"
                 version_label = f"commit.{short}"
                 source_label = f"probe {short}"
-                if _run_script_candidate(script_path, version_label, "scheduled fallback probe", source_label, fallback_context=context):
+                commit_hash, commit_message = _resolve_commit_details(fallback_head)
+                if _run_script_candidate(
+                    script_path,
+                    version_label,
+                    "scheduled fallback probe",
+                    source_label,
+                    fallback_context=context,
+                    commit_hash=commit_hash or fallback_head,
+                    commit_message=commit_message,
+                    cycle_kind="backup",
+                    cycle_mode="current",
+                    cycle_counter=cycles,
+                ):
                     return
     else:
         routine_counter = int(history.get("routine_counter") or 0) + 1
         history["routine_counter"] = routine_counter
         _save_fallback_history(history)
-
-        branch_name = None
-        branch_label = None
-        remainder = routine_counter % 10
-        if remainder == 5:
-            branch_name = (history.get("stable_branch") or DEFAULT_STABLE_BRANCH).strip() or DEFAULT_STABLE_BRANCH
-            branch_label = "stable"
-        elif remainder == 0:
-            branch_name = (history.get("legacy_branch") or DEFAULT_LEGACY_BRANCH).strip() or DEFAULT_LEGACY_BRANCH
-            branch_label = "legacy"
-
-        if branch_name:
-            script_path = _materialize_branch_script(branch_name)
-            if script_path:
-                version_label = f"routine.{branch_name}"
-                source_label = f"{branch_name} branch (routine)"
-                context = f"routine {branch_label}"
-                success = _run_script_candidate(script_path, version_label, "scheduled routine branch", source_label, fallback_context=context)
-                branch_history[branch_name] = "success" if success else "failed"
-                _save_fallback_history(history)
-                if success:
-                    return
-            else:
-                branch_history[branch_name] = "missing"
-                _save_fallback_history(history)
+        if routine_counter % 5 == 0:
+            if _run_routine_backup(history, routine_counter):
+                return
+        os.environ["BYBITBOT_CYCLE_COUNTER"] = str(routine_counter)
+        os.environ["BYBITBOT_CYCLE_KIND"] = "normal"
 
     head_hash = _current_head()
     head_status = None

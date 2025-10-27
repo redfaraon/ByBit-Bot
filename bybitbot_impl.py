@@ -4482,9 +4482,26 @@ def run_cycle():
     send_tg(f"{session_separator}\nSTART SESSION {session_stamp}\n{session_separator}")
     source_label = os.getenv("BYBITBOT_SOURCE_LABEL")
     source_ref = os.getenv("BYBITBOT_SOURCE_REF")
+    source_message = os.getenv("BYBITBOT_SOURCE_MESSAGE")
     source_context = os.getenv("BYBITBOT_FALLBACK_CONTEXT")
+    cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
+    cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
+    cycle_counter = (os.getenv("BYBITBOT_CYCLE_COUNTER") or "").strip()
     if source_label and source_ref:
-        git_line = f"[GIT] {source_ref} - {source_label}"
+        cycle_label_parts: list[str] = []
+        if cycle_kind or cycle_mode:
+            kind = cycle_kind or "normal"
+            mode = cycle_mode or "last"
+            cycle_label_parts.append(f"{kind}/{mode}")
+        if cycle_counter:
+            if cycle_label_parts:
+                cycle_label_parts[-1] = f"{cycle_label_parts[-1]}#{cycle_counter}"
+            else:
+                cycle_label_parts.append(f"#{cycle_counter}")
+        cycle_segment = f"[{cycle_label_parts[0]}] " if cycle_label_parts else ""
+        git_line = f"[GIT] {cycle_segment}{source_ref} - {source_label}"
+        if source_message:
+            git_line += f": {source_message}"
         if source_context:
             git_line += f" ({source_context})"
         _send_git_notification(git_line)
