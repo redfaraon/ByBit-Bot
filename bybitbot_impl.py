@@ -2667,14 +2667,21 @@ def normalize_order_type_key(raw_type):
     return ORDER_TYPE_ALIASES.get(key, key)
 
 
-def get_trigger_direction_for_side(side: str) -> str:
+def get_trigger_direction_for_side(
+    side: str,
+    trigger_price: float | None = None,
+    reference_price: float | None = None,
+) -> str:
     """Return trigger direction flag understood by ccxt/bybit for a closing order."""
+    trigger = safe_float(trigger_price)
+    reference = safe_float(reference_price)
+    if trigger is not None and reference is not None and math.isfinite(trigger) and math.isfinite(reference):
+        return "above" if trigger >= reference else "below"
     side_lower = (side or "").lower()
-    if side_lower == "sell":
+    if side_lower in {"sell", "short"}:
         return "below"
-    if side_lower == "buy":
+    if side_lower in {"buy", "long"}:
         return "above"
-    # Default to trigger on downside to avoid missing protection for long positions.
     return "below"
 
 
@@ -3386,6 +3393,25 @@ def execute_extra_orders(
         return executed, False
     cancelled_success = []
     cancel_errors = []
+
+    def resolve_reference_price(order_dict, fallback_price):
+        candidates = [
+            fallback_price,
+            order_dict.get("referencePrice"),
+            order_dict.get("currentPrice"),
+            order_dict.get("lastPrice"),
+            order_dict.get("triggerReferencePrice"),
+            (current_position or {}).get("entryPrice"),
+            (current_position or {}).get("avgEntryPrice"),
+            (current_position or {}).get("markPrice"),
+            (current_position or {}).get("lastPrice"),
+        ]
+        for candidate in candidates:
+            ref = safe_float(candidate)
+            if ref is not None and math.isfinite(ref):
+                return ref
+        return None
+
     for idx, order in enumerate(orders, 1):
         if not isinstance(order, dict):
             log(f"[WARN] Extra order #{idx} for {symbol} is not a dict; skipping.", Fore.YELLOW)
@@ -3537,7 +3563,11 @@ def execute_extra_orders(
                 price = None
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                params.setdefault("triggerDirection", get_trigger_direction_for_side(side))
+                reference_price = resolve_reference_price(order, price)
+                params.setdefault(
+                    "triggerDirection",
+                    get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
+                )
                 params.setdefault("closeOnTrigger", True)
                 params.pop("stopLoss", None)
                 params.pop("stopPrice", None)
@@ -3552,13 +3582,21 @@ def execute_extra_orders(
                 ccxt_type = "limit"
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                params.setdefault("triggerDirection", get_trigger_direction_for_side(side))
+                reference_price = resolve_reference_price(order, price)
+                params.setdefault(
+                    "triggerDirection",
+                    get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
+                )
                 params.pop("stopLoss", None)
                 params.pop("stopPrice", None)
                 params.pop("stop_price", None)
             elif trigger_price is not None and math.isfinite(trigger_price):
                 params.setdefault("triggerPrice", trigger_price)
-                params.setdefault("triggerDirection", get_trigger_direction_for_side(side))
+                reference_price = resolve_reference_price(order, price)
+                params.setdefault(
+                    "triggerDirection",
+                    get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
+                )
         if ccxt_type not in VALID_ORDER_TYPES:
             fallback_type = "limit" if price is not None else "market"
             log(
