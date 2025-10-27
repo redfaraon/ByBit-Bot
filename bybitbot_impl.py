@@ -1420,8 +1420,6 @@ def refresh_settings():
     except (TypeError, ValueError):
         TG_RETRY_BACKOFF = 1.5
     TG_RETRY_BACKOFF = max(0.5, TG_RETRY_BACKOFF)
-    AI_MODEL_PRIMARY = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-    AI_MODEL_CHEAP = os.getenv("OPENAI_MODEL_CHEAP", os.getenv("OPENAI_MODEL_BACKUP", "gpt-4o-mini"))
     primary_env = (os.getenv("OPENAI_MODEL_PRIMARY") or os.getenv("OPENAI_MODEL"))
     AI_MODEL_PRIMARY = primary_env.strip() if isinstance(primary_env, str) and primary_env.strip() else "gpt-4.1-mini"
     cheap_env = (os.getenv("OPENAI_MODEL_CHEAP") or os.getenv("OPENAI_MODEL_BACKUP"))

@@ -26,6 +26,7 @@ def _resolve_commit_limit(raw_value: str | None) -> int:
 CHANGELOG_COMMIT_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_CHANGELOG_COMMITS"))
 FALLBACK_COMMIT_CANDIDATE_LIMIT = _resolve_commit_limit(os.getenv("BYBITBOT_FALLBACK_COMMIT_LIMIT", "12"))
 DEFAULT_STABLE_BRANCH = (os.getenv("BYBITBOT_STABLE_BRANCH") or "stable").strip() or "stable"
+DEFAULT_LEGACY_BRANCH = (os.getenv("BYBITBOT_LEGACY_BRANCH") or "legacy").strip() or "legacy"
 
 
 FALLBACK_PROBE_INTERVAL = max(1, int(os.getenv("BYBITBOT_FALLBACK_PROBE_INTERVAL", "10")))
@@ -436,25 +437,58 @@ def _run_backups(reason: str) -> bool:
     if not stable_branch:
         stable_branch = DEFAULT_STABLE_BRANCH
         history["stable_branch"] = stable_branch
-    if stable_branch:
-        script_path = _materialize_branch_script(stable_branch)
+    legacy_branch = (history.get("legacy_branch") or DEFAULT_LEGACY_BRANCH).strip()
+    if not legacy_branch:
+        legacy_branch = DEFAULT_LEGACY_BRANCH
+        history["legacy_branch"] = legacy_branch
+
+    head_hash = _current_head()
+    head_short = head_hash[:8] if head_hash else "unknown"
+
+    fallback_next = history.get("fallback_branch_next")
+    if fallback_next not in {"stable", "legacy"}:
+        fallback_next = "stable"
+
+    branch_map = {"stable": stable_branch, "legacy": legacy_branch}
+    branch_seen: set[str] = set()
+    branch_order = []
+    for label in (fallback_next, "legacy" if fallback_next == "stable" else "stable"):
+        name = branch_map.get(label)
+        if name and name not in branch_seen:
+            branch_order.append((name, label))
+            branch_seen.add(name)
+
+    for branch_name, label in branch_order:
+        if not branch_name:
+            continue
+        script_path = _materialize_branch_script(branch_name)
         if script_path:
-            version_label = f"branch.{stable_branch}"
-            source_label = f"{stable_branch} branch"
-            head_hash = _current_head() or "unknown"
-            success = _run_script_candidate(script_path, version_label, reason, source_label, fallback_context=f"{head_hash[:8]} -> branch")
-            branch_history[stable_branch] = "success" if success else "failed"
+            version_label = f"branch.{branch_name}"
+            source_label = f"{branch_name} branch"
+            success = _run_script_candidate(
+                script_path,
+                version_label,
+                reason,
+                source_label,
+                fallback_context=f"{head_short} -> branch:{branch_name}",
+            )
+            branch_history[branch_name] = "success" if success else "failed"
             if success:
-                history["stable_branch"] = stable_branch
+                if label == "stable":
+                    history["stable_branch"] = branch_name
+                else:
+                    history["legacy_branch"] = branch_name
                 history.pop("stable_commit", None)
                 history.pop("stable_backup", None)
+                history["fallback_branch_next"] = "legacy" if label == "stable" else "stable"
                 _record_fallback(history, head_hash=head_hash, source_label=source_label, target_label=version_label)
                 return True
             else:
                 _save_fallback_history(history)
         else:
-            branch_history[stable_branch] = "missing"
+            branch_history[branch_name] = "missing"
             _save_fallback_history(history)
+
     stable_commit = history.get("stable_commit")
     stable_backup = history.get("stable_backup")
     head_hash = _current_head()
@@ -538,6 +572,8 @@ def _run_backups(reason: str) -> bool:
 def main():
     _update_current_branch()
     history = _load_fallback_history()
+    branch_history = history.setdefault("branches", {})
+
     if history.get("fallback_active"):
         cycles = int(history.get("fallback_cycles") or 0) + 1
         history["fallback_cycles"] = cycles
@@ -555,6 +591,36 @@ def main():
                 source_label = f"probe {short}"
                 if _run_script_candidate(script_path, version_label, "scheduled fallback probe", source_label, fallback_context=context):
                     return
+    else:
+        routine_counter = int(history.get("routine_counter") or 0) + 1
+        history["routine_counter"] = routine_counter
+        _save_fallback_history(history)
+
+        branch_name = None
+        branch_label = None
+        remainder = routine_counter % 10
+        if remainder == 5:
+            branch_name = (history.get("stable_branch") or DEFAULT_STABLE_BRANCH).strip() or DEFAULT_STABLE_BRANCH
+            branch_label = "stable"
+        elif remainder == 0:
+            branch_name = (history.get("legacy_branch") or DEFAULT_LEGACY_BRANCH).strip() or DEFAULT_LEGACY_BRANCH
+            branch_label = "legacy"
+
+        if branch_name:
+            script_path = _materialize_branch_script(branch_name)
+            if script_path:
+                version_label = f"routine.{branch_name}"
+                source_label = f"{branch_name} branch (routine)"
+                context = f"routine {branch_label}"
+                success = _run_script_candidate(script_path, version_label, "scheduled routine branch", source_label, fallback_context=context)
+                branch_history[branch_name] = "success" if success else "failed"
+                _save_fallback_history(history)
+                if success:
+                    return
+            else:
+                branch_history[branch_name] = "missing"
+                _save_fallback_history(history)
+
     head_hash = _current_head()
     head_status = None
     if head_hash:
@@ -584,8 +650,10 @@ def main():
             history["fallback_last_head"] = None
             history["fallback_source"] = None
             history["fallback_target"] = None
+            history["fallback_branch_next"] = "stable"
             _save_fallback_history(history)
 
 
 if __name__ == "__main__":
     main()
+
