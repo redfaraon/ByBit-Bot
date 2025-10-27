@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.27.3
+# Version: 2025.10.27.4
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.27.3"
+BOT_VERSION = "2025.10.27.4"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1165,7 +1165,17 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     sym = decision.get("symbol")
     if not sym:
         return 0, positions_map, open_orders_cache
-    action = (decision.get("action") or "skip").lower()
+    action_raw = (decision.get("action") or "skip").lower()
+    action_aliases = {
+        "replace_orders": "manage",
+        "refresh_orders": "manage",
+        "update_orders": "manage",
+        "maintain": "hold",
+        "maintain_position": "hold",
+    }
+    action = action_aliases.get(action_raw, action_raw)
+    if action != action_raw:
+        log(f"{sym}: normalized action {action_raw!r} → {action!r}", Fore.LIGHTBLACK_EX)
     counts[action] = counts.get(action, 0) + 1
     side = decision.get("side") or ""
     reason = decision.get("reason") or ""

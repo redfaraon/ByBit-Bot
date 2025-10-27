@@ -122,3 +122,8 @@ Recent commits (last 8)
 
 2025.10.27.3
 - Normalized Bybit extra-order payloads and updated version metadata.
+
+2025.10.27.4
+- Skip replacement reduce-only market orders lacking triggers to prevent unintended flat exits.
+- Normalize planner actions such as replace_orders into manage/hold flows and log the mapping.
+- Updated default version metadata in loader and implementation.

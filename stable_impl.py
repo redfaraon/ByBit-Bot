@@ -1115,7 +1115,17 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     sym = decision.get("symbol")
     if not sym:
         return 0, positions_map, open_orders_cache
-    action = (decision.get("action") or "skip").lower()
+    action_raw = (decision.get("action") or "skip").lower()
+    action_aliases = {
+        "replace_orders": "manage",
+        "refresh_orders": "manage",
+        "update_orders": "manage",
+        "maintain": "hold",
+        "maintain_position": "hold",
+    }
+    action = action_aliases.get(action_raw, action_raw)
+    if action != action_raw:
+        log(f"{sym}: normalized action {action_raw!r} → {action!r}", Fore.LIGHTBLACK_EX)
     counts[action] = counts.get(action, 0) + 1
     side = decision.get("side") or ""
     reason = decision.get("reason") or ""
