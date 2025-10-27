@@ -1,3 +1,8 @@
+2025.10.27.6
+- Process the entire AI universe each cycle so up to 8 symbols are analysed even when the list exceeds prior limits.
+- Refresh protective TP/SL orders whenever an open signal lands on an already-held position.
+- Fix triggerDirection calculations using live prices and drop the unused stable_impl fallback copy.
+
 ﻿2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.

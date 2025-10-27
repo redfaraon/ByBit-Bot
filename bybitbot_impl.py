@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.27.5
+# Version: 2025.10.27.6
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.27.5"
+BOT_VERSION = "2025.10.27.6"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -3298,7 +3298,11 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     created_orders = []
     try:
-        trigger_direction = get_trigger_direction_for_side(protection_side)
+        trigger_direction = get_trigger_direction_for_side(
+            protection_side,
+            trigger_price=stop_price,
+            reference_price=price,
+        )
         stop_params = dict(base_params)
         stop_params.update(
             {
@@ -4607,7 +4611,8 @@ def run_cycle():
         remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
         _append_unique(available_pairs, remaining_pairs, seen_available)
 
-    selection_pairs = universe_state.get("pairs") or []
+    raw_universe_pairs = universe_state.get("pairs") or []
+    selection_pairs = raw_universe_pairs
     selection_pairs_normalized: list[str] = []
     for raw_pair in selection_pairs:
         if not raw_pair:
@@ -4625,6 +4630,11 @@ def run_cycle():
         prioritized += [p for p in available_pairs if p not in prioritized]
         available_pairs = prioritized
 
+    symbol_processing_limit = max(
+        MAX_SYMBOLS_PER_CYCLE,
+        len(selection_pairs),
+        len(raw_universe_pairs),
+    )
     if missing_symbols:
         missing_desc = ', '.join(sorted(missing_symbols))
         log(f"[WARN] Removed pairs not listed on Bybit: {missing_desc}", Fore.YELLOW)
@@ -4635,8 +4645,8 @@ def run_cycle():
         log(f"[INFO] Using alias tickers: {alias_desc}", Fore.LIGHTBLACK_EX)
         symbol_alias_hits.clear()
 
-    if len(available_pairs) > MAX_SYMBOLS_PER_CYCLE:
-        available_pairs = available_pairs[:MAX_SYMBOLS_PER_CYCLE]
+    if len(available_pairs) > symbol_processing_limit:
+        available_pairs = available_pairs[:symbol_processing_limit]
     log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
 
     open_orders_cache = dict(open_orders_prefetch)
@@ -4844,8 +4854,8 @@ def run_cycle():
             priority_sequence.append(sym_order)
             seen_priority.add(sym_order)
     symbols_sequence = priority_sequence
-    if len(symbols_sequence) > MAX_SYMBOLS_PER_CYCLE:
-        symbols_sequence = symbols_sequence[:MAX_SYMBOLS_PER_CYCLE]
+    if len(symbols_sequence) > symbol_processing_limit:
+        symbols_sequence = symbols_sequence[:symbol_processing_limit]
     if not symbols_sequence:
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
@@ -4903,7 +4913,8 @@ def run_cycle():
                 except Exception as exc_fetch:
                     log(f"?? не удалось получить базовый таймфрейм {primary_tf} для {sym}: {exc_fetch}", Fore.RED)
                     continue
-            df = timeframe_dfs[primary_tf].copy()
+            df_primary = timeframe_dfs[primary_tf]
+            df = df_primary.copy()
             timeframes_payload = {}
             for tf, tf_df in timeframe_dfs.items():
                 if tf == primary_tf:
@@ -5268,6 +5279,28 @@ def run_cycle():
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
                     send_tg(f"⚠️ {sym}: позиция уже открыта, сигнал open пропущен")
+                    protection_df = df.copy() if isinstance(df, pd.DataFrame) else None
+                    if protection_df is None or protection_df.empty:
+                        protection_df = df_primary.copy() if isinstance(df_primary, pd.DataFrame) else None
+                    if protection_df is not None and "atr" not in protection_df.columns:
+                        try:
+                            protection_df["atr"] = atr(protection_df, 14)
+                        except Exception as exc_atr:
+                            log(f"[WARN] {sym}: failed to prepare ATR for protection refresh: {exc_atr}", Fore.YELLOW)
+                            protection_df = None
+                    if protection_df is not None:
+                        updated_orders = ensure_position_protection(
+                            ex,
+                            sym,
+                            current_position,
+                            protection_df,
+                            open_orders_symbol,
+                            config=target_map.get(sym),
+                        )
+                        if isinstance(updated_orders, list):
+                            open_orders_symbol = updated_orders
+                            open_orders_cache[sym] = updated_orders
+                    continue
                 elif max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
                     log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), пропускаем {sym}", Fore.YELLOW)
                     send_tg(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), {sym} пропущен")
