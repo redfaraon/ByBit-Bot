@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.22.7
+# Version: 2025.10.27.2
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.26.2"
+BOT_VERSION = "2025.10.27.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -3502,6 +3502,13 @@ def execute_extra_orders(
                 side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
         else:
             ccxt_type = ORDER_TYPE_MAP.get(order_type_key, order_type_key)
+            if order_type_key == "take_profit":
+                params.setdefault("reduceOnly", True)
+                params.setdefault("timeInForce", params.get("timeInForce") or "GTC")
+                params.pop("takeProfit", None)
+                params.pop("take_profit", None)
+                params.pop("tp", None)
+                ccxt_type = "limit"
             if order_type_key == "stop_loss":
                 trigger_price = (
                     order.get("triggerPrice")
@@ -3537,7 +3544,12 @@ def execute_extra_orders(
             continue
         try:
             order_id = exchange.create_order(exchange_symbol, ccxt_type, side, amount, price, params)
-            display_type = "STOP-MARKET" if order_type_key == "stop_loss" else ccxt_type.upper()
+            if order_type_key == "stop_loss":
+                display_type = "STOP-MARKET"
+            elif order_type_key == "take_profit":
+                display_type = "TAKE-PROFIT"
+            else:
+                display_type = ccxt_type.upper()
             desc = f"{display_type} {side.upper()} {amount}"
             if price:
                 desc += f" @ {price}"
