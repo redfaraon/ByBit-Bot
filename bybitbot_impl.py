@@ -47,6 +47,12 @@ BOT_CHANGELOG = (
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
 CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
+EQUITY_HISTORY_FILE = SCRIPT_DIR / "equity_history.json"
+PNL_LOOKBACK_HOURS = 6
+DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
+DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
+PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
+ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
 _LAST_COMMIT_HASH: Optional[str] = None
 
 BASE_PAIR_CANDIDATES = [
@@ -1359,6 +1365,31 @@ def resolve_timezone(value: str):
     return None
 
 
+def _parse_ratio_scheme(value: str | None, default: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not value:
+        return list(default)
+    result: list[tuple[float, float]] = []
+    for chunk in value.split(","):
+        candidate = chunk.strip()
+        if not candidate:
+            continue
+        if "@" in candidate:
+            ratio_part, mult_part = candidate.split("@", 1)
+        else:
+            ratio_part, mult_part = candidate, "1"
+        try:
+            ratio = float(ratio_part.strip())
+            multiplier = float(mult_part.strip())
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(ratio) or ratio <= 0:
+            continue
+        if not math.isfinite(multiplier):
+            continue
+        result.append((ratio, multiplier))
+    return result if result else list(default)
+
+
 def refresh_settings():
     load_environment()
     global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR, TRAILING_ATR_MULT
@@ -1375,6 +1406,7 @@ def refresh_settings():
     global SUPPORT_CONTEXT_TIMEFRAMES, SUPPORT_CONTEXT_INDICATORS, SUPPORT_CONTEXT_LIMIT
     global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
     global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
+    global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -1383,6 +1415,8 @@ def refresh_settings():
     TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
+    PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
+    ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
     MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
@@ -2255,6 +2289,33 @@ def _cleanup_excess_non_reduce_limits(exchange, symbol, open_orders, position_si
         return open_orders or []
 
 
+def _has_active_limit_at_price(open_orders, side: str, price: float, tolerance: float = 5e-4) -> bool:
+    if price is None or not math.isfinite(price) or price <= 0:
+        return False
+    side_lower = (side or '').lower()
+    if not side_lower:
+        return False
+    for existing in open_orders or []:
+        if not isinstance(existing, dict):
+            continue
+        try:
+            existing_side = (existing.get('side') or '').lower()
+            existing_type = (existing.get('type') or '').lower()
+        except AttributeError:
+            continue
+        if existing_side != side_lower:
+            continue
+        if existing_type != 'limit':
+            continue
+        if existing.get('reduceOnly') in (True, 'true', '1', 1):
+            continue
+        existing_price = safe_float(existing.get('price'))
+        if not (existing_price and math.isfinite(existing_price) and existing_price > 0):
+            continue
+        if abs(existing_price - price) / price <= tolerance:
+            return True
+    return False
+
 def get_position_idx(side: str | None) -> int | None:
     if HEDGE_MODE:
         if (side or "").lower() == "buy":
@@ -2530,6 +2591,116 @@ def init_exchange():
     })
     exchange.options["recvWindow"] = 5000
     return exchange
+
+
+def _load_equity_history() -> list[dict]:
+    try:
+        raw = EQUITY_HISTORY_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[dict] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        ts = entry.get("timestamp")
+        equity_val = entry.get("equity")
+        try:
+            equity_float = float(equity_val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(equity_float):
+            continue
+        if not isinstance(ts, str) or not ts:
+            continue
+        result.append({"timestamp": ts, "equity": equity_float})
+    return result
+
+
+def _save_equity_history(history: list[dict]) -> None:
+    try:
+        EQUITY_HISTORY_FILE.write_text(
+            json.dumps(history, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _update_equity_history(history: list[dict], timestamp: datetime.datetime, equity: float) -> None:
+    if not math.isfinite(equity):
+        return
+    ts = timestamp.astimezone(datetime.timezone.utc)
+    history.append({"timestamp": ts.isoformat(), "equity": float(equity)})
+    cutoff = ts - datetime.timedelta(hours=max(PNL_LOOKBACK_HOURS * 6, 72))
+    pruned: list[dict] = []
+    for entry in history:
+        entry_ts_raw = entry.get("timestamp")
+        if not isinstance(entry_ts_raw, str):
+            continue
+        try:
+            entry_ts = datetime.datetime.fromisoformat(entry_ts_raw)
+        except ValueError:
+            continue
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=datetime.timezone.utc)
+        if entry_ts >= cutoff:
+            pruned.append({"timestamp": entry_ts.isoformat(), "equity": float(entry.get("equity", 0.0))})
+    history[:] = pruned
+    _save_equity_history(history)
+
+
+def _compute_recent_pnl(
+    history: list[dict],
+    timestamp: datetime.datetime,
+    current_equity: float,
+    hours: float = PNL_LOOKBACK_HOURS,
+) -> tuple[float | None, float | None]:
+    if not history or not math.isfinite(current_equity) or hours <= 0:
+        return None, None
+    ts_now = timestamp.astimezone(datetime.timezone.utc)
+    cutoff = ts_now - datetime.timedelta(hours=hours)
+    candidates: list[tuple[datetime.datetime, float]] = []
+    for entry in history:
+        entry_ts_raw = entry.get("timestamp")
+        if not isinstance(entry_ts_raw, str):
+            continue
+        try:
+            entry_ts = datetime.datetime.fromisoformat(entry_ts_raw)
+        except ValueError:
+            continue
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=datetime.timezone.utc)
+        if entry_ts > ts_now:
+            continue
+        try:
+            equity_val = float(entry.get("equity"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(equity_val):
+            continue
+        candidates.append((entry_ts, equity_val))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda item: item[0])
+    reference_equity = None
+    for entry_ts, value in candidates:
+        if entry_ts >= cutoff:
+            reference_equity = value
+            break
+    if reference_equity is None:
+        reference_equity = candidates[0][1]
+    if reference_equity is None or not math.isfinite(reference_equity):
+        return None, None
+    pnl_value = current_equity - reference_equity
+    return pnl_value, reference_equity
 
 def fetch_df(exchange, symbol, tf):
     resolved_symbol = _resolve_symbol_alias(symbol) or symbol
@@ -3348,7 +3519,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if position_idx is not None:
         base_params["positionIdx"] = position_idx
 
-    created_orders = []
+    created_log_parts: list[str] = []
     try:
         trigger_direction = get_trigger_direction_for_side(
             protection_side,
@@ -3364,18 +3535,88 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             }
         )
         exchange.create_order(exchange_symbol, "market", protection_side, qty, None, stop_params)
-        created_orders.append(("stopLoss", stop_price))
+        created_log_parts.append(f"stopLoss @ {stop_price:.2f}")
     except Exception as exc:
         log(f"⚠️ {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
 
-    try:
+    tp_scheme_override = target_spec.get("takeProfitLevels") or target_spec.get("take_profit_levels")
+    normalized_scheme: list[tuple[float, float]] = []
+    if isinstance(tp_scheme_override, list):
+        for item in tp_scheme_override:
+            ratio_val = None
+            multiplier_val = None
+            if isinstance(item, dict):
+                ratio_val = safe_float(item.get("ratio") or item.get("share") or item.get("size") or item.get("qty"))
+                explicit_price = safe_float(item.get("price"))
+                if explicit_price is not None and math.isfinite(explicit_price):
+                    normalized_scheme.append((float(ratio_val) if ratio_val and math.isfinite(ratio_val) else 0.0, explicit_price))
+                    continue
+                multiplier_val = safe_float(item.get("atr") or item.get("atr_mult") or item.get("multiplier") or item.get("distance"))
+            elif isinstance(item, (int, float)):
+                multiplier_val = float(item)
+            if ratio_val is None or not math.isfinite(ratio_val) or ratio_val <= 0:
+                ratio_val = 0.0
+            if multiplier_val is not None and math.isfinite(multiplier_val):
+                normalized_scheme.append((float(ratio_val), float(multiplier_val)))
+    if not normalized_scheme:
+        normalized_scheme = list(PARTIAL_TP_SCHEME) if PARTIAL_TP_SCHEME else [(1.0, tp_mult or 1.0)]
+    filtered_scheme: list[tuple[float, float]] = []
+    for ratio_val, mult_val in normalized_scheme:
+        ratio_clean = float(ratio_val) if math.isfinite(ratio_val) else 0.0
+        if ratio_clean <= 0:
+            continue
+        multiplier_clean = float(mult_val) if math.isfinite(mult_val) else 0.0
+        filtered_scheme.append((ratio_clean, multiplier_clean))
+    if not filtered_scheme:
+        filtered_scheme = [(1.0, tp_mult or 1.0)]
+    ratio_total = sum(ratio for ratio, _ in filtered_scheme) or 1.0
+    remaining_qty = qty
+    take_created: list[str] = []
+    for idx, (ratio_val, multiplier_val) in enumerate(filtered_scheme):
+        share = ratio_val / ratio_total if ratio_total else 0.0
+        target_qty = qty * share if idx < len(filtered_scheme) - 1 else remaining_qty
+        target_qty = min(target_qty, remaining_qty)
+        if target_qty <= 0:
+            continue
+        try:
+            target_qty_precise = float(exchange.amount_to_precision(exchange_symbol, target_qty))
+        except Exception:
+            target_qty_precise = float(round(target_qty, 8))
+        if target_qty_precise <= 0:
+            continue
+        if explicit_take is not None and math.isfinite(explicit_take):
+            if idx == 0:
+                tp_target_price = explicit_take
+            else:
+                tp_target_price = explicit_take + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
+        else:
+            tp_target_price = reference_price + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
+        if tp_target_price is None or not math.isfinite(tp_target_price) or tp_target_price <= 0:
+            continue
+        layer_notional = target_qty_precise * tp_target_price
+        if layer_notional < MIN_NOTIONAL_USDT * 0.5:
+            continue
         tp_params = dict(base_params)
-        tp_params["takeProfit"] = take_price
+        tp_params["takeProfit"] = tp_target_price
         tp_params.setdefault("timeInForce", "GTC")
-        exchange.create_order(exchange_symbol, "limit", protection_side, qty, take_price, tp_params)
-        created_orders.append(("takeProfit", take_price))
-    except Exception as exc:
-        log(f"⚠️ {symbol}: не удалось выставить тейк-профит позиции: {exc}", Fore.YELLOW)
+        try:
+            exchange.create_order(
+                exchange_symbol,
+                "limit",
+                protection_side,
+                target_qty_precise,
+                tp_target_price,
+                tp_params,
+            )
+        except Exception as exc:
+            log(f"⚠️ {symbol}: не удалось выставить тейк-профит ({target_qty_precise:.4f}@{tp_target_price:.2f}): {exc}", Fore.YELLOW)
+            continue
+        remaining_qty = max(0.0, remaining_qty - target_qty_precise)
+        take_created.append(f"takeProfit {target_qty_precise:.4f} @ {tp_target_price:.2f}")
+    if not take_created:
+        log(f"[WARN] {symbol}: take-profit orders were not placed (scheme={filtered_scheme})", Fore.YELLOW)
+    else:
+        created_log_parts.extend(take_created)
 
     if trailing_offset is not None:
         try:
@@ -3384,15 +3625,15 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             if reference_price and math.isfinite(reference_price):
                 trailing_params.setdefault("triggerPrice", reference_price)
             exchange.create_order(exchange_symbol, "trailingStop", protection_side, qty, None, trailing_params)
-            created_orders.append(("trailingStop", trailing_offset))
+            created_log_parts.append(f"trailingStop {trailing_offset:.4f}")
         except Exception as exc:
             log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп: {exc}", Fore.YELLOW)
 
-    if created_orders:
-        log(f"🛡️ {symbol}: обновлена защита позиции {created_orders}", Fore.LIGHTBLUE_EX)
+    if created_log_parts:
+        log(f"🛡️ {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)
         send_tg(
             f"🛡️ {symbol}: обновлена защита позиции\n"
-            + "\n".join(f"- {typ} @ {price}" for typ, price in created_orders)
+            + "\n".join(f"- {entry}" for entry in created_log_parts)
         )
     return fetch_open_orders_for_symbol(exchange, symbol)
 
@@ -5503,19 +5744,67 @@ def run_cycle():
                         continue
                     try:
                         position_idx = get_position_idx(side)
-                        params = {"takeProfit": tp, "stopLoss": sl, "tpSlMode": "Full", "reduceOnly": False}
+                        base_params = {"takeProfit": tp, "stopLoss": sl, "tpSlMode": "Full", "reduceOnly": False}
                         if position_idx is not None:
-                            params["positionIdx"] = position_idx
-                        margin_required = notional / symbol_leverage if symbol_leverage else notional
-                        ex.create_order(sym, "limit", side, qty, price, params)
-                        log(f"✅ Ордер {sym} {side.upper()} {qty:.4f}@{price:.2f} SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
+                            base_params["positionIdx"] = position_idx
+                        scheme = ENTRY_LADDER_SCHEME if ENTRY_LADDER_SCHEME else [(1.0, 0.0)]
+                        normalized_entries = []
+                        for share, offset in scheme:
+                            share_val = float(share) if isinstance(share, (int, float)) else 0.0
+                            offset_val = float(offset) if isinstance(offset, (int, float)) else 0.0
+                            if not math.isfinite(share_val) or share_val <= 0:
+                                continue
+                            if not math.isfinite(offset_val) or offset_val < 0:
+                                offset_val = 0.0
+                            normalized_entries.append((share_val, offset_val))
+                        if not normalized_entries:
+                            normalized_entries = [(1.0, 0.0)]
+                        ratio_total = sum(item[0] for item in normalized_entries) or 1.0
+                        remaining_qty = qty
+                        entry_summaries: list[str] = []
+                        entry_created = 0
+                        total_margin_used = 0.0
+                        side_lower = side.lower()
+                        for idx, (share_val, offset_val) in enumerate(normalized_entries):
+                            weight = share_val / ratio_total if ratio_total else 0.0
+                            target_qty = qty * weight if idx < len(normalized_entries) - 1 else remaining_qty
+                            target_qty = min(target_qty, remaining_qty)
+                            if target_qty <= 0:
+                                continue
+                            layer_price = price - offset_val * atrv if side_lower == "buy" else price + offset_val * atrv
+                            if layer_price is None or not math.isfinite(layer_price) or layer_price <= 0:
+                                continue
+                            if _has_active_limit_at_price(open_orders_symbol, side_lower, layer_price):
+                                log(f"[INFO] {sym}: пропуск лимита {side.upper()} @ {layer_price:.2f} (уже есть поблизости)", Fore.LIGHTBLACK_EX)
+                                continue
+                            try:
+                                precise_qty = float(ex.amount_to_precision(sym, target_qty))
+                            except Exception:
+                                precise_qty = float(round(target_qty, 8))
+                            if precise_qty <= 0:
+                                continue
+                            layer_notional = precise_qty * layer_price
+                            if layer_notional < MIN_NOTIONAL_USDT:
+                                continue
+                            layer_params = dict(base_params)
+                            ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
+                            entry_created += 1
+                            remaining_qty = max(0.0, remaining_qty - precise_qty)
+                            layer_margin = layer_notional / symbol_leverage if symbol_leverage else layer_notional
+                            total_margin_used += layer_margin
+                            entry_summaries.append(f"{precise_qty:.4f} @ {layer_price:.2f} (margin {layer_margin:.2f} USDT)")
+                        if entry_created == 0:
+                            raise RuntimeError("no entry orders placed")
+                        log(f"✅ Ордеры {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
-                            f"✅ {sym} {side.upper()} @ {price:.2f}\n"
-                            f"SL {sl:.2f} TP {tp:.2f}\n"
-                            f"Объём {notional:.2f} USDT, маржа {margin_required:.2f} USDT, плечо x{symbol_leverage}"
+                            f"✅ {sym} {side.upper()} входы:\n"
+                            + "\n".join(f"- {summary}" for summary in entry_summaries)
+                            + f"\nSL {sl:.2f} TP {tp:.2f}\nМаржа {total_margin_used:.2f} USDT, плечо x{symbol_leverage}"
                         )
+                        open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
                         positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                         current_position = positions_map.get(sym)
+
                     except Exception as e:
                         err_text = str(e)
                         open_error = err_text
@@ -5893,6 +6182,17 @@ def run_cycle():
         end_balance_text = f"Баланс: {equity_end:.2f} USDT, доступно {available_end:.2f} USDT"
         log(f"🏁 Завершение сессии. {end_balance_text}", Fore.GREEN)
         send_tg(f"🏁 Завершение сессии. {end_balance_text}")
+    try:
+        history_entries = _load_equity_history()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        pnl_value, reference_equity = _compute_recent_pnl(history_entries, now_utc, equity_end)
+        if pnl_value is not None and reference_equity is not None:
+            pnl_message = f"PnL (6h): {pnl_value:+.2f} USDT (ref {reference_equity:.2f})"
+            log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
+            send_tg(pnl_message)
+        _update_equity_history(history_entries, now_utc, equity_end)
+    except Exception as exc_pnl:
+        log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
     end_dt = _current_log_time()
     end_stamp = end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     end_banner = f"{session_separator} END SESSION {end_stamp} {session_separator}"
