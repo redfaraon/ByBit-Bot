@@ -805,6 +805,9 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         '  "pairs": list of up to 8 symbols to analyze this cycle (mix bullish/bearish narratives based on news),\n'
         '  "timeframes": list of exactly two short timeframes (e.g., "30m","4h"),\n'
         '  "indicators": list containing exactly six items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one additional momentum/volatility indicator),\n'
+        '  "initial_timeframes": list of up to two primary timeframes to inspect first (e.g., ["30m","4h"]),\n'
+        '  "aggression": risk posture label (e.g., conservative, balanced, optimal, aggressive),\n'
+        '  "trade_horizon": trading horizon label (e.g., scalping, intraday, swing, midterm),\n'
         '  "max_positions": integer cap for concurrently open symbols (factor in current exposure + liquidity),\n'
         '  "next_run_minutes": float delay before the next cycle (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
         '  "notes": optional rationale.'
@@ -883,6 +886,36 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     universe_payload["indicators"] = normalized_indicators[:6]
     universe_payload["next_run_minutes"] = result.get("next_run_minutes")
     universe_payload["notes"] = result.get("notes")
+    raw_initial_timeframes = (
+        result.get("initial_timeframes")
+        or result.get("initialTimeframes")
+        or result.get("initial_tf")
+        or result.get("initialTf")
+    )
+    initial_timeframes: list[str] = []
+    if isinstance(raw_initial_timeframes, (list, tuple, set)):
+        items = list(raw_initial_timeframes)
+    elif isinstance(raw_initial_timeframes, str):
+        items = [part.strip() for part in raw_initial_timeframes.split(",")]
+    else:
+        items = []
+    for item in items:
+        if not item:
+            continue
+        normalized_tf = normalize_requested_timeframe(item, default="")
+        if normalized_tf and normalized_tf not in initial_timeframes:
+            initial_timeframes.append(normalized_tf)
+        if len(initial_timeframes) >= 2:
+            break
+    if not initial_timeframes and universe_payload["timeframes"]:
+        initial_timeframes = list(universe_payload["timeframes"][:2])
+    universe_payload["initial_timeframes"] = initial_timeframes[:2]
+    aggression_level = result.get("aggression") or result.get("riskProfile") or result.get("risk_profile")
+    trade_horizon = result.get("trade_horizon") or result.get("tradeHorizon") or result.get("horizon")
+    if aggression_level:
+        universe_payload["aggression"] = str(aggression_level).strip()
+    if trade_horizon:
+        universe_payload["trade_horizon"] = str(trade_horizon).strip()
     max_positions_value = None
     limit_sources: list[Any] = []
     limits_block = result.get("limits")
@@ -920,6 +953,13 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         "next_run_minutes": universe_payload.get("next_run_minutes"),
         "reason": universe_payload.get("notes"),
     }
+    if universe_payload.get("initial_timeframes"):
+        selection_result["initial_timeframes"] = list(universe_payload["initial_timeframes"])
+        selection_result["global_timeframes"] = list(universe_payload["initial_timeframes"])
+    if aggression_level:
+        selection_result["aggression"] = str(aggression_level).strip()
+    if trade_horizon:
+        selection_result["trade_horizon"] = str(trade_horizon).strip()
     if max_positions_value:
         selection_result["limits"] = {"max_positions": max_positions_value}
         selection_result["max_positions"] = max_positions_value
@@ -929,6 +969,13 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         "global_timeframes": universe_payload["timeframes"],
         "global_indicators": universe_payload["indicators"],
     }
+    if universe_payload.get("initial_timeframes"):
+        universe_state["initial_timeframes"] = list(universe_payload["initial_timeframes"])
+        universe_state["global_timeframes"] = list(universe_payload["initial_timeframes"])
+    if aggression_level:
+        universe_state["aggression"] = str(aggression_level).strip()
+    if trade_horizon:
+        universe_state["trade_horizon"] = str(trade_horizon).strip()
     if max_positions_value:
         universe_state["max_positions"] = max_positions_value
     return selection_result, universe_state, news_requests
@@ -2658,7 +2705,15 @@ def _load_equity_history() -> list[dict]:
             continue
         if not isinstance(ts, str) or not ts:
             continue
-        result.append({"timestamp": ts, "equity": equity_float})
+        realized_val = entry.get("realized")
+        try:
+            realized_float = float(realized_val)
+        except (TypeError, ValueError):
+            realized_float = None
+        payload = {"timestamp": ts, "equity": equity_float}
+        if realized_float is not None and math.isfinite(realized_float):
+            payload["realized"] = realized_float
+        result.append(payload)
     return result
 
 
@@ -2672,11 +2727,19 @@ def _save_equity_history(history: list[dict]) -> None:
         pass
 
 
-def _update_equity_history(history: list[dict], timestamp: datetime.datetime, equity: float) -> None:
+def _update_equity_history(
+    history: list[dict],
+    timestamp: datetime.datetime,
+    equity: float,
+    realized: float | None = None,
+) -> None:
     if not math.isfinite(equity):
         return
     ts = timestamp.astimezone(datetime.timezone.utc)
-    history.append({"timestamp": ts.isoformat(), "equity": float(equity)})
+    entry: dict[str, float | str] = {"timestamp": ts.isoformat(), "equity": float(equity)}
+    if realized is not None and math.isfinite(realized):
+        entry["realized"] = float(realized)
+    history.append(entry)
     cutoff = ts - datetime.timedelta(hours=max(PNL_LOOKBACK_HOURS * 6, 72))
     pruned: list[dict] = []
     for entry in history:
@@ -2690,22 +2753,89 @@ def _update_equity_history(history: list[dict], timestamp: datetime.datetime, eq
         if entry_ts.tzinfo is None:
             entry_ts = entry_ts.replace(tzinfo=datetime.timezone.utc)
         if entry_ts >= cutoff:
-            pruned.append({"timestamp": entry_ts.isoformat(), "equity": float(entry.get("equity", 0.0))})
+            payload = {
+                "timestamp": entry_ts.isoformat(),
+                "equity": float(entry.get("equity", 0.0)),
+            }
+            realized_val = entry.get("realized")
+            try:
+                realized_float = float(realized_val)
+            except (TypeError, ValueError):
+                realized_float = None
+            if realized_float is not None and math.isfinite(realized_float):
+                payload["realized"] = realized_float
+            pruned.append(payload)
     history[:] = pruned
     _save_equity_history(history)
+
+
+def _extract_realized_pnl(balance: dict | None) -> float | None:
+    if not isinstance(balance, dict):
+        return None
+
+    def to_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    priority_map = {
+        "cumrealisedpnl": 1,
+        "cumrealizedpnl": 1,
+        "totalrealisedpnl": 2,
+        "totalrealizedpnl": 2,
+        "totalrpl": 3,
+        "sessionrpl": 4,
+        "realisedpnl": 5,
+        "realizedpnl": 5,
+        "rpl": 6,
+    }
+    best: tuple[int, float] | None = None
+
+    def visit(obj):
+        nonlocal best
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                lower_key = str(key).lower()
+                if isinstance(value, (dict, list, tuple, set)):
+                    visit(value)
+                    continue
+                if lower_key in priority_map or any(hint in lower_key for hint in priority_map):
+                    numeric = to_float(value)
+                    if numeric is None:
+                        continue
+                    priority = priority_map.get(lower_key)
+                    if priority is None:
+                        for hint, rank in priority_map.items():
+                            if hint in lower_key:
+                                priority = rank
+                                break
+                    if priority is None:
+                        priority = 50
+                    if best is None or priority < best[0]:
+                        best = (priority, numeric)
+        elif isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                visit(item)
+
+    visit(balance)
+    return best[1] if best else None
 
 
 def _compute_recent_pnl(
     history: list[dict],
     timestamp: datetime.datetime,
     current_equity: float,
+    current_realized: float | None = None,
     hours: float = PNL_LOOKBACK_HOURS,
-) -> tuple[float | None, float | None]:
+) -> tuple[float | None, float | None, str | None]:
     if not history or not math.isfinite(current_equity) or hours <= 0:
-        return None, None
+        return None, None, None
     ts_now = timestamp.astimezone(datetime.timezone.utc)
     cutoff = ts_now - datetime.timedelta(hours=hours)
-    candidates: list[tuple[datetime.datetime, float]] = []
+    candidates: list[tuple[datetime.datetime, float, float | None]] = []
     for entry in history:
         entry_ts_raw = entry.get("timestamp")
         if not isinstance(entry_ts_raw, str):
@@ -2724,21 +2854,39 @@ def _compute_recent_pnl(
             continue
         if not math.isfinite(equity_val):
             continue
-        candidates.append((entry_ts, equity_val))
+        realized_val = entry.get("realized")
+        try:
+            realized_val = float(realized_val)
+        except (TypeError, ValueError):
+            realized_val = None
+        if realized_val is not None and not math.isfinite(realized_val):
+            realized_val = None
+        candidates.append((entry_ts, equity_val, realized_val))
     if not candidates:
-        return None, None
+        return None, None, None
     candidates.sort(key=lambda item: item[0])
     reference_equity = None
-    for entry_ts, value in candidates:
+    reference_realized = None
+    for entry_ts, equity_val, realized_val in candidates:
         if entry_ts >= cutoff:
-            reference_equity = value
+            reference_equity = equity_val
+            reference_realized = realized_val
             break
     if reference_equity is None:
         reference_equity = candidates[0][1]
+        reference_realized = candidates[0][2]
     if reference_equity is None or not math.isfinite(reference_equity):
-        return None, None
+        return None, None, None
+    if (
+        current_realized is not None
+        and reference_realized is not None
+        and math.isfinite(current_realized)
+        and math.isfinite(reference_realized)
+    ):
+        pnl_value = current_realized - reference_realized
+        return pnl_value, reference_realized, "realized"
     pnl_value = current_equity - reference_equity
-    return pnl_value, reference_equity
+    return pnl_value, reference_equity, "equity"
 
 def fetch_df(exchange, symbol, tf):
     resolved_symbol = _resolve_symbol_alias(symbol) or symbol
@@ -2820,6 +2968,9 @@ def fetch_usdt_equity(exchange):
         total_val = 0.0
     if free_val < 0:
         free_val = 0.0
+    realized_val = _extract_realized_pnl(balance)
+    if isinstance(balance, dict):
+        balance["_realizedPnl"] = realized_val
     return total_val, free_val, balance
 
 
@@ -4748,11 +4899,24 @@ def run_cycle():
     if max_positions_limit > 0 and open_positions is None:
         log("⚠️ Не удалось определить количество открытых позиций — лимит по позициям отключён на этот цикл", Fore.YELLOW)
         open_positions = None
-    equity, available_margin, _ = fetch_usdt_equity(ex)
+    equity, available_margin, balance_snapshot_start = fetch_usdt_equity(ex)
+    realized_start = None
+    if isinstance(balance_snapshot_start, dict):
+        realized_start = balance_snapshot_start.get("_realizedPnl")
     if equity <= 0:
         equity = 64.0
     if available_margin <= 0:
         available_margin = equity
+    try:
+        history_bootstrap = _load_equity_history()
+        _update_equity_history(
+            history_bootstrap,
+            datetime.datetime.now(datetime.timezone.utc),
+            equity,
+            realized_start,
+        )
+    except Exception:
+        pass
     session_dt = _current_log_time()
     session_stamp = session_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     session_separator = "=" * 56
@@ -4766,6 +4930,9 @@ def run_cycle():
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
     cycle_counter = (os.getenv("BYBITBOT_CYCLE_COUNTER") or "").strip()
+    cycle_descriptor = ""
+    commit_descriptor = ""
+    commit_short = ""
     if source_label and source_ref:
         cycle_label_parts: list[str] = []
         if cycle_kind or cycle_mode:
@@ -4778,20 +4945,29 @@ def run_cycle():
             else:
                 cycle_label_parts.append(f"#{cycle_counter}")
         cycle_segment = f"[{cycle_label_parts[0]}] " if cycle_label_parts else ""
+        cycle_descriptor = cycle_segment.strip()
+        source_message_line = (source_message or "").splitlines()[0].strip() if source_message else ""
         git_line = f"[GIT] {cycle_segment}{source_ref} - {source_label}"
-        if source_message:
-            git_line += f": {source_message}"
+        if source_message_line:
+            git_line += f": {source_message_line}"
         if source_context:
             git_line += f" ({source_context})"
         _send_git_notification(git_line)
+        commit_short = (source_ref or "")[:8]
+        commit_descriptor = commit_short or (source_ref or "")
+        if source_message_line:
+            commit_descriptor = f"{commit_descriptor} {source_message_line}"
     else:
         commit_hash, commit_message, commit_ts = get_current_commit_info()
         if commit_hash:
             short_hash = commit_hash[:8]
-            message_text = commit_message or "no commit message"
+            message_text = (commit_message or "no commit message").splitlines()[0]
             timestamp_text = commit_ts or "timestamp unavailable"
             git_line = f"[GIT] {short_hash} @ {timestamp_text} - {message_text} (version {BOT_VERSION})"
             _send_git_notification(git_line)
+            commit_short = short_hash
+            commit_descriptor = f"{short_hash} {message_text}"
+    commit_descriptor = commit_descriptor.strip()
     last_equity = equity
     last_available_margin = available_margin
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
@@ -4894,6 +5070,33 @@ def run_cycle():
                 break
         if max_positions_limit != base_max_positions and max_positions_limit > 0:
             log(f"[INFO] Model requested max open positions: {max_positions_limit}", Fore.LIGHTBLACK_EX)
+        initial_timeframes = selection_result.get("initial_timeframes") or selection_result.get("global_timeframes") or []
+        aggression_level = selection_result.get("aggression")
+        trade_horizon = selection_result.get("trade_horizon")
+        overview_lines: list[str] = []
+        if initial_timeframes:
+            overview_lines.append(f"TF: {', '.join(initial_timeframes[:2])}")
+        if aggression_level:
+            overview_lines.append(f"Aggression: {aggression_level}")
+        if trade_horizon:
+            overview_lines.append(f"Horizon: {trade_horizon}")
+        if max_positions_limit > 0:
+            overview_lines.append(f"Max positions: {max_positions_limit}")
+        preview_pairs = selection_result.get("pairs") or []
+        if preview_pairs:
+            overview_lines.append("Pairs: " + ", ".join(preview_pairs[:6]))
+        commit_display = (commit_descriptor or commit_short).strip()
+        if commit_display:
+            if len(commit_display) > 80:
+                commit_display = commit_display[:77] + "..."
+            overview_lines.append(f"Commit: {commit_display}")
+        header_tokens = ["[UNIVERSE]"]
+        cycle_display = (cycle_descriptor or "").strip()
+        if cycle_display:
+            header_tokens.append(cycle_display)
+        if overview_lines:
+            header = " ".join(header_tokens)
+            send_tg(header + "\n" + "\n".join(f"- {line}" for line in overview_lines))
 
     open_orders_prefetch: dict[str, list] = {}
     order_symbols: set[str] = set()
@@ -6254,8 +6457,9 @@ def run_cycle():
         send_tg(f"ℹ️ Версия {version_display}", **send_kwargs)
     else:
         send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
+    balance_snapshot_end: dict[str, Any] | None = None
     try:
-        equity_end, available_end, _ = fetch_usdt_equity(ex)
+        equity_end, available_end, balance_snapshot_end = fetch_usdt_equity(ex)
     except Exception as exc_equity:
         end_balance_text = f"⚠️ Не удалось обновить баланс: {exc_equity}"
         log(end_balance_text, Fore.YELLOW)
@@ -6264,17 +6468,26 @@ def run_cycle():
         end_balance_text = f"Баланс: {equity_end:.2f} USDT, доступно {available_end:.2f} USDT"
         log(f"🏁 Завершение сессии. {end_balance_text}", Fore.GREEN)
         send_tg(f"🏁 Завершение сессии. {end_balance_text}")
-    try:
-        history_entries = _load_equity_history()
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        pnl_value, reference_equity = _compute_recent_pnl(history_entries, now_utc, equity_end)
-        if pnl_value is not None and reference_equity is not None:
-            pnl_message = f"PnL (6h): {pnl_value:+.2f} USDT (ref {reference_equity:.2f})"
-            log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
-            send_tg(pnl_message)
-        _update_equity_history(history_entries, now_utc, equity_end)
-    except Exception as exc_pnl:
-        log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
+        realized_end = None
+        if isinstance(balance_snapshot_end, dict):
+            realized_end = balance_snapshot_end.get("_realizedPnl")
+        try:
+            history_entries = _load_equity_history()
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            pnl_value, reference_value, pnl_basis = _compute_recent_pnl(
+                history_entries,
+                now_utc,
+                equity_end,
+                realized_end,
+            )
+            if pnl_value is not None and reference_value is not None:
+                basis_label = "realized" if pnl_basis == "realized" else "equity"
+                pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
+                log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
+                send_tg(pnl_message)
+            _update_equity_history(history_entries, now_utc, equity_end, realized_end)
+        except Exception as exc_pnl:
+            log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
     end_dt = _current_log_time()
     end_stamp = end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     end_banner = f"{session_separator} END SESSION {end_stamp} {session_separator}"
