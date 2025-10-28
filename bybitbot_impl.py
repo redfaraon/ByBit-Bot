@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.27.7
+# Version: 2025.10.28.1
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.27.7"
+BOT_VERSION = "2025.10.28.1"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -54,6 +54,7 @@ DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
 PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
 ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
 _LAST_COMMIT_HASH: Optional[str] = None
+SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -320,6 +321,96 @@ def safe_int(val):
     except (ValueError, TypeError):
         return None
     return None
+
+
+def _pick_positive_float(*values) -> float | None:
+    for value in values:
+        candidate = safe_float(value)
+        if candidate is not None and candidate > 0:
+            return float(candidate)
+    return None
+
+
+def _get_symbol_trade_rules(exchange, symbol: str) -> dict[str, float | None]:
+    cache_key = symbol
+    cached = SYMBOL_RULES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    market = None
+    try:
+        market = exchange.market(symbol)
+    except Exception:
+        market = None
+    if not isinstance(market, dict):
+        markets = getattr(exchange, "markets", {}) or {}
+        if isinstance(markets, dict):
+            market = markets.get(symbol)
+    rules: dict[str, float | None] = {
+        "min_qty": None,
+        "min_notional": None,
+        "qty_step": None,
+        "price_step": None,
+        "contract_size": None,
+    }
+    if isinstance(market, dict):
+        limits = market.get("limits") or {}
+        amount_limits = limits.get("amount") or {}
+        cost_limits = limits.get("cost") or {}
+        price_limits = limits.get("price") or {}
+        precision = market.get("precision") or {}
+        info = market.get("info") or {}
+        lot_filter = info.get("lotSizeFilter") or info.get("lot_size_filter") or {}
+        price_filter = info.get("priceFilter") or info.get("price_filter") or {}
+        min_qty = _pick_positive_float(
+            amount_limits.get("min"),
+            market.get("minAmount"),
+            market.get("lotSize"),
+            precision.get("amount"),
+            lot_filter.get("minOrderQty"),
+            lot_filter.get("minTradingQty"),
+            info.get("minOrderQty"),
+            info.get("minTradingQty"),
+        )
+        qty_step = _pick_positive_float(
+            amount_limits.get("step"),
+            precision.get("amount"),
+            lot_filter.get("qtyStep"),
+            lot_filter.get("stepSize"),
+            info.get("qtyStep"),
+        )
+        min_notional = _pick_positive_float(
+            cost_limits.get("min"),
+            info.get("minNotional"),
+            lot_filter.get("minOrderValue"),
+            price_filter.get("minOrderValue"),
+            info.get("minOrderValue"),
+        )
+        price_step = _pick_positive_float(
+            price_limits.get("min"),
+            price_limits.get("step"),
+            price_limits.get("tickSize"),
+            precision.get("price"),
+            price_filter.get("tickSize"),
+            info.get("tickSize"),
+        )
+        contract_size = _pick_positive_float(
+            market.get("contractSize"),
+            market.get("contract_size"),
+            info.get("contractSize"),
+            info.get("lotSize"),
+        )
+        if min_qty:
+            rules["min_qty"] = float(min_qty)
+        if qty_step:
+            rules["qty_step"] = float(qty_step)
+        if min_notional:
+            rules["min_notional"] = float(min_notional)
+        if price_step:
+            rules["price_step"] = float(price_step)
+        if contract_size:
+            rules["contract_size"] = float(contract_size)
+    SYMBOL_RULES_CACHE[cache_key] = rules
+    return rules
 
 
 def _resolve_symbol_leverage(decision: dict, symbol_meta: dict, current_position: dict | None, default: int | None = None) -> int:
@@ -3260,6 +3351,113 @@ def _current_request_token_cap() -> Optional[int]:
     return None
 
 
+def _fallback_momentum_decision(
+    symbol: str,
+    df_30m: pd.DataFrame,
+    higher_trend_bias: str | None,
+    current_position: dict | None,
+) -> dict[str, Any] | None:
+    if df_30m is None or df_30m.empty:
+        return None
+    try:
+        last_row = df_30m.iloc[-1]
+    except Exception:
+        return None
+    ema20_val = safe_float(last_row.get("ema20"))
+    ema50_val = safe_float(last_row.get("ema50"))
+    rsi_val = safe_float(last_row.get("rsi"))
+    close_price = safe_float(last_row.get("close"))
+    if ema20_val is None or ema50_val is None or close_price is None:
+        return None
+
+    bias: str | None = None
+    if ema20_val > ema50_val * (1 + 1e-6):
+        bias = "buy"
+    elif ema50_val > ema20_val * (1 + 1e-6):
+        bias = "sell"
+
+    position_amount = safe_float(
+        (current_position or {}).get("amount")
+        or (current_position or {}).get("contracts")
+    ) or 0.0
+    position_side_raw = (current_position or {}).get("side") or ""
+    position_side = position_side_raw.lower()
+    if not position_side and position_amount != 0:
+        position_side = "buy" if position_amount > 0 else "sell"
+
+    def confidence_bonus(side: str) -> float:
+        if higher_trend_bias and higher_trend_bias == side:
+            return 0.08
+        if higher_trend_bias:
+            return 0.02
+        return 0.04
+
+    if position_amount != 0:
+        if position_side in ("buy", "long"):
+            if bias == "sell" or (rsi_val is not None and rsi_val < 45):
+                return {
+                    "symbol": symbol,
+                    "action": "close",
+                    "confidence": min(0.9, 0.72 + confidence_bonus("sell")),
+                    "reason": "fallback: exit long as EMA trend flipped",
+                    "needs": [],
+                    "source": "fallback",
+                }
+            return {
+                "symbol": symbol,
+                "action": "hold",
+                "confidence": min(0.9, 0.70 + confidence_bonus("buy")),
+                "reason": "fallback: long bias intact; keep protections fresh",
+                "needs": [],
+                "source": "fallback",
+            }
+        if position_side in ("sell", "short"):
+            if bias == "buy" or (rsi_val is not None and rsi_val > 55):
+                return {
+                    "symbol": symbol,
+                    "action": "close",
+                    "confidence": min(0.9, 0.72 + confidence_bonus("buy")),
+                    "reason": "fallback: exit short as EMA trend flipped",
+                    "needs": [],
+                    "source": "fallback",
+                }
+            return {
+                "symbol": symbol,
+                "action": "hold",
+                "confidence": min(0.9, 0.70 + confidence_bonus("sell")),
+                "reason": "fallback: short bias intact; keep protections fresh",
+                "needs": [],
+                "source": "fallback",
+            }
+        return None
+
+    if bias == "buy":
+        if rsi_val is None or 48 <= rsi_val <= 70:
+            return {
+                "symbol": symbol,
+                "action": "open",
+                "side": "buy",
+                "confidence": min(0.9, 0.68 + confidence_bonus("buy")),
+                "reason": "fallback: EMA20>EMA50 with supportive RSI momentum",
+                "needs": [],
+                "source": "fallback",
+                "notes": {"fallback_strategy": "ema_rsi_momentum"},
+            }
+    elif bias == "sell":
+        if rsi_val is None or 30 <= rsi_val <= 52:
+            return {
+                "symbol": symbol,
+                "action": "open",
+                "side": "sell",
+                "confidence": min(0.9, 0.68 + confidence_bonus("sell")),
+                "reason": "fallback: EMA20<EMA50 with RSI confirming weakness",
+                "needs": [],
+                "source": "fallback",
+                "notes": {"fallback_strategy": "ema_rsi_momentum"},
+            }
+    return None
+
+
 def _safe_round(value: Optional[float], digits: int = 8) -> Optional[float]:
     if value is None:
         return None
@@ -4204,6 +4402,23 @@ def ai_decision(
         "30m": min(DEFAULT_CONTEXT_30M, len(df_30m)),
         "4h": min(DEFAULT_CONTEXT_4H, len(higher_tf))
     }
+    def fallback_due_to(trigger: str, extra_notes: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        fallback_decision = _fallback_momentum_decision(symbol, df_30m, higher_trend_bias, current_position)
+        if not fallback_decision:
+            return None
+        base_reason = fallback_decision.get("reason") or "fallback strategy engaged"
+        fallback_decision["reason"] = f"{base_reason} (fallback trigger: {trigger})"
+        notes_payload: dict[str, Any] = {}
+        existing_notes = fallback_decision.get("notes")
+        if isinstance(existing_notes, dict):
+            notes_payload.update(existing_notes)
+        notes_payload.setdefault("fallback_trigger", trigger)
+        if extra_notes:
+            for key, value in extra_notes.items():
+                if key not in notes_payload:
+                    notes_payload[key] = value
+        fallback_decision["notes"] = notes_payload
+        return fallback_decision
     current_context = {}
     position_payload = None
     if current_position:
@@ -4452,9 +4667,15 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         per_cap_init = _current_request_token_cap()
         if per_cap_init and tokens_init > per_cap_init:
             log(f"⚠️ {symbol}: запрос initial превышает кап {per_cap_init} токенов", Fore.YELLOW)
+            fallback_option = fallback_due_to("token cap exceeded (initial)")
+            if fallback_option:
+                return fallback_option
             return {"symbol": symbol, "action": "skip", "reason": "token cap exceeded"}
         if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
             log(f"⚠️ {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
+            fallback_option = fallback_due_to("token budget exhausted (initial)")
+            if fallback_option:
+                return fallback_option
             return {"symbol": symbol, "action": "skip", "reason": "token budget exceeded"}
         _log_ai_request(AI_MODEL, tokens_init, f"{symbol} initial decision")
 
@@ -4800,10 +5021,22 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             log(f"⚠️ {symbol}: запрос extra превышает кап {per_cap_extra} токенов", Fore.YELLOW)
             decision["needs_followup"] = needs
             decision.pop("needs", None)
+            fallback_option = fallback_due_to(
+                "token cap exceeded (extra)",
+                {"needs_carry_over": needs, "fallback_stage": "extra"},
+            )
+            if fallback_option:
+                return fallback_option
             return ensure_skip_reason(decision)
         if not _ensure_token_budget(tokens_extra, AI_MODEL, f"{symbol} extra decision"):
             log(f"⚠️ {symbol}: пропуск extra-запроса из-за лимита токенов", Fore.YELLOW)
             decision["needs_followup"] = needs
+            fallback_option = fallback_due_to(
+                "token budget exhausted (extra)",
+                {"needs_carry_over": needs, "fallback_stage": "extra"},
+            )
+            if fallback_option:
+                return fallback_option
             return ensure_skip_reason(decision)
         _log_ai_request(AI_MODEL, tokens_extra, f"{symbol} extra decision")
         start_extra = time.perf_counter()
@@ -4847,6 +5080,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
 
 # --- Основная логика ---
 def run_cycle():
+    global SYMBOL_RULES_CACHE
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
@@ -4858,6 +5092,7 @@ def run_cycle():
         reason = f"♻️ Обнаружен новый коммит {short_hash}, перезапускаем бота для загрузки обновлений."
         _restart_with_latest_code(reason)
     ex = init_exchange()
+    SYMBOL_RULES_CACHE.clear()
     ex.load_markets()
     markets_set = set(ex.symbols or [])
     if not markets_set:
@@ -5878,6 +6113,10 @@ def run_cycle():
                         send_tg(f"⚠️ {sym}: недостаточно данных для открытия позиции")
                         continue
                     df["atr"] = atr(df,14)
+                    trade_rules = _get_symbol_trade_rules(ex, sym)
+                    min_qty_rule = trade_rules.get("min_qty") or 0.0
+                    min_notional_rule = trade_rules.get("min_notional") or 0.0
+                    min_notional_required = max(MIN_NOTIONAL_USDT, min_notional_rule or 0.0)
                     last_row = df.iloc[-1]
                     price = float(last_row.get("close") or 0)
                     atrv = float(last_row.get("atr") or 0)
@@ -5936,21 +6175,19 @@ def run_cycle():
                             send_tg(f"⚠️ {sym}: недостаточно свободного баланса ({available_margin:.2f} USDT)")
                             continue
                         qty = risk_capital / risk_distance
+                        if min_qty_rule and qty < min_qty_rule:
+                            qty = min_qty_rule
                         if not math.isfinite(qty) or qty <= 0:
-                            log(f"⚠️ Расчёт объёма дал некорректное значение для {sym}", Fore.YELLOW)
+                            log(f"?? ?????? ???? ??? ???????? ?????? ??? {sym}", Fore.YELLOW)
                             continue
                         notional = qty * price
                         if not math.isfinite(notional) or notional <= 0:
-                            log(f"⚠️ Невозможно определить нотионал для {sym}", Fore.YELLOW)
+                            log(f"?? ?????????? ???????? ?????? ??? {sym}", Fore.YELLOW)
                             continue
-                    if not math.isfinite(qty) or qty <= 0:
-                        log(f"⚠️ Объём сделки некорректен для {sym}", Fore.YELLOW)
-                        continue
-                    if not math.isfinite(notional) or notional <= 0:
-                        log(f"⚠️ Нотионал сделки некорректен для {sym}", Fore.YELLOW)
-                        continue
-                    if notional < MIN_NOTIONAL_USDT:
-                        qty = MIN_NOTIONAL_USDT / price
+                    if notional < min_notional_required:
+                        min_qty_from_notional = min_notional_required / price if price > 0 else min_notional_required
+                        target_qty = max(min_qty_rule, min_qty_from_notional) if min_qty_rule else min_qty_from_notional
+                        qty = target_qty
                         notional = qty * price
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
                     max_notional = effective_margin * max(1, symbol_leverage)
@@ -5958,7 +6195,7 @@ def run_cycle():
                         log(f"⛔ Доступная маржа для {sym} исчерпана", Fore.YELLOW)
                         send_tg(f"⛔ {sym}: доступная маржа исчерпана")
                         continue
-                    if max_notional < MIN_NOTIONAL_USDT:
+                    if max_notional < min_notional_required:
                         log(f"⛔ Недостаточно маржи для минимального ордера {sym} (доступно {available_margin:.2f} USDT)", Fore.YELLOW)
                         send_tg(f"⛔ {sym}: маржа меньше минимального объёма (доступно {available_margin:.2f} USDT)")
                         continue
@@ -5979,9 +6216,9 @@ def run_cycle():
                         log(f"⚠️ После округления объём стал ≤ 0 для {sym}", Fore.YELLOW)
                         continue
                     notional = qty * price
-                    if notional < MIN_NOTIONAL_USDT:
-                        log(f"⛔ После округления объём {sym} ниже минимального ({notional:.2f} USDT)", Fore.YELLOW)
-                        send_tg(f"⛔ {sym}: объём после округления ниже минимума ({notional:.2f} USDT)")
+                    if notional < min_notional_required:
+                        log(f"[WARN] {sym}: notional {notional:.2f} USDT below minimum {min_notional_required:.2f} USDT, skipping", Fore.YELLOW)
+                        send_tg(f"[WARN] {sym}: size {notional:.2f} USDT below exchange minimum {min_notional_required:.2f} USDT")
                         continue
                     try:
                         position_idx = get_position_idx(side)
@@ -6000,6 +6237,10 @@ def run_cycle():
                             normalized_entries.append((share_val, offset_val))
                         if not normalized_entries:
                             normalized_entries = [(1.0, 0.0)]
+                        if min_qty_rule and len(normalized_entries) > 1:
+                            min_total_layers = min_qty_rule * len(normalized_entries)
+                            if qty < min_total_layers:
+                                normalized_entries = [(1.0, 0.0)]
                         ratio_total = sum(item[0] for item in normalized_entries) or 1.0
                         remaining_qty = qty
                         entry_summaries: list[str] = []
@@ -6029,22 +6270,40 @@ def run_cycle():
                                 precise_qty = float(round(target_qty, 8))
                             if precise_qty <= 0:
                                 continue
-                            layer_notional = precise_qty * layer_price
-                            if layer_notional < MIN_NOTIONAL_USDT:
-                                min_qty = MIN_NOTIONAL_USDT / layer_price
-                                if idx < total_layers - 1 and min_qty > remaining_qty:
-                                    continue
-                                min_qty = min(min_qty, max(remaining_qty, 0.0))
-                                if min_qty <= 0:
+                            if min_qty_rule and precise_qty < min_qty_rule:
+                                adjusted_min_qty = min(min_qty_rule, max(remaining_qty, 0.0))
+                                if adjusted_min_qty <= 0:
                                     continue
                                 try:
-                                    precise_qty = float(ex.amount_to_precision(sym, min_qty))
+                                    precise_qty = float(ex.amount_to_precision(sym, adjusted_min_qty))
                                 except Exception:
-                                    precise_qty = float(round(min_qty, 8))
+                                    precise_qty = float(round(adjusted_min_qty, 8))
+                                if precise_qty < min_qty_rule:
+                                    continue
+                            layer_notional = precise_qty * layer_price
+                            if layer_notional < min_notional_required:
+                                min_qty_needed = min_notional_required / layer_price if layer_price > 0 else min_notional_required
+                                min_qty_target = max(min_qty_rule, min_qty_needed) if min_qty_rule else min_qty_needed
+                                if idx < total_layers - 1 and min_qty_target > remaining_qty:
+                                    continue
+                                min_qty_target = min(min_qty_target, max(remaining_qty, 0.0))
+                                if min_qty_target <= 0:
+                                    continue
+                                try:
+                                    precise_qty = float(ex.amount_to_precision(sym, min_qty_target))
+                                except Exception:
+                                    precise_qty = float(round(min_qty_target, 8))
                                 if precise_qty <= 0:
                                     continue
+                                if min_qty_rule and precise_qty < min_qty_rule:
+                                    if idx < total_layers - 1 and remaining_qty < min_qty_rule - 1e-8:
+                                        continue
+                                    try:
+                                        precise_qty = float(ex.amount_to_precision(sym, min_qty_rule))
+                                    except Exception:
+                                        precise_qty = float(round(min_qty_rule, 8))
                                 layer_notional = precise_qty * layer_price
-                                if layer_notional < MIN_NOTIONAL_USDT:
+                                if layer_notional < min_notional_required:
                                     continue
                             layer_params = dict(base_params)
                             ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
@@ -6062,17 +6321,27 @@ def run_cycle():
                             if precise_qty <= 0:
                                 raise RuntimeError("no entry orders placed")
                             fallback_notional = precise_qty * fallback_price
-                            if fallback_notional < MIN_NOTIONAL_USDT:
-                                min_qty = MIN_NOTIONAL_USDT / fallback_price
-                                min_qty = min(min_qty, qty)
+                            if fallback_notional < min_notional_required:
+                                min_qty_needed = min_notional_required / fallback_price if fallback_price > 0 else min_notional_required
+                                min_qty_target = max(min_qty_rule, min_qty_needed) if min_qty_rule else min_qty_needed
+                                min_qty_target = min(min_qty_target, qty)
+                                if min_qty_target <= 0:
+                                    raise RuntimeError("no entry orders placed")
                                 try:
-                                    precise_qty = float(ex.amount_to_precision(sym, min_qty))
+                                    precise_qty = float(ex.amount_to_precision(sym, min_qty_target))
                                 except Exception:
-                                    precise_qty = float(round(min_qty, 8))
+                                    precise_qty = float(round(min_qty_target, 8))
                                 if precise_qty <= 0:
                                     raise RuntimeError("no entry orders placed")
+                                if min_qty_rule and precise_qty < min_qty_rule:
+                                    if qty < min_qty_rule - 1e-8:
+                                        raise RuntimeError("no entry orders placed")
+                                    try:
+                                        precise_qty = float(ex.amount_to_precision(sym, min_qty_rule))
+                                    except Exception:
+                                        precise_qty = float(round(min_qty_rule, 8))
                                 fallback_notional = precise_qty * fallback_price
-                                if fallback_notional < MIN_NOTIONAL_USDT:
+                                if fallback_notional < min_notional_required:
                                     raise RuntimeError("no entry orders placed")
                             layer_params = dict(base_params)
                             ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)

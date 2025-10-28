@@ -142,3 +142,8 @@ Recent commits (last 8)
 - Detect failed open orders and mark them as such in session summaries, surfacing the exchange error text.
 - Log planner aliases but avoid claiming a position opened when the order was rejected.
 - Version metadata bumped for loader, impl, and stable builds.
+
+2025.10.28.1
+- Enforced Bybit order sizing to honor symbol min quantity/notional, eliminating 110043 rejections.
+- Added EMA/RSI fallback decisioning when OpenAI token limits hit so cycles still trade instead of skipping.
+- Cached exchange trade rules per run and bumped version metadata.
