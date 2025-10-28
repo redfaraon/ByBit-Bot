@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.1
+# Version: 2025.10.28.2
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -40,7 +40,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.1"
+BOT_VERSION = "2025.10.28.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -117,6 +117,8 @@ PAIR_PREFETCH_LIMIT = int(os.getenv("PAIR_PREFETCH_LIMIT", "30"))
 
 SYMBOL_ALIASES = {
     "MATIC/USDT:USDT": "POL/USDT:USDT",
+    "SHIB/USDT:USDT": "SHIB1000/USDT:USDT",
+    "SHIB/USDT": "SHIB1000/USDT:USDT",
 }
 
 for alias, target in SYMBOL_ALIASES.items():
@@ -2913,6 +2915,148 @@ def _extract_realized_pnl(balance: dict | None) -> float | None:
 
     visit(balance)
     return best[1] if best else None
+
+
+def _extract_closed_pnl_from_payload(payload: Any) -> float | None:
+    """
+    Try to find a numeric closed/realized PnL field inside an order/trade payload.
+    Ignores unrealized/floating keys.
+    """
+    if isinstance(payload, dict):
+        candidates: list[float] = []
+        for key, value in payload.items():
+            lower_key = str(key).lower()
+            if isinstance(value, (dict, list, tuple, set)):
+                nested = _extract_closed_pnl_from_payload(value)
+                if nested is not None:
+                    candidates.append(nested)
+                continue
+            if "pnl" not in lower_key and "rpl" not in lower_key:
+                continue
+            if any(term in lower_key for term in ("unreal", "floating", "u_pnl")):
+                continue
+            if not any(term in lower_key for term in ("closed", "close", "realised", "realized", "realized", "settled", "order", "rpl", "realisedpnl", "realizedpnl")) and lower_key not in {"pnl", "rpl"}:
+                continue
+            numeric = safe_float(value)
+            if numeric is not None:
+                candidates.append(numeric)
+        if candidates:
+            return candidates[0]
+    elif isinstance(payload, (list, tuple, set)):
+        for item in payload:
+            extracted = _extract_closed_pnl_from_payload(item)
+            if extracted is not None:
+                return extracted
+    return None
+
+
+def _collect_recent_closed_pnl(
+    exchange,
+    symbols: Sequence[str],
+    window_start: datetime.datetime,
+    window_end: datetime.datetime | None = None,
+    *,
+    limit_per_symbol: int = 200,
+) -> tuple[float | None, int, list[str]]:
+    """
+    Sum realized PnL from closed orders (and, if needed, trades) within [window_start, window_end].
+    Returns (total_pnl, fill_count, warnings).
+    """
+    if not symbols:
+        return None, 0, []
+    warnings: list[str] = []
+    since_ms = int(window_start.timestamp() * 1000)
+    until_ms = int(window_end.timestamp() * 1000) if window_end else None
+    markets_available = set(getattr(exchange, "markets", {}) or {})
+    total_pnl = 0.0
+    fill_count = 0
+    seen_order_ids: set[str] = set()
+    normalized_symbols = []
+    for sym in symbols:
+        if not sym:
+            continue
+        if markets_available and sym not in markets_available:
+            continue
+        normalized_symbols.append(sym)
+    # Prefer closed orders first
+    for symbol in normalized_symbols:
+        try:
+            orders = exchange.fetch_closed_orders(symbol, since=since_ms, limit=limit_per_symbol)
+        except Exception as exc:
+            warnings.append(f"[PnL] fetch_closed_orders failed for {symbol}: {exc}")
+            continue
+        if not orders:
+            continue
+        for order in orders:
+            order_ts = order.get("timestamp") or order.get("lastTradeTimestamp")
+            if order_ts is not None:
+                try:
+                    order_ts = int(order_ts)
+                except (TypeError, ValueError):
+                    order_ts = None
+            if order_ts is not None and order_ts < since_ms:
+                continue
+            if until_ms is not None and order_ts is not None and order_ts > until_ms:
+                continue
+            order_id = order.get("id")
+            if order_id and order_id in seen_order_ids:
+                continue
+            pnl_val = _extract_closed_pnl_from_payload(order)
+            if pnl_val is None:
+                pnl_val = _extract_closed_pnl_from_payload(order.get("info"))
+            if pnl_val is None:
+                continue
+            if order_id:
+                seen_order_ids.add(order_id)
+            total_pnl += pnl_val
+            fill_count += 1
+    if fill_count > 0:
+        return total_pnl, fill_count, warnings
+    # Fallback to trade history if orders did not expose realised PnL
+    seen_trade_ids: set[str] = set()
+    for symbol in normalized_symbols:
+        try:
+            trades = exchange.fetch_my_trades(symbol, since=since_ms, limit=limit_per_symbol)
+        except Exception as exc:
+            warnings.append(f"[PnL] fetch_my_trades failed for {symbol}: {exc}")
+            continue
+        if not trades:
+            continue
+        for trade in trades:
+            trade_ts = trade.get("timestamp")
+            if trade_ts is not None:
+                try:
+                    trade_ts = int(trade_ts)
+                except (TypeError, ValueError):
+                    trade_ts = None
+            if trade_ts is not None and trade_ts < since_ms:
+                continue
+            if until_ms is not None and trade_ts is not None and trade_ts > until_ms:
+                continue
+            trade_id = trade.get("id")
+            if trade_id and trade_id in seen_trade_ids:
+                continue
+            pnl_val = _extract_closed_pnl_from_payload(trade)
+            if pnl_val is None:
+                pnl_val = _extract_closed_pnl_from_payload(trade.get("info"))
+            fee_cost = None
+            fee_currency = None
+            fee = trade.get("fee")
+            if isinstance(fee, dict):
+                fee_cost = safe_float(fee.get("cost"))
+                fee_currency = str(fee.get("currency") or "").upper()
+            if pnl_val is None:
+                # Without explicit PnL we cannot infer from fills accurately; skip.
+                continue
+            if trade_id:
+                seen_trade_ids.add(trade_id)
+            total_pnl += pnl_val
+            if fee_cost is not None and fee_currency in {"USDT", "USDC", "USD"}:
+                total_pnl -= fee_cost
+            fill_count += 1
+    if fill_count > 0:
+        return total_pnl, fill_count, warnings
+    return None, 0, warnings
 
 
 def _compute_recent_pnl(
@@ -6743,17 +6887,40 @@ def run_cycle():
         try:
             history_entries = _load_equity_history()
             now_utc = datetime.datetime.now(datetime.timezone.utc)
-            pnl_value, reference_value, pnl_basis = _compute_recent_pnl(
-                history_entries,
+            closed_symbols_set: set[str] = set(available_pairs)
+            closed_symbols_set.update(order_symbols)
+            closed_symbols_set.update(order_symbols_non_reduce)
+            closed_symbols_set.update(position_symbols)
+            if isinstance(global_open_orders, dict):
+                closed_symbols_set.update(global_open_orders.keys())
+            window_start = now_utc - datetime.timedelta(hours=PNL_LOOKBACK_HOURS)
+            closed_pnl_value, closed_pnl_count, closed_warnings = _collect_recent_closed_pnl(
+                ex,
+                sorted(closed_symbols_set),
+                window_start,
                 now_utc,
-                equity_end,
-                realized_end,
             )
-            if pnl_value is not None and reference_value is not None:
-                basis_label = "realized" if pnl_basis == "realized" else "equity"
-                pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
-                log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
+            for warning_msg in closed_warnings[:3]:
+                log(warning_msg, Fore.LIGHTBLACK_EX)
+            if len(closed_warnings) > 3:
+                log(f"[PnL] Suppressed {len(closed_warnings) - 3} additional warnings.", Fore.LIGHTBLACK_EX)
+            if closed_pnl_value is not None:
+                detail_suffix = f" ({closed_pnl_count} fills)" if closed_pnl_count else ""
+                pnl_message = f"PnL (6h closed): {closed_pnl_value:+.2f} USDT{detail_suffix}"
+                log(pnl_message, Fore.CYAN if closed_pnl_value >= 0 else Fore.YELLOW)
                 send_tg(pnl_message)
+            else:
+                pnl_value, reference_value, pnl_basis = _compute_recent_pnl(
+                    history_entries,
+                    now_utc,
+                    equity_end,
+                    realized_end,
+                )
+                if pnl_value is not None and reference_value is not None:
+                    basis_label = "realized" if pnl_basis == "realized" else "equity"
+                    pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
+                    log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
+                    send_tg(pnl_message)
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)

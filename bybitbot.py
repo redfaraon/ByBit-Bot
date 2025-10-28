@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.28.1")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.28.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 
@@ -784,7 +784,6 @@ def main():
         fallback_head = history.get("fallback_last_head")
         if fallback_head and cycles >= probe_interval:
             history["fallback_cycles"] = 0
-            _save_fallback_history(history)
             script_path = _materialize_commit_script(fallback_head)
             if script_path:
                 short = fallback_head[:8]
@@ -792,7 +791,7 @@ def main():
                 version_label = f"commit.{short}"
                 source_label = f"probe {short}"
                 commit_hash, commit_message = _resolve_commit_details(fallback_head)
-                if _run_script_candidate(
+                success = _run_script_candidate(
                     script_path,
                     version_label,
                     "scheduled fallback probe",
@@ -803,8 +802,19 @@ def main():
                     cycle_kind="backup",
                     cycle_mode="current",
                     cycle_counter=cycles,
-                ):
+                )
+                if success:
+                    history.setdefault("commits", {})[fallback_head] = "success"
+                    history["fallback_active"] = False
+                    history["fallback_cycles"] = 0
+                    history["fallback_last_head"] = None
+                    history["fallback_source"] = None
+                    history["fallback_target"] = None
+                    _save_fallback_history(history)
                     return
+                _save_fallback_history(history)
+                return
+            _save_fallback_history(history)
     else:
         routine_counter = int(history.get("routine_counter") or 0) + 1
         history["routine_counter"] = routine_counter
