@@ -805,6 +805,7 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         '  "pairs": list of up to 8 symbols to analyze this cycle (mix bullish/bearish narratives based on news),\n'
         '  "timeframes": list of exactly two short timeframes (e.g., "30m","4h"),\n'
         '  "indicators": list containing exactly six items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one additional momentum/volatility indicator),\n'
+        '  "max_positions": integer cap for concurrently open symbols (factor in current exposure + liquidity),\n'
         '  "next_run_minutes": float delay before the next cycle (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
         '  "notes": optional rationale.'
         " Also include optional field 'news_requests' (symbols needing full news text)."
@@ -882,6 +883,35 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     universe_payload["indicators"] = normalized_indicators[:6]
     universe_payload["next_run_minutes"] = result.get("next_run_minutes")
     universe_payload["notes"] = result.get("notes")
+    max_positions_value = None
+    limit_sources: list[Any] = []
+    limits_block = result.get("limits")
+    if isinstance(limits_block, dict):
+        limit_sources.extend(
+            limits_block.get(key)
+            for key in (
+                "max_positions",
+                "maxPositions",
+                "max_open_positions",
+                "maxOpenPositions",
+            )
+        )
+    limit_sources.extend(
+        result.get(key)
+        for key in (
+            "max_positions",
+            "maxPositions",
+            "max_open_positions",
+            "maxOpenPositions",
+        )
+    )
+    for candidate in limit_sources:
+        val = safe_int(candidate)
+        if val and val > 0:
+            max_positions_value = val
+            break
+    if max_positions_value:
+        universe_payload["max_positions"] = max_positions_value
     news_requests = result.get("news_requests") or []
     selection_result = {
         "pairs": universe_payload["pairs"],
@@ -890,12 +920,17 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         "next_run_minutes": universe_payload.get("next_run_minutes"),
         "reason": universe_payload.get("notes"),
     }
+    if max_positions_value:
+        selection_result["limits"] = {"max_positions": max_positions_value}
+        selection_result["max_positions"] = max_positions_value
     selection_result["_news_digest"] = news_digest
     universe_state = {
         "pairs": universe_payload["pairs"],
         "global_timeframes": universe_payload["timeframes"],
         "global_indicators": universe_payload["indicators"],
     }
+    if max_positions_value:
+        universe_state["max_positions"] = max_positions_value
     return selection_result, universe_state, news_requests
 
 
@@ -2289,12 +2324,12 @@ def _cleanup_excess_non_reduce_limits(exchange, symbol, open_orders, position_si
         return open_orders or []
 
 
-def _has_active_limit_at_price(open_orders, side: str, price: float, tolerance: float = 5e-4) -> bool:
+def _has_active_limit_at_price(open_orders, side: str, price: float, tolerance: float = 5e-4) -> tuple[bool, float]:
     if price is None or not math.isfinite(price) or price <= 0:
-        return False
+        return False, 0.0
     side_lower = (side or '').lower()
     if not side_lower:
-        return False
+        return False, 0.0
     for existing in open_orders or []:
         if not isinstance(existing, dict):
             continue
@@ -2313,8 +2348,11 @@ def _has_active_limit_at_price(open_orders, side: str, price: float, tolerance: 
         if not (existing_price and math.isfinite(existing_price) and existing_price > 0):
             continue
         if abs(existing_price - price) / price <= tolerance:
-            return True
-    return False
+            amount_val = safe_float(existing.get("amount") or existing.get("qty") or existing.get("quantity"))
+            if amount_val is None or not math.isfinite(amount_val) or amount_val < 0:
+                amount_val = 0.0
+            return True, float(amount_val)
+    return False, 0.0
 
 def get_position_idx(side: str | None) -> int | None:
     if HEDGE_MODE:
@@ -5748,7 +5786,7 @@ def run_cycle():
                         if position_idx is not None:
                             base_params["positionIdx"] = position_idx
                         scheme = ENTRY_LADDER_SCHEME if ENTRY_LADDER_SCHEME else [(1.0, 0.0)]
-                        normalized_entries = []
+                        normalized_entries: list[tuple[float, float]] = []
                         for share, offset in scheme:
                             share_val = float(share) if isinstance(share, (int, float)) else 0.0
                             offset_val = float(offset) if isinstance(offset, (int, float)) else 0.0
@@ -5765,17 +5803,22 @@ def run_cycle():
                         entry_created = 0
                         total_margin_used = 0.0
                         side_lower = side.lower()
+                        total_layers = len(normalized_entries)
                         for idx, (share_val, offset_val) in enumerate(normalized_entries):
                             weight = share_val / ratio_total if ratio_total else 0.0
-                            target_qty = qty * weight if idx < len(normalized_entries) - 1 else remaining_qty
+                            target_qty = qty * weight if idx < total_layers - 1 else remaining_qty
                             target_qty = min(target_qty, remaining_qty)
                             if target_qty <= 0:
                                 continue
                             layer_price = price - offset_val * atrv if side_lower == "buy" else price + offset_val * atrv
                             if layer_price is None or not math.isfinite(layer_price) or layer_price <= 0:
                                 continue
-                            if _has_active_limit_at_price(open_orders_symbol, side_lower, layer_price):
-                                log(f"[INFO] {sym}: пропуск лимита {side.upper()} @ {layer_price:.2f} (уже есть поблизости)", Fore.LIGHTBLACK_EX)
+                            duplicate_match, duplicate_qty = _has_active_limit_at_price(open_orders_symbol, side_lower, layer_price)
+                            if duplicate_match:
+                                consumed_qty = target_qty if duplicate_qty <= 0 else min(target_qty, max(duplicate_qty, 0.0))
+                                remaining_qty = max(0.0, remaining_qty - consumed_qty)
+                                entry_created += 1
+                                entry_summaries.append(f"existing limit @ {layer_price:.2f} (qty~{consumed_qty:.4f})")
                                 continue
                             try:
                                 precise_qty = float(ex.amount_to_precision(sym, target_qty))
@@ -5785,7 +5828,21 @@ def run_cycle():
                                 continue
                             layer_notional = precise_qty * layer_price
                             if layer_notional < MIN_NOTIONAL_USDT:
-                                continue
+                                min_qty = MIN_NOTIONAL_USDT / layer_price
+                                if idx < total_layers - 1 and min_qty > remaining_qty:
+                                    continue
+                                min_qty = min(min_qty, max(remaining_qty, 0.0))
+                                if min_qty <= 0:
+                                    continue
+                                try:
+                                    precise_qty = float(ex.amount_to_precision(sym, min_qty))
+                                except Exception:
+                                    precise_qty = float(round(min_qty, 8))
+                                if precise_qty <= 0:
+                                    continue
+                                layer_notional = precise_qty * layer_price
+                                if layer_notional < MIN_NOTIONAL_USDT:
+                                    continue
                             layer_params = dict(base_params)
                             ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
                             entry_created += 1
@@ -5794,7 +5851,32 @@ def run_cycle():
                             total_margin_used += layer_margin
                             entry_summaries.append(f"{precise_qty:.4f} @ {layer_price:.2f} (margin {layer_margin:.2f} USDT)")
                         if entry_created == 0:
-                            raise RuntimeError("no entry orders placed")
+                            fallback_price = price
+                            try:
+                                precise_qty = float(ex.amount_to_precision(sym, qty))
+                            except Exception:
+                                precise_qty = float(round(qty, 8))
+                            if precise_qty <= 0:
+                                raise RuntimeError("no entry orders placed")
+                            fallback_notional = precise_qty * fallback_price
+                            if fallback_notional < MIN_NOTIONAL_USDT:
+                                min_qty = MIN_NOTIONAL_USDT / fallback_price
+                                min_qty = min(min_qty, qty)
+                                try:
+                                    precise_qty = float(ex.amount_to_precision(sym, min_qty))
+                                except Exception:
+                                    precise_qty = float(round(min_qty, 8))
+                                if precise_qty <= 0:
+                                    raise RuntimeError("no entry orders placed")
+                                fallback_notional = precise_qty * fallback_price
+                                if fallback_notional < MIN_NOTIONAL_USDT:
+                                    raise RuntimeError("no entry orders placed")
+                            layer_params = dict(base_params)
+                            ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
+                            entry_created = 1
+                            remaining_qty = max(0.0, qty - precise_qty)
+                            total_margin_used = fallback_notional / symbol_leverage if symbol_leverage else fallback_notional
+                            entry_summaries.append(f"{precise_qty:.4f} @ {fallback_price:.2f} (fallback, margin {total_margin_used:.2f} USDT)")
                         log(f"✅ Ордеры {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
                             f"✅ {sym} {side.upper()} входы:\n"
