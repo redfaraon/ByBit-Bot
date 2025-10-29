@@ -158,3 +158,5 @@ Recent commits (last 8)
 2025.10.28.4
 - Tied routine counter to completed cycles and suppressed child-script increments so scheduled backups no longer loop.
 - Propagated suppress flags via environment for fallback/random launches to keep latest commit active.
+2025.10.28.5
+- Defined MAX_POSITIONS_PER_BASE before settings load to fix NameError on initial import.

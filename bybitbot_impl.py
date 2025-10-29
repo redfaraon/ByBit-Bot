@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.4
+# Version: 2025.10.28.5
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.4"
+BOT_VERSION = "2025.10.28.5"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1894,6 +1894,12 @@ NEWS_API_TOKEN = ""
 NEWS_ITEMS_LIMIT = 5
 
 
+if "MAX_POSITIONS_PER_BASE" not in globals():
+    MAX_POSITIONS_PER_BASE = 2
+try:
+    MAX_POSITIONS_PER_BASE = max(0, int(os.getenv("MAX_POSITIONS_PER_BASE", str(MAX_POSITIONS_PER_BASE))))
+except (TypeError, ValueError):
+    MAX_POSITIONS_PER_BASE = max(0, MAX_POSITIONS_PER_BASE)
 
 refresh_settings()
 
@@ -1972,7 +1978,6 @@ AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
 AI_PER_REQUEST_TOKEN_CAP = 50_000
 AI_HARD_STOP_BUDGET = 200_000
 MAX_SYMBOLS_PER_CYCLE = 15
-MAX_POSITIONS_PER_BASE = max(0, int(os.getenv("MAX_POSITIONS_PER_BASE", "2")))
 UNIVERSE_CACHE_DEFAULT = {
     "pairs": [],
     "global_timeframes": [],
