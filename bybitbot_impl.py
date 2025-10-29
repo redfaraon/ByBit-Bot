@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.2
+# Version: 2025.10.28.3
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -17,6 +17,7 @@ os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
 import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Optional, Tuple, Any, Sequence
 import pandas as pd
@@ -40,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.2"
+BOT_VERSION = "2025.10.28.3"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -55,6 +56,7 @@ PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
 ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
 _LAST_COMMIT_HASH: Optional[str] = None
 SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
+DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -146,6 +148,59 @@ for pair, ticker in PAIR_TICKER_MAP.items():
     sanitized = re.sub(r"[^A-Z0-9]", "", pair.upper())
     if sanitized:
         TICKER_TO_SYMBOL.setdefault(sanitized, pair)
+
+
+def _build_dynamic_symbol_aliases(markets: dict[str, Any]) -> dict[str, str]:
+    dynamic: dict[str, str] = {}
+    suffixes = ("1000", "100", "10000")
+    for symbol, market in (markets or {}).items():
+        if not isinstance(symbol, str):
+            continue
+        market = market or {}
+        base = str(market.get("base") or symbol.split("/")[0]).strip()
+        quote = str(market.get("quote") or "USDT").strip()
+        settlement = None
+        if "/" in symbol:
+            right = symbol.split("/", 1)[1]
+            if ":" in right:
+                parts = [part for part in right.split(":") if part]
+                if parts:
+                    quote = parts[0]
+                if len(parts) >= 2:
+                    settlement = parts[1]
+            else:
+                quote = right
+        base_upper = base.upper()
+        quote_upper = quote.upper()
+        settlement_upper = settlement.upper() if settlement else None
+        alias_bases: set[str] = set()
+        for suffix in suffixes:
+            if base_upper.endswith(suffix) and len(base_upper) > len(suffix) + 1:
+                alias_bases.add(base_upper[:-len(suffix)])
+        if base_upper.endswith("PERP") and len(base_upper) > 4:
+            alias_bases.add(base_upper[:-4])
+        if base_upper.startswith("1000") and len(base_upper) > 4:
+            alias_bases.add(base_upper[4:])
+        for alias_base in alias_bases:
+            if not alias_base or alias_base == base_upper:
+                continue
+            alias_forms = set()
+            core = f"{alias_base}/{quote_upper}"
+            alias_forms.add(core)
+            if settlement_upper:
+                alias_forms.add(f"{core}:{settlement_upper}")
+            if quote_upper != "USDT":
+                alias_forms.add(f"{alias_base}/{quote_upper}:USDT")
+            alias_forms.add(f"{alias_base}/USDT:USDT")
+            alias_forms.add(f"{alias_base}/USDT")
+            for form in list(alias_forms):
+                if form.endswith(":USDT"):
+                    alias_forms.add(form[:-6])
+            for alias in alias_forms:
+                if alias and alias != symbol:
+                    dynamic.setdefault(alias, symbol)
+                    dynamic.setdefault(alias.upper(), symbol)
+    return dynamic
 
 
 TIMEFRAME_NORMALIZATION_MAP = {
@@ -1569,7 +1624,7 @@ def refresh_settings():
     load_environment()
     global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR, TRAILING_ATR_MULT
     global DEFAULT_NEXT_RUN_MINUTES
-    global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS
+    global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS, MAX_POSITIONS_PER_BASE
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
     global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
@@ -1595,6 +1650,7 @@ def refresh_settings():
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
     MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
+    MAX_POSITIONS_PER_BASE = max(0, env_int("MAX_POSITIONS_PER_BASE", MAX_POSITIONS_PER_BASE))
     env_default_next = os.getenv("DEFAULT_NEXT_RUN_MINUTES")
     if env_default_next:
         try:
@@ -1916,6 +1972,7 @@ AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
 AI_PER_REQUEST_TOKEN_CAP = 50_000
 AI_HARD_STOP_BUDGET = 200_000
 MAX_SYMBOLS_PER_CYCLE = 15
+MAX_POSITIONS_PER_BASE = max(0, int(os.getenv("MAX_POSITIONS_PER_BASE", "2")))
 UNIVERSE_CACHE_DEFAULT = {
     "pairs": [],
     "global_timeframes": [],
@@ -2917,6 +2974,36 @@ def _extract_realized_pnl(balance: dict | None) -> float | None:
     return best[1] if best else None
 
 
+def _extract_base_asset(symbol: str | None) -> str | None:
+    if not symbol:
+        return None
+    sym = str(symbol).strip()
+    if not sym:
+        return None
+    base = sym.split('/', 1)[0]
+    if ':' in base:
+        base = base.split(':', 1)[0]
+    base_norm = re.sub(r"[^A-Z0-9]", "", base.upper())
+    if not base_norm:
+        return None
+    base_norm = re.sub(r"\d+$", "", base_norm) or base_norm
+    return base_norm
+
+
+def _build_base_exposure_map(positions_map) -> dict[str, int]:
+    exposures: defaultdict[str, int] = defaultdict(int)
+    for sym, payload in (positions_map or {}).items():
+        if not payload:
+            continue
+        amount_val = safe_float((payload or {}).get("amount") or (payload or {}).get("contracts"))
+        if amount_val is None or not math.isfinite(amount_val) or abs(amount_val) <= 1e-8:
+            continue
+        base_key = _extract_base_asset(sym)
+        if base_key:
+            exposures[base_key] += 1
+    return dict(exposures)
+
+
 def _extract_closed_pnl_from_payload(payload: Any) -> float | None:
     """
     Try to find a numeric closed/realized PnL field inside an order/trade payload.
@@ -3057,6 +3144,114 @@ def _collect_recent_closed_pnl(
     if fill_count > 0:
         return total_pnl, fill_count, warnings
     return None, 0, warnings
+
+
+def _resolve_log_path(filename: str) -> Path | None:
+    if not filename:
+        return None
+    candidates = [
+        Path(filename),
+        SCRIPT_DIR / filename,
+        SCRIPT_DIR / "assets" / filename,
+        REPO_ROOT / "assets" / filename,
+    ]
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            if resolved.exists():
+                return resolved
+        except Exception:
+            continue
+    return None
+
+
+def _generate_ai_decision_summary(log_path: Path, output_path: Path, window_hours: float = 24.0) -> None:
+    try:
+        raw_text = log_path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        log(f"[WARN] Failed to read AI decision log {log_path}: {exc}", Fore.YELLOW)
+        return
+    if not raw_text.strip():
+        return
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now_utc - datetime.timedelta(hours=window_hours)
+    actions_counter = Counter()
+    symbols_counter = Counter()
+    skip_reasons_counter = Counter()
+    side_counter = Counter()
+    recent_entries: deque[dict[str, Any]] = deque(maxlen=8)
+    total_considered = 0
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        ts_raw = payload.get("timestamp") or payload.get("time")
+        if not ts_raw:
+            continue
+        try:
+            ts_obj = datetime.datetime.fromisoformat(ts_raw)
+        except ValueError:
+            continue
+        if ts_obj.tzinfo is None:
+            ts_obj = ts_obj.replace(tzinfo=datetime.timezone.utc)
+        ts_utc = ts_obj.astimezone(datetime.timezone.utc)
+        if window_hours and ts_utc < cutoff:
+            continue
+        decision = payload.get("decision") or {}
+        action = str(decision.get("action") or payload.get("action") or "").strip().lower()
+        symbol = str(payload.get("symbol") or decision.get("symbol") or "").strip()
+        total_considered += 1
+        if action:
+            actions_counter[action] += 1
+        if symbol:
+            symbols_counter[symbol] += 1
+        if action == "skip":
+            reason_text = str(decision.get("reason") or "").strip()
+            if reason_text:
+                skip_reasons_counter[reason_text] += 1
+        side_val = str(decision.get("side") or "").strip().lower()
+        if side_val:
+            side_counter[side_val] += 1
+        recent_entries.append({
+            "timestamp": ts_obj.isoformat(),
+            "symbol": symbol,
+            "action": action or None,
+            "side": side_val or None,
+            "reason": decision.get("reason"),
+            "confidence": decision.get("confidence"),
+        })
+    if total_considered == 0:
+        return
+    def _top(counter: Counter, limit: int = 5):
+        return [{"item": key, "count": value} for key, value in counter.most_common(limit)]
+    summary_payload = {
+        "generated_at": now_utc.isoformat(),
+        "window_hours": window_hours,
+        "entries": total_considered,
+        "actions": _top(actions_counter, 10),
+        "symbols": _top(symbols_counter, 10),
+        "skip_reasons": _top(skip_reasons_counter, 10),
+        "sides": _top(side_counter, 5),
+        "recent": list(recent_entries),
+    }
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as exc:
+        log(f"[WARN] Failed to write AI decision summary {output_path}: {exc}", Fore.YELLOW)
 
 
 def _compute_recent_pnl(
@@ -3434,6 +3629,9 @@ def _resolve_symbol_alias(symbol: str | None) -> str | None:
     if not sym:
         return None
     alias_target = SYMBOL_ALIASES.get(sym) or SYMBOL_ALIASES.get(sym.upper())
+    dynamic_alias = DYNAMIC_SYMBOL_ALIASES.get(sym) or DYNAMIC_SYMBOL_ALIASES.get(sym.upper())
+    if dynamic_alias:
+        sym = dynamic_alias
     if alias_target:
         sym = alias_target
     sym_upper = sym.upper()
@@ -5224,6 +5422,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
 
 # --- Основная логика ---
 def run_cycle():
+    global DYNAMIC_SYMBOL_ALIASES
     global SYMBOL_RULES_CACHE
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
@@ -5238,6 +5437,12 @@ def run_cycle():
     ex = init_exchange()
     SYMBOL_RULES_CACHE.clear()
     ex.load_markets()
+    try:
+        dynamic_aliases = _build_dynamic_symbol_aliases(getattr(ex, "markets", {}))
+        DYNAMIC_SYMBOL_ALIASES.clear()
+        DYNAMIC_SYMBOL_ALIASES.update(dynamic_aliases)
+    except Exception as exc_alias:
+        log(f"[WARN] Failed to build dynamic symbol aliases: {exc_alias}", Fore.YELLOW)
     markets_set = set(ex.symbols or [])
     if not markets_set:
         markets_set = set((getattr(ex, "markets", {}) or {}).keys())
@@ -5262,6 +5467,10 @@ def run_cycle():
         if alias_target and alias_target in markets_set:
             symbol_alias_hits[sym] = alias_target
             return alias_target
+        dynamic_target = DYNAMIC_SYMBOL_ALIASES.get(sym) or DYNAMIC_SYMBOL_ALIASES.get(sym_upper)
+        if dynamic_target and dynamic_target in markets_set:
+            symbol_alias_hits[sym] = dynamic_target
+            return dynamic_target
         resolved = _resolve_symbol_alias(sym)
         if resolved and resolved in markets_set:
             if resolved != sym:
@@ -5273,6 +5482,8 @@ def run_cycle():
 
     ensure_position_mode(ex)
     positions_map, open_positions = fetch_positions_snapshot(ex)
+    base_exposure_counts = _build_base_exposure_map(positions_map)
+    pending_base_allocations: defaultdict[str, int] = defaultdict(int)
     base_max_positions = max(0, MAX_OPEN_POSITIONS or 0)
     max_positions_limit = base_max_positions
     if max_positions_limit > 0 and open_positions is None:
@@ -6032,6 +6243,25 @@ def run_cycle():
             detail_entry: str | None = None
             orders_activity = False
             open_error: str | None = None
+            preallocated_base_asset: str | None = None
+            open_executed = False
+            if action == "open" and not has_position:
+                base_asset_key = _extract_base_asset(sym)
+                exposure_cap = MAX_POSITIONS_PER_BASE
+                if base_asset_key and exposure_cap > 0:
+                    current_exposure = base_exposure_counts.get(base_asset_key, 0) + pending_base_allocations.get(base_asset_key, 0)
+                    if current_exposure >= exposure_cap:
+                        limit_reason = f"base exposure limit reached for {base_asset_key} ({current_exposure}/{exposure_cap})"
+                        combined_reason = f"{reason}; {limit_reason}" if reason else limit_reason
+                        dec["action"] = "skip"
+                        dec["reason"] = combined_reason
+                        action = "skip"
+                        reason = combined_reason
+                        log(f"[INFO] {sym}: skipping open — {limit_reason}", Fore.LIGHTBLACK_EX)
+                        send_tg(f"[INFO] {sym}: skip open — {limit_reason}")
+                    else:
+                        pending_base_allocations[base_asset_key] += 1
+                        preallocated_base_asset = base_asset_key
 
             extra_orders_raw = dec.get("orders") or dec.get("adjustments") or dec.get("extra_orders") or []
             if isinstance(extra_orders_raw, dict):
@@ -6207,6 +6437,12 @@ def run_cycle():
                             log(f"🔻 Закрыть позицию {sym} ({reason})", Fore.YELLOW)
                             send_tg(f"🔻 Закрыт {sym} {close_side.upper()} {qty:.4f} — {reason or 'причина не указана'}")
                             positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
+                            base_asset_after_close = _extract_base_asset(sym)
+                            if base_asset_after_close:
+                                existing = base_exposure_counts.get(base_asset_after_close, 0)
+                                if existing > 0:
+                                    base_exposure_counts[base_asset_after_close] = existing - 1
+                            base_exposure_counts = _build_base_exposure_map(positions_map)
                             current_position = positions_map.get(sym)
                         except Exception as e:
                             err_text = str(e)
@@ -6451,6 +6687,7 @@ def run_cycle():
                                     continue
                             layer_params = dict(base_params)
                             ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
+                            open_executed = True
                             entry_created += 1
                             remaining_qty = max(0.0, remaining_qty - precise_qty)
                             layer_margin = layer_notional / symbol_leverage if symbol_leverage else layer_notional
@@ -6489,6 +6726,7 @@ def run_cycle():
                                     raise RuntimeError("no entry orders placed")
                             layer_params = dict(base_params)
                             ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
+                            open_executed = True
                             entry_created = 1
                             remaining_qty = max(0.0, qty - precise_qty)
                             total_margin_used = fallback_notional / symbol_leverage if symbol_leverage else fallback_notional
@@ -6502,12 +6740,19 @@ def run_cycle():
                         open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
                         positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                         current_position = positions_map.get(sym)
+                        base_exposure_counts = _build_base_exposure_map(positions_map)
 
                     except Exception as e:
                         err_text = str(e)
                         open_error = err_text
                         log(f"❌ Ошибка ордера: {err_text}", Fore.RED)
                         send_tg(f"❌ Ошибка ордера для {sym}: {err_text}")
+                if preallocated_base_asset:
+                    pending_val = pending_base_allocations.get(preallocated_base_asset, 0)
+                    if pending_val > 0:
+                        pending_base_allocations[preallocated_base_asset] = pending_val - 1
+                    if not open_error and open_executed:
+                        base_exposure_counts[preallocated_base_asset] = base_exposure_counts.get(preallocated_base_asset, 0) + 1
             else:
                 if action not in ("hold", "manage", "none", "", None):
                     log(f"ℹ️ Неизвестное действие \"{action}\" для {sym}, обработка только дополнительных ордеров", Fore.YELLOW)
@@ -6924,6 +7169,10 @@ def run_cycle():
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
+    decision_log_path = _resolve_log_path(AI_LOG_FILE)
+    if decision_log_path:
+        summary_output = decision_log_path.with_name("ai_decision_summary.json")
+        _generate_ai_decision_summary(decision_log_path, summary_output, window_hours=24.0)
     end_dt = _current_log_time()
     end_stamp = end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     end_banner = f"{session_separator} END SESSION {end_stamp} {session_separator}"
@@ -7023,6 +7272,5 @@ if __name__ == "__main__":
         if exit_code != 0:
             log(f"Fallback version exited with code {exit_code}", Fore.RED)
         sys.exit(exit_code)
-
 
 

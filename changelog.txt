@@ -151,3 +151,7 @@ Recent commits (last 8)
 - Added SHIB perpetual alias to avoid missing market errors when AI selects SHIB/USDT.
 - Switched PnL reporting to sum closed orders over the 6h window, with trade history fallback.
 - Version bump for loader/impl.
+2025.10.28.3
+- Auto-discovered Bybit symbol aliases (e.g., 1000 tickers) to avoid missing market errors.
+- Added base-asset exposure guard to cap concurrent positions per coin and prevent over-leveraging.
+- Generated daily AI decision summaries in assets and refreshed PnL analytics with closed-trade data.
