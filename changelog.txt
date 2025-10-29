@@ -155,3 +155,6 @@ Recent commits (last 8)
 - Auto-discovered Bybit symbol aliases (e.g., 1000 tickers) to avoid missing market errors.
 - Added base-asset exposure guard to cap concurrent positions per coin and prevent over-leveraging.
 - Generated daily AI decision summaries in assets and refreshed PnL analytics with closed-trade data.
+2025.10.28.4
+- Tied routine counter to completed cycles and suppressed child-script increments so scheduled backups no longer loop.
+- Propagated suppress flags via environment for fallback/random launches to keep latest commit active.
