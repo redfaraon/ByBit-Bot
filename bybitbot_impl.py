@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.6
+# Version: 2025.10.28.7
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.6"
+BOT_VERSION = "2025.10.28.7"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -61,6 +61,9 @@ CURRENT_RISK_PCT: float = 0.0
 DYNAMIC_RISK_ENABLED: bool = True
 MIN_DYNAMIC_RISK_PCT: float = 0.0
 MAX_DYNAMIC_RISK_PCT: float = 0.0
+BREAKEVEN_ENABLED: bool = True
+BREAKEVEN_ATR_MULT: float = 0.6
+BREAKEVEN_BUFFER_ATR: float = 0.15
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -1630,6 +1633,7 @@ def refresh_settings():
     global DEFAULT_NEXT_RUN_MINUTES
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS, MAX_POSITIONS_PER_BASE
     global CURRENT_RISK_PCT, DYNAMIC_RISK_ENABLED, MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT
+    global BREAKEVEN_ENABLED, BREAKEVEN_ATR_MULT, BREAKEVEN_BUFFER_ATR
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
     global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
@@ -1660,6 +1664,20 @@ def refresh_settings():
     MIN_DYNAMIC_RISK_PCT = max(1e-5, min(MIN_DYNAMIC_RISK_PCT, RISK_PCT))
     MAX_DYNAMIC_RISK_PCT = max(RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT))
     CURRENT_RISK_PCT = min(MAX_DYNAMIC_RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, CURRENT_RISK_PCT if CURRENT_RISK_PCT > 0 else RISK_PCT))
+    try:
+        BREAKEVEN_ENABLED = env_int("BREAKEVEN_ENABLED", env_int("MOVE_STOP_TO_BREAKEVEN", 1)) != 0
+    except Exception:
+        BREAKEVEN_ENABLED = True
+    try:
+        BREAKEVEN_ATR_MULT = float(os.getenv("BREAKEVEN_ATR_MULT", str(BREAKEVEN_ATR_MULT)))
+    except (TypeError, ValueError):
+        BREAKEVEN_ATR_MULT = 0.6
+    try:
+        BREAKEVEN_BUFFER_ATR = float(os.getenv("BREAKEVEN_BUFFER_ATR", str(BREAKEVEN_BUFFER_ATR)))
+    except (TypeError, ValueError):
+        BREAKEVEN_BUFFER_ATR = 0.15
+    BREAKEVEN_ATR_MULT = max(0.0, BREAKEVEN_ATR_MULT)
+    BREAKEVEN_BUFFER_ATR = max(0.0, BREAKEVEN_BUFFER_ATR)
     SL_ATR = float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
     TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
@@ -4294,6 +4312,26 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = price + sl_mult * atrv
         take_price = price - tp_mult * atrv
 
+    entry_price = safe_float(position.get("entryPrice") or position.get("avgEntryPrice") or position.get("entry_price"))
+    breakeven_note = None
+    if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
+        breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
+        breakeven_buffer = atrv * BREAKEVEN_BUFFER_ATR
+        if is_long and breakeven_trigger > 0 and price - entry_price >= breakeven_trigger:
+            breakeven_stop = entry_price + breakeven_buffer
+            if math.isfinite(breakeven_stop):
+                adjusted_stop = max(stop_price, breakeven_stop)
+                if adjusted_stop > stop_price:
+                    stop_price = adjusted_stop
+                    breakeven_note = f"break-even {breakeven_stop:.4f}"
+        elif not is_long and breakeven_trigger > 0 and entry_price - price >= breakeven_trigger:
+            breakeven_stop = entry_price - breakeven_buffer
+            if math.isfinite(breakeven_stop):
+                adjusted_stop = min(stop_price, breakeven_stop)
+                if adjusted_stop < stop_price:
+                    stop_price = adjusted_stop
+                    breakeven_note = f"break-even {breakeven_stop:.4f}"
+
     explicit_stop = safe_float(target_spec.get("stopLoss") or target_spec.get("stop_loss"))
     explicit_take = safe_float(target_spec.get("takeProfit") or target_spec.get("take_profit"))
     if explicit_stop is not None and math.isfinite(explicit_stop):
@@ -4345,6 +4383,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         )
         exchange.create_order(exchange_symbol, "market", protection_side, qty, None, stop_params)
         created_log_parts.append(f"stopLoss @ {stop_price:.2f}")
+        if breakeven_note:
+            created_log_parts.append(breakeven_note)
     except Exception as exc:
         log(f"⚠️ {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
 

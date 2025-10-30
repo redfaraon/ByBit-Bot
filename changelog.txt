@@ -164,3 +164,6 @@ Recent commits (last 8)
 - Added dynamic risk scaling driven by recent PnL, with guardrails and logging for cycle risk posture.
 - Shared risk telemetry in AI context payload to inform decision prompts.
 - Logged per-cycle risk state and ensured baseline recovery when no PnL data is available.
+2025.10.28.7
+- Added ATR-based break-even stop adjustments with configurable thresholds, improving downside protection once trades move in profit.
+- Expanded dynamic risk controls: telemetry now respects break-even states and context shares current risk window with AI.
