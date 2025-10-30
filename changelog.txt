@@ -180,3 +180,5 @@ Recent commits (last 8)
 - Detailed redundant stop cleanup messages with order specs and switched trailing protection to Bybit trading-stop API.
 2025.10.30.02
 - Excluded legacy branch from routine backup rotations to prevent surprise launches on outdated code.
+2025.10.30.03
+- Reduced per-pair serialization (bars/timeframes) and cycle symbol cap to fit OpenAI limits without hurting signal quality.

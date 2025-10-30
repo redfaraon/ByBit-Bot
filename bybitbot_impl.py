@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.30.02
+# Version: 2025.10.30.03
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.30.02"
+BOT_VERSION = "2025.10.30.03"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -1023,7 +1023,7 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
     return None
 
 
-def _serialize_df(df: pd.DataFrame, limit: int = 80):
+def _serialize_df(df: pd.DataFrame, limit: int = 60):
     if df.empty:
         return []
     slice_df = df.tail(limit)
@@ -2029,9 +2029,9 @@ def refresh_settings():
     NEEDS_MAX_INDICATORS = max(1, NEEDS_MAX_INDICATORS)
 
     try:
-        NEEDS_SERIALIZE_DEFAULT_LIMIT = int(os.getenv("BYBITBOT_NEEDS_BARS_LIMIT", "10"))
+        NEEDS_SERIALIZE_DEFAULT_LIMIT = int(os.getenv("BYBITBOT_NEEDS_BARS_LIMIT", "8"))
     except (TypeError, ValueError):
-        NEEDS_SERIALIZE_DEFAULT_LIMIT = 10
+        NEEDS_SERIALIZE_DEFAULT_LIMIT = 8
     NEEDS_SERIALIZE_DEFAULT_LIMIT = max(5, NEEDS_SERIALIZE_DEFAULT_LIMIT)
 
     PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
@@ -2147,7 +2147,7 @@ if "LOW_CONFIDENCE_INDICATORS" not in globals():
 if "LOW_CONFIDENCE_SERIALIZE_LIMIT" not in globals():
     LOW_CONFIDENCE_SERIALIZE_LIMIT = min(40, SUPPORT_CONTEXT_LIMIT)
 if "NEEDS_SERIALIZE_DEFAULT_LIMIT" not in globals():
-    NEEDS_SERIALIZE_DEFAULT_LIMIT = 10
+    NEEDS_SERIALIZE_DEFAULT_LIMIT = 8
 if "NEEDS_MAX_TIMEFRAMES" not in globals():
     NEEDS_MAX_TIMEFRAMES = 2
 if "NEEDS_MAX_INDICATORS" not in globals():
@@ -2183,7 +2183,7 @@ except (TypeError, ValueError):
 AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
 AI_PER_REQUEST_TOKEN_CAP = 50_000
 AI_HARD_STOP_BUDGET = 200_000
-MAX_SYMBOLS_PER_CYCLE = 15
+MAX_SYMBOLS_PER_CYCLE = 12
 UNIVERSE_CACHE_DEFAULT = {
     "pairs": [],
     "global_timeframes": [],

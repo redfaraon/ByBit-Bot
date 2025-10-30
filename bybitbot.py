@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Entry point and fallback wrapper for bybitbot_impl."""
 import importlib
 import json
@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.30.02")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.30.03")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 CYCLE_STATE_FILE = REPO_ROOT / "cycle_state.json"
