@@ -6076,6 +6076,12 @@ def run_cycle():
         if math.isfinite(amt) and abs(amt) > 0:
             position_symbols.add(sym_pos)
 
+    position_limit_reached = (
+        max_positions_limit > 0
+        and open_positions is not None
+        and open_positions >= max_positions_limit
+    )
+
     normalized_pair_list: list[str] = []
     for raw_pair in PAIR_LIST:
         resolved_pair = normalize_symbol(raw_pair)
@@ -6084,14 +6090,16 @@ def run_cycle():
 
     candidate_pairs_set: set[str] = set()
 
-    def add_candidates(values, *, record_missing: bool = True):
+    def add_candidates(values, *, record_missing: bool = True, require_capacity: bool = False):
+        if position_limit_reached and require_capacity:
+            return
         for value in values:
             resolved = normalize_symbol(value, record_missing=record_missing)
             if resolved:
                 candidate_pairs_set.add(resolved)
 
-    add_candidates(PAIR_LIST)
-    add_candidates(BASE_PAIR_CANDIDATES)
+    add_candidates(PAIR_LIST, require_capacity=True)
+    add_candidates(BASE_PAIR_CANDIDATES, require_capacity=True)
     add_candidates(position_symbols, record_missing=False)
 
     universe_cache = load_universe_cache()
@@ -6214,7 +6222,7 @@ def run_cycle():
     add_candidates(order_symbols, record_missing=False)
     news_pairs = _collect_news_pairs()
     news_priority: list[str] = []
-    if news_pairs:
+    if news_pairs and not position_limit_reached:
         for raw_pair in news_pairs:
             resolved_pair = normalize_symbol(raw_pair)
             if resolved_pair and resolved_pair not in news_priority:
@@ -6250,6 +6258,9 @@ def run_cycle():
     seen_available: set[str] = set()
 
     raw_universe_pairs = universe_state.get("pairs") or []
+    if position_limit_reached:
+        allowed_when_capped = set(position_symbols) | order_symbols | order_symbols_non_reduce
+        raw_universe_pairs = [pair for pair in raw_universe_pairs if pair in allowed_when_capped]
     selection_pairs = raw_universe_pairs
     selection_pairs_normalized: list[str] = []
     for raw_pair in selection_pairs:
@@ -6259,15 +6270,24 @@ def run_cycle():
         selection_pairs_normalized.append(resolved_pair or raw_pair)
     selection_pairs = [p for p in selection_pairs_normalized if p]
 
-    new_universe_candidates = [p for p in selection_pairs if p not in position_symbols][:NEW_IDEAS_LIMIT]
-    new_universe_set = set(new_universe_candidates)
+    if position_limit_reached:
+        new_universe_candidates: list[str] = []
+        new_universe_set: set[str] = set()
+    else:
+        new_universe_candidates = [p for p in selection_pairs if p not in position_symbols][:NEW_IDEAS_LIMIT]
+        new_universe_set = set(new_universe_candidates)
 
     news_sorted = sorted(news_priority)
     _append_unique(available_pairs, sorted(position_symbols), seen_available)
     _append_unique(available_pairs, sorted(order_symbols), seen_available)
-    _append_unique(available_pairs, new_universe_candidates, seen_available)
-    _append_unique(available_pairs, news_sorted, seen_available)
+    if new_universe_candidates:
+        _append_unique(available_pairs, new_universe_candidates, seen_available)
+    if news_sorted:
+        _append_unique(available_pairs, news_sorted, seen_available)
     remaining_pairs = [p for p in sorted(candidate_pairs_set) if p not in seen_available]
+    if position_limit_reached:
+        allowed_when_capped = set(position_symbols) | order_symbols | order_symbols_non_reduce
+        remaining_pairs = [p for p in remaining_pairs if p in allowed_when_capped]
     _append_unique(available_pairs, remaining_pairs, seen_available)
 
     if not available_pairs:
@@ -6298,6 +6318,11 @@ def run_cycle():
 
     if len(available_pairs) > symbol_processing_limit:
         available_pairs = available_pairs[:symbol_processing_limit]
+    if position_limit_reached:
+        log(
+            f"[INFO] Position cap reached ({open_positions}/{max_positions_limit}); restricting analysis to existing exposure.",
+            Fore.LIGHTBLACK_EX,
+        )
     log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
 
     start_pnl_symbols: set[str] = set(available_pairs)
