@@ -4501,6 +4501,78 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
 
 
+def _format_decimal(value: numbers.Real, precision: int = 6) -> str:
+    try:
+        text = f"{float(value):.{precision}f}"
+    except (TypeError, ValueError):
+        return str(value)
+    text = text.rstrip("0").rstrip(".")
+    if text in {"", "-"}:
+        return "0"
+    if text == "-0":
+        return "0"
+    return text
+
+
+def _summarize_order_spec(order_dict: dict[str, Any] | None) -> str:
+    if not isinstance(order_dict, dict):
+        return str(order_dict)
+    side_label = (order_dict.get("side") or "?").upper()
+    order_type = (
+        order_dict.get("type")
+        or order_dict.get("orderType")
+        or order_dict.get("ordType")
+        or order_dict.get("category")
+        or "order"
+    )
+    order_type_label = str(order_type).upper()
+    quantity_val: Any = None
+    for key in ("amount", "contracts", "qty", "quantity", "size", "volume"):
+        val = order_dict.get(key)
+        if val not in (None, ""):
+            quantity_val = val
+            break
+    if isinstance(quantity_val, numbers.Real):
+        qty_text = _format_decimal(quantity_val, precision=6)
+    else:
+        qty_text = str(quantity_val) if quantity_val not in (None, "") else ""
+    price_val: Any = None
+    for key in ("price", "triggerPrice", "stopPrice", "stop_price", "takeProfit", "stopLoss"):
+        val = order_dict.get(key)
+        if val not in (None, ""):
+            price_val = val
+            break
+    if isinstance(price_val, numbers.Real):
+        price_text = _format_decimal(price_val, precision=6)
+    else:
+        price_text = str(price_val) if price_val not in (None, "") else ""
+    flags: list[str] = []
+    if _is_truthy_flag(order_dict.get("reduceOnly")):
+        flags.append("reduce")
+    if _is_truthy_flag(order_dict.get("closePosition")):
+        flags.append("close")
+    if _is_truthy_flag(order_dict.get("scaleIn") or order_dict.get("ladder")):
+        flags.append("scale")
+    if _is_truthy_flag(order_dict.get("postOnly")):
+        flags.append("post")
+    if _is_truthy_flag(order_dict.get("hidden")):
+        flags.append("hidden")
+    intent_val = order_dict.get("intent") or order_dict.get("tag") or order_dict.get("note") or order_dict.get("comment")
+    parts: list[str] = []
+    header = f"{side_label} {order_type_label}".strip()
+    if header:
+        parts.append(header)
+    if qty_text:
+        parts.append(qty_text)
+    if price_text:
+        parts.append(f"@ {price_text}")
+    if flags:
+        parts.append(f"[{' '.join(flags)}]")
+    if intent_val:
+        parts.append(f"({intent_val})")
+    return " ".join(parts) if parts else str(order_dict)
+
+
 def execute_extra_orders(
     exchange,
     symbol,
@@ -4682,13 +4754,16 @@ def execute_extra_orders(
                     oid = existing_order.get("id")
                     if not oid:
                         continue
+                    order_summary = _summarize_order_spec(existing_order)
+                    summary_suffix = f": {order_summary}" if order_summary else ""
                     success, err = cancel_order_by_id(exchange, symbol, str(oid))
                     if success:
-                        cancelled_success.append(str(oid))
-                        log(f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}", Fore.LIGHTBLUE_EX)
+                        cancelled_entry = f"{oid}{summary_suffix}"
+                        cancelled_success.append(cancelled_entry)
+                        log(f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}{summary_suffix}", Fore.LIGHTBLUE_EX)
                     else:
                         cancel_errors.append((oid, err))
-                        log(f"[WARN] Failed to cancel reduce-only order {oid} for {symbol}: {err}", Fore.YELLOW)
+                        log(f"[WARN] Failed to cancel reduce-only order {oid} for {symbol}{summary_suffix}: {err}", Fore.YELLOW)
                 reduce_only_map[side] = []
         position_idx = order.get("positionIdx")
         if position_idx is None:
@@ -6377,7 +6452,18 @@ def run_cycle():
                     "decision": dec,
                 },
             )
-            action = (dec.get("action") or "skip").lower()
+            action_raw = (dec.get("action") or "skip").strip().lower()
+            action_aliases = {
+                "replace_orders": "manage",
+                "refresh_orders": "manage",
+                "update_orders": "manage",
+                "maintain": "hold",
+                "maintain_position": "hold",
+            }
+            action = action_aliases.get(action_raw, action_raw)
+            if action != action_raw:
+                log(f"[AI] {sym}: normalized action {action_raw!r} -> {action!r}", Fore.LIGHTBLACK_EX)
+            dec["action"] = action
             side = (dec.get("side") or "").strip().lower()
             reason = dec.get("reason") or ""
             if not has_position:
@@ -6517,11 +6603,76 @@ def run_cycle():
             )
             replace_raw = dec.get("replace_orders") or dec.get("replaceOrders") or dec.get("order_replacements")
             replace_list = replace_raw if isinstance(replace_raw, list) else ([replace_raw] if isinstance(replace_raw, dict) else [])
+
+            parsed_replacements: list[tuple[str | None, list[dict[str, Any]]]] = []
+            replace_summaries: list[str] = []
+            for entry in replace_list:
+                if not isinstance(entry, dict):
+                    continue
+                cancel_id = (
+                    entry.get("cancel")
+                    or entry.get("id")
+                    or entry.get("old")
+                    or entry.get("orderId")
+                )
+                new_spec = (
+                    entry.get("order")
+                    or entry.get("new")
+                    or entry.get("replacement")
+                )
+                new_orders: list[dict[str, Any]] = []
+                if isinstance(new_spec, dict):
+                    new_orders.append(new_spec)
+                elif isinstance(new_spec, list):
+                    for item in new_spec:
+                        if isinstance(item, dict):
+                            new_orders.append(item)
+                parsed_replacements.append((cancel_id, new_orders))
+                summary_parts: list[str] = []
+                if cancel_id:
+                    summary_parts.append(f"cancel {cancel_id}")
+                if new_orders:
+                    order_desc = "; ".join(_summarize_order_spec(item) for item in new_orders)
+                    summary_parts.append(f"-> {order_desc}")
+                if summary_parts:
+                    replace_summaries.append(" ".join(summary_parts))
             replacement_orders = []
             cancelled_ids = set()
             cancelled_success = []
             cancel_failures = []
             orders_activity = False
+
+            decision_meta_parts: list[str] = [f"action={action.upper()}"]
+            if side:
+                decision_meta_parts.append(f"side={side.upper()}")
+            if reason:
+                decision_meta_parts.append(f"reason={reason}")
+            notional_pct_val = dec.get("notional_pct")
+            if notional_pct_val is not None:
+                try:
+                    decision_meta_parts.append(f"notional_pct={float(notional_pct_val):.3f}")
+                except (TypeError, ValueError):
+                    decision_meta_parts.append(f"notional_pct={notional_pct_val}")
+            if symbol_leverage:
+                decision_meta_parts.append(f"lev={symbol_leverage:g}x")
+            if sym_confidence_text:
+                conf_part = f"conf={sym_confidence_text}"
+                if sym_confidence_tag:
+                    conf_part += f" ({sym_confidence_tag})"
+                decision_meta_parts.append(conf_part)
+            log(f"[AI] {sym} decision: " + "; ".join(decision_meta_parts), Fore.CYAN)
+            if cancel_candidates:
+                log(f"[AI] {sym} cancel_orders: {', '.join(cancel_candidates)}", Fore.LIGHTBLACK_EX)
+            if replace_summaries:
+                log(f"[AI] {sym} replace_orders: {', '.join(replace_summaries)}", Fore.LIGHTBLACK_EX)
+            planned_orders_for_log: list[dict[str, Any]] = list(extra_orders)
+            for _, new_orders in parsed_replacements:
+                planned_orders_for_log.extend(new_orders)
+            if planned_orders_for_log:
+                order_summaries = [_summarize_order_spec(item) for item in planned_orders_for_log[:5]]
+                log(f"[AI] {sym} orders: {'; '.join(order_summaries)}", Fore.LIGHTBLACK_EX)
+                if len(planned_orders_for_log) > 5:
+                    log(f"[AI] {sym}: ... +{len(planned_orders_for_log) - 5} more order(s)", Fore.LIGHTBLACK_EX)
 
             def try_cancel(order_id: str, source: str):
                 nonlocal orders_activity
@@ -6541,27 +6692,11 @@ def run_cycle():
             for oid in cancel_candidates:
                 try_cancel(oid, "cancel_orders")
 
-            for entry in replace_list:
-                if not isinstance(entry, dict):
-                    continue
-                cancel_id = (
-                    entry.get("cancel")
-                    or entry.get("id")
-                    or entry.get("old")
-                    or entry.get("orderId")
-                )
+            for cancel_id, new_orders in parsed_replacements:
                 if cancel_id:
                     try_cancel(cancel_id, "replace_orders")
-                new_spec = (
-                    entry.get("order")
-                    or entry.get("new")
-                    or entry.get("replacement")
-                )
-                if new_spec:
-                    if isinstance(new_spec, dict):
-                        replacement_orders.append(new_spec)
-                    elif isinstance(new_spec, list):
-                        replacement_orders.extend([x for x in new_spec if isinstance(x, dict)])
+                if new_orders:
+                    replacement_orders.extend(new_orders)
 
             if replacement_orders:
                 orders_activity = True
