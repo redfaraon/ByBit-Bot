@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.9
+# Version: 2025.10.28.10
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.9"
+BOT_VERSION = "2025.10.28.10"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -4482,7 +4482,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if trailing_offset is not None:
         try:
             trailing_params = dict(base_params)
-            trailing_params["trailingStop"] = trailing_offset
+            trailing_params.pop("reduceOnly", None)
+            trailing_params["trailingAmount"] = abs(trailing_offset)
             if reference_price and math.isfinite(reference_price):
                 trailing_params.setdefault("triggerPrice", reference_price)
             exchange.create_order(exchange_symbol, "trailingStop", protection_side, qty, None, trailing_params)
@@ -6456,15 +6457,20 @@ def run_cycle():
                     allow_order = True
                     if not reduce_only_flag:
                         allow_order = False
-                        if action == "open" and not has_position:
+                        same_direction = (
+                            (position_side in ("long", "buy") and order_side == "buy")
+                            or (position_side in ("short", "sell") and order_side == "sell")
+                        )
+                        scale_flag = _is_truthy_flag(order.get("scaleIn") or order.get("ladder"))
+                        order_hint = (order.get("intent") or order.get("tag") or order.get("note") or "").lower()
+                        scale_intent = any(keyword in order_hint for keyword in ("scale", "ladder", "step", "stagger"))
+                        allow_scale_in = has_position and same_direction and (scale_flag or scale_intent)
+                        if allow_scale_in:
                             allow_order = True
-                        elif has_position and position_side:
-                            same_direction = (
-                                (position_side in ("long", "buy") and order_side == "buy")
-                                or (position_side in ("short", "sell") and order_side == "sell")
-                            )
-                            if not same_direction:
-                                allow_order = True
+                        elif action == "open" and not has_position:
+                            allow_order = True
+                        elif has_position and position_side and not same_direction:
+                            allow_order = True
                     if allow_order:
                         filtered_orders.append(order)
                     else:

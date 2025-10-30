@@ -171,3 +171,6 @@ Recent commits (last 8)
 - Fixed NameError when launching random/routine backups by guarding suppress flags and passing them explicitly.
 2025.10.28.9
 - Preserved ladder/scale-in limit orders during cleanup to keep staged entries intact.
+2025.10.28.10
+- Allowed scale-in extra orders and preserved staged ladders when cleaning limits.
+- Switched trailing-stop params to trailingAmount for Bybit USDT Perps to avoid API errors.
