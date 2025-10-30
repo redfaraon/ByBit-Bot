@@ -587,7 +587,6 @@ def _build_backup_candidates(
         )
 
     add_branch(stable_branch, "stable")
-    add_branch(legacy_branch, "legacy")
     add_current_tag(current_tag)
     add_random_commit()
 
