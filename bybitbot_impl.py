@@ -3170,6 +3170,62 @@ def _collect_recent_closed_pnl(
     return None, 0, warnings
 
 
+def _adjust_dynamic_risk_from_pnl(
+    pnl_value: float | None,
+    basis_label: str,
+    sample_count: int,
+) -> str | None:
+    global CURRENT_RISK_PCT
+    if not DYNAMIC_RISK_ENABLED or pnl_value is None or not math.isfinite(pnl_value):
+        return None
+    current = CURRENT_RISK_PCT if CURRENT_RISK_PCT > 0 and math.isfinite(CURRENT_RISK_PCT) else RISK_PCT
+    target_multiplier = 1.0
+    magnitude = pnl_value
+    if basis_label == "closed":
+        if magnitude <= -6:
+            target_multiplier = 0.4
+        elif magnitude <= -3:
+            target_multiplier = 0.6
+        elif magnitude <= -1:
+            target_multiplier = 0.8
+        elif magnitude >= 7:
+            target_multiplier = 1.45
+        elif magnitude >= 3:
+            target_multiplier = 1.25
+        elif magnitude >= 1:
+            target_multiplier = 1.1
+    else:
+        if magnitude <= -6:
+            target_multiplier = 0.45
+        elif magnitude <= -3:
+            target_multiplier = 0.65
+        elif magnitude <= -1:
+            target_multiplier = 0.85
+        elif magnitude >= 6:
+            target_multiplier = 1.35
+        elif magnitude >= 2.5:
+            target_multiplier = 1.15
+    desired_pct = min(
+        MAX_DYNAMIC_RISK_PCT,
+        max(MIN_DYNAMIC_RISK_PCT, RISK_PCT * target_multiplier),
+    )
+    if not math.isfinite(desired_pct):
+        desired_pct = RISK_PCT
+    smoothing = 0.6 if desired_pct < current else 0.45
+    blended = current + (desired_pct - current) * smoothing
+    blended = min(MAX_DYNAMIC_RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, blended))
+    threshold = max(1e-5, RISK_PCT * 0.03)
+    if abs(blended - current) < threshold:
+        return None
+    CURRENT_RISK_PCT = blended
+    delta = (CURRENT_RISK_PCT / RISK_PCT) if RISK_PCT > 0 else 1.0
+    label = basis_label or "equity"
+    return (
+        f"[RISK] {label} pnl {pnl_value:+.2f} -> risk {CURRENT_RISK_PCT:.4f} "
+        f"(base {RISK_PCT:.4f}, x{delta:.2f})"
+    )
+
+
 def _resolve_log_path(filename: str) -> Path | None:
     if not filename:
         return None
@@ -7197,7 +7253,13 @@ def run_cycle():
             if len(closed_warnings) > 3:
                 log(f"[PnL] Suppressed {len(closed_warnings) - 3} additional warnings.", Fore.LIGHTBLACK_EX)
             if closed_pnl_value is not None:
-                _adjust_dynamic_risk(closed_pnl_value, "closed", closed_pnl_count)
+                risk_msg = _adjust_dynamic_risk_from_pnl(closed_pnl_value, "closed", closed_pnl_count)
+                if risk_msg:
+                    log(risk_msg, Fore.CYAN if CURRENT_RISK_PCT >= initial_cycle_risk_pct else Fore.YELLOW)
+                    try:
+                        send_tg(risk_msg)
+                    except Exception:
+                        pass
                 detail_suffix = f" ({closed_pnl_count} fills)" if closed_pnl_count else ""
                 pnl_message = f"PnL (6h closed): {closed_pnl_value:+.2f} USDT{detail_suffix}"
                 log(pnl_message, Fore.CYAN if closed_pnl_value >= 0 else Fore.YELLOW)
@@ -7210,14 +7272,26 @@ def run_cycle():
                     realized_end,
                 )
                 if pnl_value is not None and reference_value is not None:
-                    _adjust_dynamic_risk(pnl_value, pnl_basis or "equity", 0)
+                    risk_msg_equity = _adjust_dynamic_risk_from_pnl(pnl_value, pnl_basis or "equity", 0)
+                    if risk_msg_equity:
+                        log(risk_msg_equity, Fore.CYAN if CURRENT_RISK_PCT >= initial_cycle_risk_pct else Fore.YELLOW)
+                        try:
+                            send_tg(risk_msg_equity)
+                        except Exception:
+                            pass
                     basis_label = "realized" if pnl_basis == "realized" else "equity"
                     pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
                     log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
                     send_tg(pnl_message)
                 else:
                     if DYNAMIC_RISK_ENABLED:
-                        _adjust_dynamic_risk(0.0, "baseline", 0)
+                        baseline_msg = _adjust_dynamic_risk_from_pnl(0.0, "baseline", 0)
+                        if baseline_msg:
+                            log(baseline_msg, Fore.LIGHTBLACK_EX)
+                            try:
+                                send_tg(baseline_msg)
+                            except Exception:
+                                pass
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
