@@ -595,33 +595,11 @@ def _build_backup_candidates(
 
 
 def _run_routine_backup(history: dict, routine_counter: int) -> bool:
-    head_hash = _current_head()
-    candidates = _build_backup_candidates(
-        history,
-        head_hash=head_hash,
-        reason=f"scheduled routine backup cycle {routine_counter}",
-        cycle_kind="normal",
-        cycle_counter=routine_counter,
-        record_fallback=False,
+    print(
+        f"[BOOT] Skipping routine backup cycle {routine_counter}; staying on current HEAD.",
+        file=sys.stderr,
     )
-    if not candidates:
-        return False
-    candidate = random.choice(candidates)
-    success = _run_script_candidate(
-        candidate.script_path,
-        candidate.version_label,
-        candidate.reason,
-        candidate.source_label,
-        fallback_context=candidate.context,
-        commit_hash=candidate.commit_hash,
-        commit_message=candidate.commit_message,
-        cycle_kind=candidate.cycle_kind,
-        cycle_mode=candidate.cycle_mode,
-        cycle_counter=candidate.cycle_counter,
-        suppress_routine_increment=True,
-    )
-    candidate.finalize(success)
-    return success
+    return False
 
 
 def _log_fallback_event(source_desc: str, source_ref: str, target_desc: str, target_ref: str, context: str) -> None:

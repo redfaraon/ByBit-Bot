@@ -182,3 +182,4 @@ Recent commits (last 8)
 - Excluded legacy branch from routine backup rotations to prevent surprise launches on outdated code.
 2025.10.30.03
 - Reduced per-pair serialization (bars/timeframes) and cycle symbol cap to fit OpenAI limits without hurting signal quality.
+- Added explicit cycle number logging and skipped legacy branch probes during routine backups.

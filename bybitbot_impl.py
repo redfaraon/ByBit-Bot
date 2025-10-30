@@ -5980,9 +5980,13 @@ def run_cycle():
     session_dt = _current_log_time()
     session_stamp = session_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     session_separator = "=" * 56
-    start_banner = f"{session_separator} START SESSION {session_stamp} {session_separator}"
+    cycle_number_display = f"Cycle #{next_cycle_number}"
+    start_banner = f"{session_separator} START SESSION {cycle_number_display} {session_stamp} {session_separator}"
     log(start_banner, Fore.MAGENTA)
-    send_tg(f"{session_separator}\nSTART SESSION {session_stamp}\n{session_separator}")
+    send_tg(f"{session_separator}\nSTART SESSION {cycle_number_display}\n{session_stamp}\n{session_separator}")
+    cycle_kind_display = cycle_kind or "normal"
+    cycle_mode_display = cycle_mode or "last"
+    log(f"[CYCLE] {cycle_number_display} ({cycle_kind_display}/{cycle_mode_display})", Fore.LIGHTBLACK_EX)
     if DYNAMIC_RISK_ENABLED and abs(CURRENT_RISK_PCT - current_risk_baseline) > max(1e-5, current_risk_baseline * 0.01):
         risk_state_msg = (
             f"[RISK] Cycle risk pct {CURRENT_RISK_PCT:.4f} (base {RISK_PCT:.4f}, range {MIN_DYNAMIC_RISK_PCT:.4f}-{MAX_DYNAMIC_RISK_PCT:.4f})"
