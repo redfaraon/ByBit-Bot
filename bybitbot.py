@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.28.10")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
+CYCLE_STATE_FILE = REPO_ROOT / "cycle_state.json"
 
 
 def _resolve_commit_limit(raw_value: str | None) -> int:
@@ -164,6 +165,34 @@ def _save_fallback_history(history: dict) -> None:
         )
     except Exception:
         pass
+
+
+def _load_cycle_state() -> dict:
+    try:
+        raw = CYCLE_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    except Exception:
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    if not isinstance(data, dict):
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    total_cycles = data.get("total_cycles")
+    fallback_cycles = data.get("fallback_cycles")
+    try:
+        total_cycles = int(total_cycles)
+    except (TypeError, ValueError):
+        total_cycles = 0
+    try:
+        fallback_cycles = int(fallback_cycles)
+    except (TypeError, ValueError):
+        fallback_cycles = 0
+    data["total_cycles"] = total_cycles
+    data["fallback_cycles"] = fallback_cycles
+    return data
 
 
 
@@ -797,6 +826,9 @@ def main():
     _update_current_branch()
     history = _load_fallback_history()
     history.setdefault("branches", {})
+    cycle_state = _load_cycle_state()
+    completed_cycles = int(cycle_state.get("total_cycles") or 0)
+    completed_fallback_cycles = int(cycle_state.get("fallback_cycles") or 0)
     routine_counter: int | None = None
     suppress_routine_increment = _env_truthy("BYBITBOT_SUPPRESS_ROUTINE_COUNTER")
     env_cycle_counter: int | None = None
@@ -808,64 +840,65 @@ def main():
             env_cycle_counter = None
 
     if history.get("fallback_active"):
-        fallback_cycles_raw = int(history.get("fallback_cycles") or 0)
-        if suppress_routine_increment:
-            cycles = fallback_cycles_raw
-            if env_cycle_counter is not None:
-                cycles = env_cycle_counter
-        else:
-            cycles = fallback_cycles_raw + 1
-            history["fallback_cycles"] = cycles
+        fallback_cycles_recorded = int(history.get("fallback_cycles") or 0)
+        if fallback_cycles_recorded != completed_fallback_cycles:
+            history["fallback_cycles"] = completed_fallback_cycles
             _save_fallback_history(history)
-            probe_interval = max(1, int(history.get("fallback_probe_interval") or FALLBACK_PROBE_INTERVAL))
-            fallback_head = history.get("fallback_last_head")
-            if fallback_head and cycles >= probe_interval:
-                history["fallback_cycles"] = 0
-                script_path = _materialize_commit_script(fallback_head)
-                if script_path:
-                    short = fallback_head[:8]
-                    context = f"probe {short}"
-                    version_label = f"commit.{short}"
-                    source_label = f"probe {short}"
-                    commit_hash, commit_message = _resolve_commit_details(fallback_head)
-                    success = _run_script_candidate(
-                        script_path,
-                        version_label,
-                        "scheduled fallback probe",
-                        source_label,
-                        fallback_context=context,
-                        commit_hash=commit_hash or fallback_head,
-                        commit_message=commit_message,
-                        cycle_kind="backup",
-                        cycle_mode="current",
-                        cycle_counter=cycles,
-                        suppress_routine_increment=True,
-                    )
-                    if success:
-                        history.setdefault("commits", {})[fallback_head] = "success"
-                        history["fallback_active"] = False
-                        history["fallback_cycles"] = 0
-                        history["fallback_last_head"] = None
-                        history["fallback_source"] = None
-                        history["fallback_target"] = None
-                        _save_fallback_history(history)
-                        return
+        if suppress_routine_increment and env_cycle_counter is not None:
+            cycles = env_cycle_counter
+        else:
+            cycles = completed_fallback_cycles + (0 if suppress_routine_increment else 1)
+        probe_interval = max(1, int(history.get("fallback_probe_interval") or FALLBACK_PROBE_INTERVAL))
+        fallback_head = history.get("fallback_last_head")
+        if not suppress_routine_increment and fallback_head and cycles >= probe_interval:
+            history["fallback_cycles"] = completed_fallback_cycles
+            _save_fallback_history(history)
+            script_path = _materialize_commit_script(fallback_head)
+            if script_path:
+                short = fallback_head[:8]
+                context = f"probe {short}"
+                version_label = f"commit.{short}"
+                source_label = f"probe {short}"
+                commit_hash, commit_message = _resolve_commit_details(fallback_head)
+                success = _run_script_candidate(
+                    script_path,
+                    version_label,
+                    "scheduled fallback probe",
+                    source_label,
+                    fallback_context=context,
+                    commit_hash=commit_hash or fallback_head,
+                    commit_message=commit_message,
+                    cycle_kind="backup",
+                    cycle_mode="current",
+                    cycle_counter=cycles,
+                    suppress_routine_increment=True,
+                )
+                if success:
+                    history.setdefault("commits", {})[fallback_head] = "success"
+                    history["fallback_active"] = False
+                    history["fallback_cycles"] = 0
+                    history["fallback_last_head"] = None
+                    history["fallback_source"] = None
+                    history["fallback_target"] = None
                     _save_fallback_history(history)
                     return
                 _save_fallback_history(history)
+                return
+        os.environ["BYBITBOT_CYCLE_COUNTER"] = str(cycles)
     else:
-        base_counter = int(history.get("routine_counter") or 0)
-        if suppress_routine_increment:
-            routine_counter = env_cycle_counter if env_cycle_counter is not None else base_counter
-        else:
-            routine_counter = base_counter + 1
-            history["routine_counter"] = routine_counter
+        recorded_counter = int(history.get("routine_counter") or 0)
+        if recorded_counter != completed_cycles:
+            history["routine_counter"] = completed_cycles
             _save_fallback_history(history)
-            if routine_counter % 5 == 0:
+        if suppress_routine_increment and env_cycle_counter is not None:
+            routine_counter = env_cycle_counter
+        else:
+            routine_counter = completed_cycles + (0 if suppress_routine_increment else 1)
+            if not suppress_routine_increment and routine_counter % 5 == 0:
                 if _run_routine_backup(history, routine_counter):
                     return
-        if routine_counter is None or routine_counter < 0:
-            routine_counter = base_counter
+        if routine_counter is None or routine_counter < 1:
+            routine_counter = max(1, completed_cycles)
         os.environ["BYBITBOT_CYCLE_COUNTER"] = str(routine_counter)
         os.environ["BYBITBOT_CYCLE_KIND"] = "normal"
 

@@ -49,6 +49,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
 CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
 EQUITY_HISTORY_FILE = SCRIPT_DIR / "equity_history.json"
+CYCLE_STATE_FILE = SCRIPT_DIR / "cycle_state.json"
+FALLBACK_HISTORY_FILE = SCRIPT_DIR / "fallback_history.json"
+CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
 DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
@@ -387,6 +390,172 @@ def safe_int(val):
     return None
 
 
+def get_current_branch_name() -> str | None:
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(SCRIPT_DIR),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
+def _format_commit_timestamp(iso_text: str | None) -> str | None:
+    if not iso_text:
+        return None
+    iso_clean = iso_text.replace("Z", "+00:00")
+    try:
+        dt_obj = datetime.datetime.fromisoformat(iso_clean)
+    except (TypeError, ValueError):
+        return iso_text
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=datetime.timezone.utc)
+    local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+    local_dt = dt_obj.astimezone(local_tz)
+    return local_dt.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _load_cycle_state() -> dict[str, Any]:
+    try:
+        raw = CYCLE_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    except Exception:
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    if not isinstance(data, dict):
+        return {"total_cycles": 0, "fallback_cycles": 0}
+    total_cycles = safe_int(data.get("total_cycles")) or 0
+    fallback_cycles = safe_int(data.get("fallback_cycles")) or 0
+    data["total_cycles"] = total_cycles
+    data["fallback_cycles"] = fallback_cycles
+    return data
+
+
+def _save_cycle_state(state: dict[str, Any]) -> None:
+    try:
+        CYCLE_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _sync_fallback_history_counters(
+    total_cycles: int,
+    fallback_cycles: int,
+) -> None:
+    try:
+        raw = FALLBACK_HISTORY_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        history = {}
+    except Exception:
+        return
+    else:
+        try:
+            history = json.loads(raw)
+        except json.JSONDecodeError:
+            history = {}
+    if not isinstance(history, dict):
+        history = {}
+    changed = False
+    if history.get("routine_counter") != total_cycles:
+        history["routine_counter"] = total_cycles
+        changed = True
+    if bool(history.get("fallback_active")):
+        if history.get("fallback_cycles") != fallback_cycles:
+            history["fallback_cycles"] = fallback_cycles
+            changed = True
+    if changed:
+        try:
+            FALLBACK_HISTORY_FILE.write_text(
+                json.dumps(history, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+
+def _record_cycle_completion(
+    base_state: dict[str, Any],
+    *,
+    cycle_kind: str | None,
+    cycle_mode: str | None,
+    branch_name: str | None,
+    commit_hash: str | None,
+    commit_timestamp: str | None,
+) -> dict[str, Any]:
+    state = dict(base_state or {})
+    total_cycles = safe_int(state.get("total_cycles")) or 0
+    total_cycles += 1
+    state["total_cycles"] = total_cycles
+    kind_normalized = (cycle_kind or "normal").strip().lower()
+    mode_normalized = (cycle_mode or "last").strip().lower()
+    if kind_normalized != "normal":
+        fallback_cycles = safe_int(state.get("fallback_cycles")) or 0
+        fallback_cycles += 1
+        state["fallback_cycles"] = fallback_cycles
+    else:
+        state["fallback_cycles"] = 0
+    state["last_cycle"] = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "kind": kind_normalized or "normal",
+        "mode": mode_normalized or "last",
+        "branch": branch_name or None,
+        "commit": commit_hash or None,
+        "commit_timestamp": commit_timestamp or None,
+    }
+    state.pop("next_cycle_prepared", None)
+    _save_cycle_state(state)
+    _sync_fallback_history_counters(total_cycles, state.get("fallback_cycles") or 0)
+    return state
+
+
+def _emit_realized_pnl_message(stage_label: str, value: float | None, fill_count: int | None) -> None:
+    if value is None or not math.isfinite(value):
+        return
+    fills_suffix = ""
+    if fill_count:
+        fills_suffix = f" ({fill_count} fills)"
+    stage_clean = (stage_label or "").strip()
+    if stage_clean:
+        label_text = f"6h closed, {stage_clean}"
+    else:
+        label_text = "6h closed"
+    message = f"PnL ({label_text}): {value:+.2f} USDT{fills_suffix}"
+    colour = Fore.CYAN if value >= 0 else Fore.YELLOW
+    log(message, colour)
+    try:
+        send_tg(message)
+    except Exception:
+        pass
+
+
+def _emit_unrealized_pnl_message(stage_label: str, value: float, positions_count: int) -> None:
+    stage_clean = (stage_label or "").strip()
+    label_text = "open unrealized"
+    if stage_clean:
+        label_text = f"{label_text}, {stage_clean}"
+    positions_suffix = ""
+    if positions_count:
+        suffix_word = "position" if positions_count == 1 else "positions"
+        positions_suffix = f" ({positions_count} {suffix_word})"
+    message = f"PnL ({label_text}): {value:+.2f} USDT{positions_suffix}"
+    colour = Fore.CYAN if value >= 0 else Fore.YELLOW
+    log(message, colour)
+    try:
+        send_tg(message)
+    except Exception:
+        pass
 def _pick_positive_float(*values) -> float | None:
     for value in values:
         candidate = safe_float(value)
@@ -3063,32 +3232,57 @@ def _extract_closed_pnl_from_payload(payload: Any) -> float | None:
     Try to find a numeric closed/realized PnL field inside an order/trade payload.
     Ignores unrealized/floating keys.
     """
-    if isinstance(payload, dict):
-        candidates: list[float] = []
-        for key, value in payload.items():
-            lower_key = str(key).lower()
-            if isinstance(value, (dict, list, tuple, set)):
-                nested = _extract_closed_pnl_from_payload(value)
-                if nested is not None:
-                    candidates.append(nested)
-                continue
-            if "pnl" not in lower_key and "rpl" not in lower_key:
-                continue
-            if any(term in lower_key for term in ("unreal", "floating", "u_pnl")):
-                continue
-            if not any(term in lower_key for term in ("closed", "close", "realised", "realized", "realized", "settled", "order", "rpl", "realisedpnl", "realizedpnl")) and lower_key not in {"pnl", "rpl"}:
-                continue
-            numeric = safe_float(value)
-            if numeric is not None:
-                candidates.append(numeric)
-        if candidates:
-            return candidates[0]
-    elif isinstance(payload, (list, tuple, set)):
-        for item in payload:
-            extracted = _extract_closed_pnl_from_payload(item)
-            if extracted is not None:
-                return extracted
-    return None
+    def gather(obj: Any, depth: int = 0) -> list[tuple[float, int]]:
+        if depth > 4:
+            return []
+        candidates_local: list[tuple[float, int]] = []
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                lower_key = str(key).lower()
+                if isinstance(value, (dict, list, tuple, set)):
+                    candidates_local.extend(gather(value, depth + 1))
+                    continue
+                if "pnl" not in lower_key and "rpl" not in lower_key:
+                    continue
+                if any(term in lower_key for term in ("unreal", "floating", "u_pnl")):
+                    continue
+                if not any(
+                    term in lower_key
+                    for term in (
+                        "closed",
+                        "close",
+                        "realised",
+                        "realized",
+                        "settled",
+                        "settle",
+                        "order",
+                        "realisedpnl",
+                        "realizedpnl",
+                        "realise",
+                    )
+                ) and lower_key not in {"pnl", "rpl"}:
+                    continue
+                numeric = safe_float(value)
+                if numeric is None:
+                    continue
+                score = 1
+                if "realised" in lower_key or "realized" in lower_key or "settle" in lower_key:
+                    score += 3
+                elif "closed" in lower_key or "close" in lower_key:
+                    score += 2
+                elif lower_key in {"pnl", "rpl"}:
+                    score += 1
+                candidates_local.append((numeric, score))
+        elif isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                candidates_local.extend(gather(item, depth + 1))
+        return candidates_local
+
+    candidates = gather(payload, 0)
+    if not candidates:
+        return None
+    best_val, _ = max(candidates, key=lambda item: (item[1], abs(item[0])))
+    return best_val
 
 
 def _collect_recent_closed_pnl(
@@ -3198,6 +3392,28 @@ def _collect_recent_closed_pnl(
     if fill_count > 0:
         return total_pnl, fill_count, warnings
     return None, 0, warnings
+
+
+def _sum_unrealized_pnl(positions_map: dict[str, Any] | None) -> tuple[float, int]:
+    total = 0.0
+    count = 0
+    if not isinstance(positions_map, dict):
+        return 0.0, 0
+    for payload in positions_map.values():
+        if not isinstance(payload, dict):
+            continue
+        raw_value = payload.get("unrealizedPnl")
+        if raw_value is None:
+            raw_info = payload.get("raw")
+            if isinstance(raw_info, dict):
+                raw_value = raw_info.get("unrealisedPnl") or raw_info.get("unrealizedPnl")
+        value = safe_float(raw_value)
+        if value is None or not math.isfinite(value):
+            continue
+        total += value
+        if abs(value) > 1e-8:
+            count += 1
+    return total, count
 
 
 def _adjust_dynamic_risk_from_pnl(
@@ -5743,10 +5959,16 @@ def run_cycle():
     source_context = os.getenv("BYBITBOT_FALLBACK_CONTEXT")
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
-    cycle_counter = (os.getenv("BYBITBOT_CYCLE_COUNTER") or "").strip()
+    cycle_state = _load_cycle_state()
+    real_cycles_completed = safe_int(cycle_state.get("total_cycles")) or 0
+    next_cycle_number = real_cycles_completed + 1
+    cycle_counter = str(next_cycle_number)
+    os.environ["BYBITBOT_CYCLE_COUNTER"] = cycle_counter
     cycle_descriptor = ""
+    commit_hash, commit_message, commit_timestamp = get_current_commit_info()
     commit_descriptor = ""
     commit_short = ""
+    branch_name = get_current_branch_name()
     if source_label and source_ref:
         cycle_label_parts: list[str] = []
         if cycle_kind or cycle_mode:
@@ -5766,22 +5988,35 @@ def run_cycle():
             git_line += f": {source_message_line}"
         if source_context:
             git_line += f" ({source_context})"
+        if branch_name:
+            git_line += f" | branch {branch_name}"
+        if commit_timestamp:
+            formatted_ts = _format_commit_timestamp(commit_timestamp)
+            if formatted_ts:
+                git_line += f" | committed {formatted_ts}"
         _send_git_notification(git_line)
         commit_short = (source_ref or "")[:8]
         commit_descriptor = commit_short or (source_ref or "")
         if source_message_line:
             commit_descriptor = f"{commit_descriptor} {source_message_line}"
     else:
-        commit_hash, commit_message, commit_ts = get_current_commit_info()
         if commit_hash:
             short_hash = commit_hash[:8]
             message_text = (commit_message or "no commit message").splitlines()[0]
-            timestamp_text = commit_ts or "timestamp unavailable"
-            git_line = f"[GIT] {short_hash} @ {timestamp_text} - {message_text} (version {BOT_VERSION})"
+            timestamp_text = commit_timestamp or "timestamp unavailable"
+            formatted_ts = _format_commit_timestamp(commit_timestamp)
+            if formatted_ts:
+                timestamp_display = formatted_ts
+            else:
+                timestamp_display = timestamp_text
+            git_line = f"[GIT] {short_hash} @ {timestamp_display} - {message_text} (version {BOT_VERSION})"
+            if branch_name:
+                git_line += f" | branch {branch_name}"
             _send_git_notification(git_line)
             commit_short = short_hash
             commit_descriptor = f"{short_hash} {message_text}"
     commit_descriptor = commit_descriptor.strip()
+    commit_time_display = _format_commit_timestamp(commit_timestamp) if commit_timestamp else None
     last_equity = equity
     last_available_margin = available_margin
     log(f"🚀 Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
@@ -5899,6 +6134,10 @@ def run_cycle():
         preview_pairs = selection_result.get("pairs") or []
         if preview_pairs:
             overview_lines.append("Pairs: " + ", ".join(preview_pairs[:6]))
+        if branch_name:
+            overview_lines.append(f"Branch: {branch_name}")
+        if commit_time_display:
+            overview_lines.append(f"Commit date: {commit_time_display}")
         commit_display = (commit_descriptor or commit_short).strip()
         if commit_display:
             if len(commit_display) > 80:
@@ -6017,6 +6256,39 @@ def run_cycle():
     if len(available_pairs) > symbol_processing_limit:
         available_pairs = available_pairs[:symbol_processing_limit]
     log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
+
+    start_pnl_symbols: set[str] = set(available_pairs)
+    start_pnl_symbols.update(position_symbols)
+    start_pnl_symbols.update(order_symbols)
+    start_pnl_symbols.update(order_symbols_non_reduce)
+    start_pnl_symbols.update(open_orders_prefetch.keys())
+    start_pnl_list = sorted(sym for sym in start_pnl_symbols if sym)
+    start_closed_pnl_value: float | None = None
+    start_closed_pnl_count = 0
+    if start_pnl_list:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        window_start = now_utc - datetime.timedelta(hours=PNL_LOOKBACK_HOURS)
+        start_closed_pnl_value, start_closed_pnl_count, start_warnings = _collect_recent_closed_pnl(
+            ex,
+            start_pnl_list,
+            window_start,
+            now_utc,
+        )
+        for warning_msg in start_warnings[:3]:
+            log(warning_msg, Fore.LIGHTBLACK_EX)
+        if len(start_warnings) > 3:
+            log(f"[PnL] Suppressed {len(start_warnings) - 3} additional warnings (start snapshot).", Fore.LIGHTBLACK_EX)
+    start_unreal_total, start_unreal_count = _sum_unrealized_pnl(positions_map)
+    if start_closed_pnl_value is not None:
+        _emit_realized_pnl_message("start", start_closed_pnl_value, start_closed_pnl_count)
+    else:
+        message_na = "PnL (6h closed, start): n/a"
+        log(message_na, Fore.LIGHTBLACK_EX)
+        try:
+            send_tg(message_na)
+        except Exception:
+            pass
+    _emit_unrealized_pnl_message("start", start_unreal_total, start_unreal_count)
 
     open_orders_cache = dict(open_orders_prefetch)
 
@@ -7445,6 +7717,9 @@ def run_cycle():
                 log(warning_msg, Fore.LIGHTBLACK_EX)
             if len(closed_warnings) > 3:
                 log(f"[PnL] Suppressed {len(closed_warnings) - 3} additional warnings.", Fore.LIGHTBLACK_EX)
+            unreal_total, unreal_count = _sum_unrealized_pnl(final_positions_map)
+
+            unreal_reported = False
             if closed_pnl_value is not None:
                 risk_msg = _adjust_dynamic_risk_from_pnl(closed_pnl_value, "closed", closed_pnl_count)
                 if risk_msg:
@@ -7453,10 +7728,9 @@ def run_cycle():
                         send_tg(risk_msg)
                     except Exception:
                         pass
-                detail_suffix = f" ({closed_pnl_count} fills)" if closed_pnl_count else ""
-                pnl_message = f"PnL (6h closed): {closed_pnl_value:+.2f} USDT{detail_suffix}"
-                log(pnl_message, Fore.CYAN if closed_pnl_value >= 0 else Fore.YELLOW)
-                send_tg(pnl_message)
+                _emit_realized_pnl_message("", closed_pnl_value, closed_pnl_count)
+                _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
+                unreal_reported = True
             else:
                 pnl_value, reference_value, pnl_basis = _compute_recent_pnl(
                     history_entries,
@@ -7476,6 +7750,8 @@ def run_cycle():
                     pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
                     log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
                     send_tg(pnl_message)
+                    _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
+                    unreal_reported = True
                 else:
                     if DYNAMIC_RISK_ENABLED:
                         baseline_msg = _adjust_dynamic_risk_from_pnl(0.0, "baseline", 0)
@@ -7485,6 +7761,8 @@ def run_cycle():
                                 send_tg(baseline_msg)
                             except Exception:
                                 pass
+            if not unreal_reported:
+                _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
@@ -7497,6 +7775,14 @@ def run_cycle():
     end_banner = f"{session_separator} END SESSION {end_stamp} {session_separator}"
     log(end_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nEND SESSION {end_stamp}\n{session_separator}")
+    _record_cycle_completion(
+        cycle_state,
+        cycle_kind=cycle_kind or "normal",
+        cycle_mode=cycle_mode or "last",
+        branch_name=branch_name,
+        commit_hash=commit_hash or source_ref or None,
+        commit_timestamp=commit_timestamp,
+    )
     return next_delay_minutes
 
 def main():
