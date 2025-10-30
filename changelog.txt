@@ -174,3 +174,7 @@ Recent commits (last 8)
 2025.10.28.10
 - Allowed scale-in extra orders and preserved staged ladders when cleaning limits.
 - Switched trailing-stop params to trailingAmount for Bybit USDT Perps to avoid API errors.
+2025.10.30.01
+- Logged active branch and commit timestamp each cycle and shared 6h PnL snapshots at session start/end.
+- Persisted real trade-cycle counters to align fallback probes with actual bot runs.
+- Detailed redundant stop cleanup messages with order specs and switched trailing protection to Bybit trading-stop API.

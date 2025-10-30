@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.10
+# Version: 2025.10.30.01
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.10"
+BOT_VERSION = "2025.10.30.01"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -4406,11 +4406,14 @@ def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_s
             continue
         if trigger_price is None or not math.isfinite(trigger_price):
             continue
+        summary_text = _summarize_order_spec(order)
+        summary_repr = f"{order_id}: {summary_text}" if summary_text else str(order_id)
         stop_entries.append(
             {
                 "id": str(order_id),
                 "trigger": trigger_price,
                 "amount": remaining,
+                "summary": summary_repr,
             }
         )
 
@@ -4427,17 +4430,18 @@ def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_s
         if coverage >= position_qty - tolerance:
             break
 
-    cancelled_ids: list[str] = []
+    cancelled_entries: list[str] = []
     cancel_errors: list[tuple[str, str]] = []
     for entry in stop_entries:
         if entry["id"] in keep_ids:
             continue
         success, err = cancel_order_by_id(exchange, symbol, entry["id"])
         if success:
-            cancelled_ids.append(entry["id"])
+            cancelled_entries.append(entry.get("summary") or entry["id"])
         else:
-            cancel_errors.append((entry["id"], err))
-    return cancelled_ids, cancel_errors
+            descriptor = entry.get("summary") or entry["id"]
+            cancel_errors.append((descriptor, err))
+    return cancelled_entries, cancel_errors
 
 
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
@@ -4470,7 +4474,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         reduce_orders_source = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
     reduce_orders = [order for order in reduce_orders_source if isinstance(order, dict)]
     position_qty = abs(position_amount)
-    cancelled_stop_ids, cancel_stop_errors = _cleanup_redundant_stop_orders(
+    cancelled_stop_entries, cancel_stop_errors = _cleanup_redundant_stop_orders(
         exchange,
         symbol,
         reduce_orders,
@@ -4478,15 +4482,15 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         position_qty,
         is_long,
     )
-    if cancelled_stop_ids:
-        summary = ", ".join(cancelled_stop_ids)
+    if cancelled_stop_entries:
+        summary = "; ".join(cancelled_stop_entries)
         log(f"✅ {symbol}: удалены лишние стоп-ордера: {summary}", Fore.LIGHTBLUE_EX)
         send_tg(f"✅ {symbol}: удалены лишние стоп-ордера: {summary}")
     if cancel_stop_errors:
-        details = "; ".join(f"{oid}: {err}" for oid, err in cancel_stop_errors)
+        details = "; ".join(f"{descriptor} -> {err}" for descriptor, err in cancel_stop_errors)
         log(f"⚠️ {symbol}: не удалось удалить часть стоп-ордеров: {details}", Fore.YELLOW)
         send_tg(f"⚠️ {symbol}: ошибка при удалении стоп-ордеров: {details}")
-    if cancelled_stop_ids or cancel_stop_errors:
+    if cancelled_stop_entries or cancel_stop_errors:
         open_orders = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
         reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
 
@@ -4696,16 +4700,51 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         created_log_parts.extend(take_created)
 
     if trailing_offset is not None:
+        trailing_amount = abs(trailing_offset)
+        trailing_success = False
+        trailing_errors: list[str] = []
         try:
-            trailing_params = dict(base_params)
-            trailing_params.pop("reduceOnly", None)
-            trailing_params["trailingAmount"] = abs(trailing_offset)
+            trailing_params = {
+                "category": "linear",
+                "trailingStop": trailing_amount,
+            }
+            if position_idx is not None:
+                trailing_params["positionIdx"] = position_idx
             if reference_price and math.isfinite(reference_price):
-                trailing_params.setdefault("triggerPrice", reference_price)
-            exchange.create_order(exchange_symbol, "trailingStop", protection_side, qty, None, trailing_params)
-            created_log_parts.append(f"trailingStop {trailing_offset:.4f}")
+                trailing_params["triggerPrice"] = reference_price
+            trailing_params["side"] = "Sell" if is_long else "Buy"
+            exchange.set_trading_stop(exchange_symbol, trailing_params)
+            created_log_parts.append(f"tradingStop trailing {trailing_amount:.4f}")
+            trailing_success = True
+        except AttributeError:
+            trailing_errors.append("set_trading_stop not supported by exchange")
         except Exception as exc:
-            log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп: {exc}", Fore.YELLOW)
+            trailing_errors.append(str(exc))
+        if not trailing_success:
+            try:
+                trailing_params = dict(base_params)
+                trailing_params.pop("reduceOnly", None)
+                trailing_params["category"] = "linear"
+                trailing_params["closeOnTrigger"] = True
+                trailing_params["trailingAmount"] = trailing_amount
+                trailing_params["side"] = protection_side.upper()
+                if reference_price and math.isfinite(reference_price):
+                    trailing_params.setdefault("triggerPrice", reference_price)
+                exchange.create_order(
+                    exchange_symbol,
+                    "trailingStop",
+                    protection_side,
+                    qty,
+                    None,
+                    trailing_params,
+                )
+                created_log_parts.append(f"trailingStop {trailing_amount:.4f}")
+                trailing_success = True
+            except Exception as exc:
+                trailing_errors.append(str(exc))
+        if not trailing_success and trailing_errors:
+            combined = "; ".join(trailing_errors)
+            log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
 
     if created_log_parts:
         log(f"🛡️ {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)
