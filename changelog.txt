@@ -178,3 +178,5 @@ Recent commits (last 8)
 - Logged active branch and commit timestamp each cycle and shared 6h PnL snapshots at session start/end.
 - Persisted real trade-cycle counters to align fallback probes with actual bot runs.
 - Detailed redundant stop cleanup messages with order specs and switched trailing protection to Bybit trading-stop API.
+2025.10.30.02
+- Excluded legacy branch from routine backup rotations to prevent surprise launches on outdated code.
