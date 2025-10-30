@@ -169,3 +169,5 @@ Recent commits (last 8)
 - Expanded dynamic risk controls: telemetry now respects break-even states and context shares current risk window with AI.
 2025.10.28.8
 - Fixed NameError when launching random/routine backups by guarding suppress flags and passing them explicitly.
+2025.10.28.9
+- Preserved ladder/scale-in limit orders during cleanup to keep staged entries intact.

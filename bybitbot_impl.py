@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.8
+# Version: 2025.10.28.9
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.8"
+BOT_VERSION = "2025.10.28.9"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -2516,6 +2516,18 @@ def _cleanup_excess_non_reduce_limits(exchange, symbol, open_orders, position_si
         if _is_truthy_flag(order.get("reduceOnly")):
             continue
         order_type = (order.get("type") or "").lower()
+        order_intent_raw = (
+            order.get("intent")
+            or order.get("tag")
+            or order.get("note")
+            or order.get("comment")
+            or ""
+        )
+        order_intent = str(order_intent_raw).lower()
+        if _is_truthy_flag(order.get("ladder")) or any(
+            keyword in order_intent for keyword in ("ladder", "scale", "step", "stagger", "laddering")
+        ):
+            continue
         if order_type != "limit":
             continue
         price = safe_float(order.get("price"))
