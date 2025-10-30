@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.28.5
+# Version: 2025.10.28.6
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.28.5"
+BOT_VERSION = "2025.10.28.6"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -57,6 +57,10 @@ ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
 _LAST_COMMIT_HASH: Optional[str] = None
 SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
 DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
+CURRENT_RISK_PCT: float = 0.0
+DYNAMIC_RISK_ENABLED: bool = True
+MIN_DYNAMIC_RISK_PCT: float = 0.0
+MAX_DYNAMIC_RISK_PCT: float = 0.0
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -1625,6 +1629,7 @@ def refresh_settings():
     global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR, TRAILING_ATR_MULT
     global DEFAULT_NEXT_RUN_MINUTES
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS, MAX_POSITIONS_PER_BASE
+    global CURRENT_RISK_PCT, DYNAMIC_RISK_ENABLED, MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
     global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
@@ -1641,6 +1646,20 @@ def refresh_settings():
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
     RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.015)))
+    DYNAMIC_RISK_ENABLED = env_int("RISK_DYNAMIC_ENABLED", 1) != 0
+    base_min_default = max(0.0005, RISK_PCT * 0.5)
+    base_max_default = max(RISK_PCT, RISK_PCT * 1.8)
+    try:
+        MIN_DYNAMIC_RISK_PCT = float(os.getenv("MIN_DYNAMIC_RISK_PCT", str(base_min_default)))
+    except (TypeError, ValueError):
+        MIN_DYNAMIC_RISK_PCT = base_min_default
+    try:
+        MAX_DYNAMIC_RISK_PCT = float(os.getenv("MAX_DYNAMIC_RISK_PCT", str(base_max_default)))
+    except (TypeError, ValueError):
+        MAX_DYNAMIC_RISK_PCT = base_max_default
+    MIN_DYNAMIC_RISK_PCT = max(1e-5, min(MIN_DYNAMIC_RISK_PCT, RISK_PCT))
+    MAX_DYNAMIC_RISK_PCT = max(RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT))
+    CURRENT_RISK_PCT = min(MAX_DYNAMIC_RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, CURRENT_RISK_PCT if CURRENT_RISK_PCT > 0 else RISK_PCT))
     SL_ATR = float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
     TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
@@ -5429,6 +5448,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
 def run_cycle():
     global DYNAMIC_SYMBOL_ALIASES
     global SYMBOL_RULES_CACHE
+    global CURRENT_RISK_PCT
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
@@ -5502,6 +5522,12 @@ def run_cycle():
         equity = 64.0
     if available_margin <= 0:
         available_margin = equity
+    current_risk_baseline = RISK_PCT
+    if CURRENT_RISK_PCT <= 0 or not math.isfinite(CURRENT_RISK_PCT):
+        CURRENT_RISK_PCT = current_risk_baseline
+    else:
+        CURRENT_RISK_PCT = min(MAX_DYNAMIC_RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, CURRENT_RISK_PCT))
+    initial_cycle_risk_pct = CURRENT_RISK_PCT
     try:
         history_bootstrap = _load_equity_history()
         _update_equity_history(
@@ -5518,6 +5544,15 @@ def run_cycle():
     start_banner = f"{session_separator} START SESSION {session_stamp} {session_separator}"
     log(start_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nSTART SESSION {session_stamp}\n{session_separator}")
+    if DYNAMIC_RISK_ENABLED and abs(CURRENT_RISK_PCT - current_risk_baseline) > max(1e-5, current_risk_baseline * 0.01):
+        risk_state_msg = (
+            f"[RISK] Cycle risk pct {CURRENT_RISK_PCT:.4f} (base {RISK_PCT:.4f}, range {MIN_DYNAMIC_RISK_PCT:.4f}-{MAX_DYNAMIC_RISK_PCT:.4f})"
+        )
+        log(risk_state_msg, Fore.LIGHTBLACK_EX)
+        try:
+            send_tg(risk_state_msg)
+        except Exception:
+            pass
     source_label = os.getenv("BYBITBOT_SOURCE_LABEL")
     source_ref = os.getenv("BYBITBOT_SOURCE_REF")
     source_message = os.getenv("BYBITBOT_SOURCE_MESSAGE")
@@ -6095,6 +6130,13 @@ def run_cycle():
                 "timeframes": timeframes_payload,
                 "indicators": requested_indicators,
                 "primary": primary_tf,
+                "risk": {
+                    "base_pct": RISK_PCT,
+                    "current_pct": CURRENT_RISK_PCT,
+                    "min_pct": MIN_DYNAMIC_RISK_PCT,
+                    "max_pct": MAX_DYNAMIC_RISK_PCT,
+                    "dynamic_enabled": bool(DYNAMIC_RISK_ENABLED),
+                },
             }
             if symbol_meta.get("notional_pct") is not None:
                 extra_serialized["recommended_notional_pct"] = symbol_meta.get("notional_pct")
@@ -6554,7 +6596,7 @@ def run_cycle():
                             send_tg(f"⚠️ {sym}: не удалось оценить риск, сделка пропущена")
                             continue
                         risk_budget_base = max(0.0, min(equity, available_margin))
-                        risk_capital = risk_budget_base * RISK_PCT
+                        risk_capital = risk_budget_base * CURRENT_RISK_PCT
                         if risk_capital <= 0:
                             log(f"⚠️ Недостаточно бюджета риска для {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
                             send_tg(f"⚠️ {sym}: недостаточно свободного баланса ({available_margin:.2f} USDT)")
@@ -7155,6 +7197,7 @@ def run_cycle():
             if len(closed_warnings) > 3:
                 log(f"[PnL] Suppressed {len(closed_warnings) - 3} additional warnings.", Fore.LIGHTBLACK_EX)
             if closed_pnl_value is not None:
+                _adjust_dynamic_risk(closed_pnl_value, "closed", closed_pnl_count)
                 detail_suffix = f" ({closed_pnl_count} fills)" if closed_pnl_count else ""
                 pnl_message = f"PnL (6h closed): {closed_pnl_value:+.2f} USDT{detail_suffix}"
                 log(pnl_message, Fore.CYAN if closed_pnl_value >= 0 else Fore.YELLOW)
@@ -7167,10 +7210,14 @@ def run_cycle():
                     realized_end,
                 )
                 if pnl_value is not None and reference_value is not None:
+                    _adjust_dynamic_risk(pnl_value, pnl_basis or "equity", 0)
                     basis_label = "realized" if pnl_basis == "realized" else "equity"
                     pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
                     log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
                     send_tg(pnl_message)
+                else:
+                    if DYNAMIC_RISK_ENABLED:
+                        _adjust_dynamic_risk(0.0, "baseline", 0)
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)

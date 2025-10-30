@@ -160,3 +160,7 @@ Recent commits (last 8)
 - Propagated suppress flags via environment for fallback/random launches to keep latest commit active.
 2025.10.28.5
 - Defined MAX_POSITIONS_PER_BASE before settings load to fix NameError on initial import.
+2025.10.28.6
+- Added dynamic risk scaling driven by recent PnL, with guardrails and logging for cycle risk posture.
+- Shared risk telemetry in AI context payload to inform decision prompts.
+- Logged per-cycle risk state and ensured baseline recovery when no PnL data is available.
