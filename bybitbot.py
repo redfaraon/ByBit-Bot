@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Entry point and fallback wrapper for bybitbot_impl."""
 import importlib
 import json
@@ -914,4 +914,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
