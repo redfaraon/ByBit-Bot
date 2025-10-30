@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.28.7")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.28.8")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 
@@ -590,6 +590,7 @@ def _run_routine_backup(history: dict, routine_counter: int) -> bool:
         cycle_kind=candidate.cycle_kind,
         cycle_mode=candidate.cycle_mode,
         cycle_counter=candidate.cycle_counter,
+        suppress_routine_increment=True,
     )
     candidate.finalize(success)
     return success
@@ -662,6 +663,7 @@ def _run_script_candidate(
     cycle_kind: str | None = None,
     cycle_mode: str | None = None,
     cycle_counter: int | None = None,
+    suppress_routine_increment: bool | None = None,
 ) -> bool:
     _, fb_header, fb_lines = _build_commit_changelog()
     fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
@@ -701,7 +703,10 @@ def _run_script_candidate(
         env["BYBITBOT_FALLBACK_CONTEXT"] = fallback_context
     else:
         env.pop("BYBITBOT_FALLBACK_CONTEXT", None)
-    should_suppress = suppress_routine_increment
+    local_suppress = suppress_routine_increment if suppress_routine_increment is not None else False
+    if isinstance(local_suppress, str):
+        local_suppress = local_suppress.strip().lower() in {"1", "true", "yes", "y", "on"}
+    should_suppress = bool(local_suppress)
     if not should_suppress:
         if cycle_kind and cycle_kind != "normal":
             should_suppress = True
@@ -782,6 +787,7 @@ def _run_backups(reason: str) -> bool:
         cycle_kind=candidate.cycle_kind,
         cycle_mode=candidate.cycle_mode,
         cycle_counter=candidate.cycle_counter,
+        suppress_routine_increment=True,
     )
     candidate.finalize(success)
     return success
@@ -833,6 +839,7 @@ def main():
                         cycle_kind="backup",
                         cycle_mode="current",
                         cycle_counter=cycles,
+                        suppress_routine_increment=True,
                     )
                     if success:
                         history.setdefault("commits", {})[fallback_head] = "success"

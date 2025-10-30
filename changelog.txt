@@ -167,3 +167,5 @@ Recent commits (last 8)
 2025.10.28.7
 - Added ATR-based break-even stop adjustments with configurable thresholds, improving downside protection once trades move in profit.
 - Expanded dynamic risk controls: telemetry now respects break-even states and context shares current risk window with AI.
+2025.10.28.8
+- Fixed NameError when launching random/routine backups by guarding suppress flags and passing them explicitly.
