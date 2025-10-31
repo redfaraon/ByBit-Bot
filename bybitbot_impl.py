@@ -4904,9 +4904,20 @@ def execute_extra_orders(
         if not isinstance(order, dict):
             log(f"[WARN] Extra order #{idx} for {symbol} is not a dict; skipping.", Fore.YELLOW)
             continue
-        if order.get("status") is not None and order.get("id"):
-            log(f"[INFO] Retaining existing order {order.get('id')} for {symbol}; skipping extra placement.", Fore.LIGHTBLACK_EX)
-            continue
+        status_value = order.get("status")
+        order_id_value = order.get("id")
+        if status_value is not None and order_id_value:
+            reduce_flag = _is_truthy_flag(order.get("reduceOnly"))
+            order_type_lower = (order.get("type") or "").lower()
+            amount_val = safe_float(order.get("amount") or order.get("qty") or order.get("quantity"))
+            is_close_intent = reduce_flag and order_type_lower in {"market", "marketclose", "close", ""} and (amount_val is None or amount_val > 0)
+            if is_close_intent:
+                order = dict(order)
+                order.pop("status", None)
+                order.pop("id", None)
+            else:
+                log(f"[INFO] Retaining existing order {order_id_value} for {symbol}; skipping extra placement.", Fore.LIGHTBLACK_EX)
+                continue
         raw_type = (
             order.get("type")
             or order.get("orderType")
