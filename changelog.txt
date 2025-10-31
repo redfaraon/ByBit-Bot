@@ -185,3 +185,5 @@ Recent commits (last 8)
 - Added explicit cycle number logging and skipped legacy branch probes during routine backups.
 2025.10.31.01
 - Fixed cycle counter init so start banner shows correct number and prevents fallback launch failures.
+2025.10.31.02
+- Added dynamic trailing-stop tightening based on ATR profit distance to lock in gains with less whipsaw.

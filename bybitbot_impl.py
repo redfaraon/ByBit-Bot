@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.31.01
+# Version: 2025.10.31.02
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -41,7 +41,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.31.01"
+BOT_VERSION = "2025.10.31.02"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -67,6 +67,9 @@ MAX_DYNAMIC_RISK_PCT: float = 0.0
 BREAKEVEN_ENABLED: bool = True
 BREAKEVEN_ATR_MULT: float = 0.6
 BREAKEVEN_BUFFER_ATR: float = 0.15
+TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
+TRAILING_DYNAMIC_FACTOR: float = 0.65
+TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -1815,6 +1818,7 @@ def refresh_settings():
     global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
     global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
+    global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -1851,6 +1855,21 @@ def refresh_settings():
     TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
+    try:
+        TRAILING_DYNAMIC_TRIGGER_ATR = float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
+    except (TypeError, ValueError):
+        TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
+    try:
+        TRAILING_DYNAMIC_FACTOR = float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
+    except (TypeError, ValueError):
+        TRAILING_DYNAMIC_FACTOR = 0.65
+    try:
+        TRAILING_DYNAMIC_MIN_ATR = float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
+    except (TypeError, ValueError):
+        TRAILING_DYNAMIC_MIN_ATR = 0.35
+    TRAILING_DYNAMIC_TRIGGER_ATR = max(0.0, TRAILING_DYNAMIC_TRIGGER_ATR)
+    TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
+    TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
@@ -4546,6 +4565,12 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     entry_price = safe_float(position.get("entryPrice") or position.get("avgEntryPrice") or position.get("entry_price"))
     breakeven_note = None
+    profit_distance = 0.0
+    if entry_price and math.isfinite(entry_price) and math.isfinite(price):
+        if is_long:
+            profit_distance = max(0.0, price - entry_price)
+        else:
+            profit_distance = max(0.0, entry_price - price)
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
         breakeven_buffer = atrv * BREAKEVEN_BUFFER_ATR
@@ -4586,6 +4611,14 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             trailing_offset = trailing_callback
     if trailing_offset is None and trailing_mult > 0 and math.isfinite(trailing_mult):
         trailing_offset = trailing_mult * atrv
+    if trailing_mult > 0 and atrv and TRAILING_DYNAMIC_TRIGGER_ATR > 0 and profit_distance > 0:
+        trigger_distance = atrv * TRAILING_DYNAMIC_TRIGGER_ATR
+        if trigger_distance > 0 and profit_distance >= trigger_distance:
+            dynamic_offset = atrv * TRAILING_DYNAMIC_FACTOR
+            dynamic_offset = max(dynamic_offset, atrv * TRAILING_DYNAMIC_MIN_ATR)
+            if dynamic_offset > 0 and (trailing_offset is None or dynamic_offset < trailing_offset - 1e-9):
+                trailing_offset = dynamic_offset
+                log(f"ℹ️ {symbol}: tightened trailing offset to {trailing_offset:.4f} (profit distance {profit_distance:.4f})", Fore.LIGHTBLUE_EX)
     if trailing_offset is not None and trailing_offset <= 0:
         trailing_offset = None
     qty = position_qty

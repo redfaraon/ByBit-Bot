@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.31.01")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.31.02")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 CYCLE_STATE_FILE = REPO_ROOT / "cycle_state.json"
