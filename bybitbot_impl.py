@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.31.02
+# Version: 2025.10.31.03
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
@@ -23,6 +24,7 @@ from typing import Optional, Tuple, Any, Sequence
 import pandas as pd
 import ccxt
 import requests
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from colorama import Fore, Style, init
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -41,7 +43,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.31.02"
+BOT_VERSION = "2025.10.31.03"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -70,6 +72,25 @@ BREAKEVEN_BUFFER_ATR: float = 0.15
 TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
 TRAILING_DYNAMIC_FACTOR: float = 0.65
 TRAILING_DYNAMIC_MIN_ATR: float = 0.35
+TELEGRAM_FORWARD_LOGS: bool = False
+TELEGRAM_LOG_BATCH_SIZE: int = 12
+TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
+TELEGRAM_LOG_THREAD_ID: int | None = None
+TELEGRAM_WEBHOOK_URL: str = ""
+TELEGRAM_WEBHOOK_HOST: str = "127.0.0.1"
+TELEGRAM_WEBHOOK_PORT: int = 0
+TELEGRAM_WEBHOOK_PATH: str = "/telegram"
+TELEGRAM_WEBHOOK_SECRET: str | None = None
+TELEGRAM_ALLOWED_CHAT_IDS: set[int] = set()
+TELEGRAM_COMMANDS_LIST: list[dict[str, str]] = []
+TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
+    ("start", "Приветствие и доступные команды"),
+    ("help", "Список доступных команд"),
+    ("status", "Текущий статус бота"),
+    ("positions", "Открытые позиции"),
+    ("risk", "Текущий риск-профиль"),
+    ("logs", "Последние события"),
+]
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -1818,6 +1839,9 @@ def refresh_settings():
     global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
     global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
+    global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_THREAD_ID
+    global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
+    global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
@@ -1870,6 +1894,35 @@ def refresh_settings():
     TRAILING_DYNAMIC_TRIGGER_ATR = max(0.0, TRAILING_DYNAMIC_TRIGGER_ATR)
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
+    TELEGRAM_FORWARD_LOGS = env_int("TELEGRAM_FORWARD_LOGS", int(TELEGRAM_FORWARD_LOGS)) != 0
+    TELEGRAM_LOG_BATCH_SIZE = max(1, env_int("TELEGRAM_LOG_BATCH_SIZE", TELEGRAM_LOG_BATCH_SIZE))
+    try:
+        TELEGRAM_LOG_FLUSH_INTERVAL = float(os.getenv("TELEGRAM_LOG_FLUSH_INTERVAL", str(TELEGRAM_LOG_FLUSH_INTERVAL)))
+    except (TypeError, ValueError):
+        TELEGRAM_LOG_FLUSH_INTERVAL = 5.0
+    TELEGRAM_LOG_FLUSH_INTERVAL = max(1.0, TELEGRAM_LOG_FLUSH_INTERVAL)
+    TELEGRAM_LOG_THREAD_ID = safe_int(os.getenv("TELEGRAM_LOG_THREAD_ID"))
+    TELEGRAM_WEBHOOK_URL = (os.getenv("TELEGRAM_WEBHOOK_URL") or "").strip()
+    TELEGRAM_WEBHOOK_HOST = (os.getenv("TELEGRAM_WEBHOOK_HOST") or "0.0.0.0").strip()
+    TELEGRAM_WEBHOOK_PORT = env_int("TELEGRAM_WEBHOOK_PORT", TELEGRAM_WEBHOOK_PORT)
+    TELEGRAM_WEBHOOK_PATH = (os.getenv("TELEGRAM_WEBHOOK_PATH") or "/telegram").strip()
+    secret_value = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+    TELEGRAM_WEBHOOK_SECRET = secret_value.strip() if secret_value else None
+    allowed_chats_raw = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
+    if allowed_chats_raw:
+        allowed_set: set[int] = set()
+        for item in allowed_chats_raw.split(","):
+            entry = item.strip()
+            if not entry:
+                continue
+            value = safe_int(entry)
+            if value is not None:
+                allowed_set.add(value)
+        TELEGRAM_ALLOWED_CHAT_IDS = allowed_set
+    else:
+        TELEGRAM_ALLOWED_CHAT_IDS = set()
+    commands_raw = os.getenv("TELEGRAM_COMMANDS")
+    TELEGRAM_COMMANDS_LIST = _parse_telegram_command_list(commands_raw)
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
@@ -2299,11 +2352,26 @@ def log(msg: str, color=Fore.WHITE):
     tz_suffix = _format_tz_suffix(now)
     if tz_suffix:
         stamp = f"{stamp} {tz_suffix}"
-    print(color + f"[{stamp}] {msg}" + Style.RESET_ALL)
+    record = f"[{stamp}] {msg}"
+    _LOG_HISTORY.append(record)
+    print(color + record + Style.RESET_ALL)
+    if TELEGRAM_FORWARD_LOGS:
+        _enqueue_tg_log(record)
 
 _TG_LAST_SEND_TS = 0.0
 _TG_LAST_MESSAGE: str | None = None
 _TG_LAST_MESSAGE_TS = 0.0
+_TG_LOG_BUFFER: deque[str] = deque()
+_TG_LOG_LAST_FLUSH = 0.0
+_TG_IN_SEND = 0
+_TG_LOCK = threading.RLock()
+_TELEGRAM_CONFIGURED = False
+_TELEGRAM_WEBHOOK_THREAD: threading.Thread | None = None
+_TELEGRAM_WEBHOOK_SERVER: ThreadingHTTPServer | None = None
+_TELEGRAM_COMMAND_SIGNATURE: tuple[tuple[str, str], ...] = ()
+_TELEGRAM_WEBHOOK_SIGNATURE: tuple[str, str | None] | None = None
+_LOG_HISTORY: deque[str] = deque(maxlen=200)
+LATEST_STATUS: dict[str, Any] = {}
 
 def _send_git_notification(message: str):
     log(message, Fore.LIGHTBLACK_EX)
@@ -2311,85 +2379,203 @@ def _send_git_notification(message: str):
     send_tg(message, thread_id=thread_target)
 
 
+def _split_message(text: str, chunk_limit: int = 3800) -> list[str]:
+    if len(text) <= chunk_limit:
+        return [text]
+    lines = text.splitlines()
+    if not lines:
+        return [text[:chunk_limit]]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        candidate_len = len(line)
+        if current and current_len + candidate_len + 1 > chunk_limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += candidate_len + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [text[:chunk_limit]]
+
+
+def _enqueue_tg_log(record: str) -> None:
+    if not TELEGRAM_FORWARD_LOGS:
+        return
+    should_flush = False
+    with _TG_LOCK:
+        if not TELEGRAM_FORWARD_LOGS:
+            return
+        _TG_LOG_BUFFER.append(record)
+        now = time.time()
+        if _TG_IN_SEND == 0 and (
+            len(_TG_LOG_BUFFER) >= TELEGRAM_LOG_BATCH_SIZE
+            or (now - _TG_LOG_LAST_FLUSH) >= TELEGRAM_LOG_FLUSH_INTERVAL
+        ):
+            should_flush = True
+    if should_flush:
+        _flush_tg_log_buffer()
+
+
+def _flush_tg_log_buffer(force: bool = False) -> None:
+    global _TG_LOG_LAST_FLUSH
+    if not TELEGRAM_FORWARD_LOGS:
+        with _TG_LOCK:
+            _TG_LOG_BUFFER.clear()
+        return
+    with _TG_LOCK:
+        if not TELEGRAM_FORWARD_LOGS:
+            _TG_LOG_BUFFER.clear()
+            return
+        if not _TG_LOG_BUFFER:
+            return
+        if _TG_IN_SEND > 0 and not force:
+            return
+        now = time.time()
+        if (
+            not force
+            and len(_TG_LOG_BUFFER) < TELEGRAM_LOG_BATCH_SIZE
+            and (now - _TG_LOG_LAST_FLUSH) < TELEGRAM_LOG_FLUSH_INTERVAL
+        ):
+            return
+        snapshot = list(_TG_LOG_BUFFER)
+        _TG_LOG_BUFFER.clear()
+        _TG_LOG_LAST_FLUSH = now
+    pending_batches: list[list[str]] = []
+    chunk: list[str] = []
+    chunk_len = 0
+    for entry in snapshot:
+        entry_len = len(entry)
+        if chunk and (
+            len(chunk) >= TELEGRAM_LOG_BATCH_SIZE
+            or chunk_len + entry_len + 1 > 3500
+        ):
+            pending_batches.append(chunk)
+            chunk = []
+            chunk_len = 0
+        chunk.append(entry)
+        chunk_len += entry_len + 1
+    if chunk:
+        pending_batches.append(chunk)
+    for batch in pending_batches:
+        payload = "\n".join(batch)
+        if not payload:
+            continue
+        message_id = send_tg(
+            payload,
+            thread_id=TELEGRAM_LOG_THREAD_ID,
+            no_log_forward=True,
+        )
+        if message_id is None:
+            with _TG_LOCK:
+                for entry in reversed(batch):
+                    _TG_LOG_BUFFER.appendleft(entry)
+            break
+
+
 def send_tg(msg: str | Sequence[str], **extra):
     if not TG_TOKEN or not TG_CHAT:
         return None
-    global _TG_LAST_SEND_TS, _TG_LAST_MESSAGE, _TG_LAST_MESSAGE_TS
+    global _TG_LAST_SEND_TS, _TG_LAST_MESSAGE, _TG_LAST_MESSAGE_TS, _TG_IN_SEND
     if isinstance(msg, (list, tuple, set)):
-        message_text = "\n".join(str(part) for part in msg if part)
+        message_text = "\\n".join(str(part) for part in msg if part)
     else:
         message_text = str(msg)
     if not message_text:
         return None
-    now_ts = time.time()
-    if (
-        _TG_LAST_MESSAGE == message_text
-        and (now_ts - _TG_LAST_MESSAGE_TS) < TG_DUP_WINDOW
-    ):
-        return None
-    delay_needed = TG_MIN_INTERVAL - (now_ts - _TG_LAST_SEND_TS)
-    if delay_needed > 0:
-        time.sleep(delay_needed)
-        now_ts = time.time()
-    base_payload = {"chat_id": TG_CHAT, "text": message_text}
-    extra_payload = dict(extra) if extra else {}
-    thread_override = extra_payload.pop("thread_id", None)
-    if "message_thread_id" in extra_payload:
-        base_payload.update(extra_payload)
-    else:
-        thread_candidate = thread_override if thread_override is not None else TG_TOPIC_ID
-        thread_id_int = safe_int(thread_candidate) if thread_candidate is not None else None
-        if thread_id_int is not None:
-            base_payload["message_thread_id"] = thread_id_int
-        base_payload.update(extra_payload)
-    attempt = 0
-    last_error = None
-    while attempt < TG_RETRY_ATTEMPTS:
-        attempt += 1
-        payload = dict(base_payload)
-        try:
-            response = requests.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json=payload,
-                timeout=5,
-            )
-        except Exception as exc:
-            last_error = exc
-            log(f"✉️ Telegram ({attempt}/{TG_RETRY_ATTEMPTS}): {exc}", Fore.YELLOW)
-        else:
-            try:
-                data = response.json()
-            except Exception:
-                last_error = f"{response.status_code} {response.text}"
-                log(f"⚠️ Telegram: ?????????? ??? {last_error}", Fore.YELLOW)
-            else:
-                if isinstance(data, dict) and data.get("ok"):
-                    result = data.get("result") or {}
-                    message_id = result.get("message_id")
-                    _TG_LAST_SEND_TS = time.time()
-                    _TG_LAST_MESSAGE = message_text
-                    _TG_LAST_MESSAGE_TS = _TG_LAST_SEND_TS
-                    return message_id
-                last_error = data
-                log(f"✉️ Telegram API ???? ????: {data}", Fore.YELLOW)
-                if isinstance(data, dict) and data.get("error_code") == 429:
-                    retry_after = data.get("parameters", {}).get("retry_after")
-                    sleep_for = float(retry_after or (TG_RETRY_BACKOFF * attempt))
-                    time.sleep(max(TG_MIN_INTERVAL, sleep_for))
-                    continue
-                if (
-                    isinstance(data, dict)
-                    and data.get("error_code") == 400
-                    and "thread not found" in (data.get("description") or "").lower()
-                ):
-                    base_payload.pop("message_thread_id", None)
-                    log("[WARN] Telegram topic not found, retrying without thread.", Fore.YELLOW)
-                    time.sleep(TG_RETRY_BACKOFF * attempt)
-                    continue
-        time.sleep(TG_RETRY_BACKOFF * attempt)
-    log(f"⚠️ Telegram send failed after {TG_RETRY_ATTEMPTS} attempts: {last_error}", Fore.RED)
-    return None
 
+    extra_payload = dict(extra) if extra else {}
+    _ = extra_payload.pop('no_log_forward', None)
+    chat_override = extra_payload.pop('chat_id_override', None)
+    thread_override = extra_payload.pop('thread_id', None)
+    target_chat = chat_override if chat_override is not None else TG_CHAT
+    thread_candidate = thread_override if thread_override is not None else TG_TOPIC_ID
+    thread_id_int = safe_int(thread_candidate) if thread_candidate is not None else None
+
+    chunks = _split_message(message_text)
+    now_ts = time.time()
+    with _TG_LOCK:
+        if (
+            len(chunks) == 1
+            and _TG_LAST_MESSAGE == chunks[0]
+            and (now_ts - _TG_LAST_MESSAGE_TS) < TG_DUP_WINDOW
+        ):
+            return None
+        _TG_IN_SEND += 1
+
+    last_message_id = None
+    try:
+        for chunk_text in chunks:
+            attempt = 0
+            last_error = None
+            while attempt < TG_RETRY_ATTEMPTS:
+                attempt += 1
+                with _TG_LOCK:
+                    last_send_ts = _TG_LAST_SEND_TS
+                delay_needed = TG_MIN_INTERVAL - (time.time() - last_send_ts)
+                if delay_needed > 0:
+                    time.sleep(delay_needed)
+                payload = {'chat_id': target_chat, 'text': chunk_text}
+                if thread_id_int is not None and 'message_thread_id' not in extra_payload:
+                    payload['message_thread_id'] = thread_id_int
+                payload.update(extra_payload)
+                try:
+                    response = requests.post(
+                        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                        json=payload,
+                        timeout=5,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    log(f"⚠️ Telegram ({attempt}/{TG_RETRY_ATTEMPTS}): {exc}", Fore.YELLOW)
+                else:
+                    try:
+                        data = response.json()
+                    except Exception:
+                        last_error = f"{response.status_code} {response.text}"
+                        log(f"⚠️ Telegram: декодирование ответа не удалось — {last_error}", Fore.YELLOW)
+                    else:
+                        if isinstance(data, dict) and data.get('ok'):
+                            result = data.get('result') or {}
+                            message_id = result.get('message_id')
+                            sent_ts = time.time()
+                            with _TG_LOCK:
+                                _TG_LAST_SEND_TS = sent_ts
+                                _TG_LAST_MESSAGE = chunk_text
+                                _TG_LAST_MESSAGE_TS = sent_ts
+                            last_message_id = message_id
+                            break
+                        last_error = data
+                        log(f"⚠️ Telegram API ответил ошибкой: {data}", Fore.YELLOW)
+                        if isinstance(data, dict) and data.get('error_code') == 429:
+                            retry_after = data.get('parameters', {}).get('retry_after')
+                            sleep_for = float(retry_after or (TG_RETRY_BACKOFF * attempt))
+                            time.sleep(max(TG_MIN_INTERVAL, sleep_for))
+                            continue
+                        if (
+                            isinstance(data, dict)
+                            and data.get('error_code') == 400
+                            and 'thread not found' in (data.get('description') or '').lower()
+                        ):
+                            thread_id_int = None
+                            log('⚠️ Telegram topic not found, retrying without thread.', Fore.YELLOW)
+                            time.sleep(TG_RETRY_BACKOFF * attempt)
+                            continue
+                time.sleep(TG_RETRY_BACKOFF * attempt)
+            else:
+                log(f"⚠️ Telegram send failed after {TG_RETRY_ATTEMPTS} attempts: {last_error}", Fore.RED)
+                return last_message_id
+        return last_message_id
+    finally:
+        should_flush = False
+        with _TG_LOCK:
+            _TG_IN_SEND = max(0, _TG_IN_SEND - 1)
+            if TELEGRAM_FORWARD_LOGS and _TG_IN_SEND == 0 and _TG_LOG_BUFFER:
+                should_flush = True
+        if should_flush:
+            _flush_tg_log_buffer()
 def _load_changelog_state() -> dict:
     try:
         raw = CHANGELOG_STATE_FILE.read_text(encoding="utf-8")
@@ -2434,6 +2620,293 @@ def _build_tg_message_link(chat_id: str, message_id: int | None) -> Optional[str
     if channel_id > 1000000000000:
         channel_id -= 1000000000000
     return f"https://t.me/c/{channel_id}/{message_id}"
+
+
+def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    commands: list[dict[str, str]] = []
+    for chunk in raw.split(";"):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        if ":" in piece:
+            command_part, description_part = piece.split(":", 1)
+        else:
+            command_part, description_part = piece, piece
+        command_clean = command_part.strip().lstrip("/")
+        description_clean = description_part.strip() or command_clean
+        if not command_clean:
+            continue
+        commands.append({
+            "command": command_clean[:32],
+            "description": description_clean[:256],
+        })
+    return commands
+
+
+def _default_command_payload() -> list[dict[str, str]]:
+    return [{"command": cmd, "description": desc} for cmd, desc in TELEGRAM_DEFAULT_COMMANDS]
+
+
+def configure_telegram_bot() -> None:
+    global _TELEGRAM_CONFIGURED, _TELEGRAM_COMMAND_SIGNATURE, _TELEGRAM_WEBHOOK_SIGNATURE
+    if not TG_TOKEN:
+        return
+    commands_payload = TELEGRAM_COMMANDS_LIST or _default_command_payload()
+    commands_signature = tuple((item["command"], item["description"]) for item in commands_payload)
+    if commands_signature != _TELEGRAM_COMMAND_SIGNATURE:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands",
+                json={"commands": commands_payload},
+                timeout=5,
+            )
+            data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            if not isinstance(data, dict) or not data.get("ok"):
+                log(f"⚠️ Telegram setMyCommands failed: {data or response.text}", Fore.YELLOW)
+            else:
+                log("ℹ️ Telegram commands updated", Fore.LIGHTBLACK_EX)
+                _TELEGRAM_COMMAND_SIGNATURE = commands_signature
+        except Exception as exc:
+            log(f"⚠️ Telegram setMyCommands error: {exc}", Fore.YELLOW)
+
+    if TELEGRAM_WEBHOOK_URL:
+        webhook_signature = (TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_SECRET)
+        if webhook_signature != _TELEGRAM_WEBHOOK_SIGNATURE:
+            payload = {
+                "url": TELEGRAM_WEBHOOK_URL,
+                "allowed_updates": ["message", "channel_post", "callback_query"],
+                "drop_pending_updates": True,
+            }
+            if TELEGRAM_WEBHOOK_SECRET:
+                payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
+            try:
+                response = requests.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/setWebhook",
+                    json=payload,
+                    timeout=5,
+                )
+                data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                if not isinstance(data, dict) or not data.get("ok"):
+                    log(f"⚠️ Telegram setWebhook failed: {data or response.text}", Fore.YELLOW)
+                else:
+                    log(f"ℹ️ Telegram webhook set to {TELEGRAM_WEBHOOK_URL}", Fore.LIGHTBLACK_EX)
+                    _TELEGRAM_WEBHOOK_SIGNATURE = webhook_signature
+            except Exception as exc:
+                log(f"⚠️ Telegram setWebhook error: {exc}", Fore.YELLOW)
+    elif _TELEGRAM_WEBHOOK_SIGNATURE is not None:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=5,
+            )
+            log("ℹ️ Telegram webhook cleared", Fore.LIGHTBLACK_EX)
+        except Exception as exc:
+            log(f"⚠️ Telegram deleteWebhook error: {exc}", Fore.YELLOW)
+        finally:
+            _TELEGRAM_WEBHOOK_SIGNATURE = None
+    _TELEGRAM_CONFIGURED = True
+
+
+def _is_chat_allowed(chat_id: int) -> bool:
+    if not TELEGRAM_ALLOWED_CHAT_IDS:
+        return True
+    return chat_id in TELEGRAM_ALLOWED_CHAT_IDS
+
+
+def process_telegram_update(update: dict) -> None:
+    message = update.get("message") or update.get("channel_post")
+    if not isinstance(message, dict):
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            message = callback.get("message")
+            data = callback.get("data")
+            if isinstance(message, dict) and isinstance(data, str) and data.startswith("/"):
+                chat_id = message.get("chat", {}).get("id")
+                thread_id = message.get("message_thread_id")
+                if isinstance(chat_id, int) and _is_chat_allowed(chat_id):
+                    handle_telegram_command(chat_id, data, thread_id=thread_id)
+        return
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if not isinstance(chat_id, int):
+        return
+    if not _is_chat_allowed(chat_id):
+        log(f"⚠️ Telegram update ignored from chat {chat_id}", Fore.LIGHTBLACK_EX)
+        return
+    text = message.get("text") or ""
+    if not isinstance(text, str):
+        return
+    entities = message.get("entities") or []
+    is_command = text.startswith("/") or any((isinstance(ent, dict) and ent.get("type") == "bot_command") for ent in entities)
+    if not is_command:
+        return
+    thread_id = message.get("message_thread_id")
+    handle_telegram_command(chat_id, text, thread_id=thread_id)
+
+
+class _TelegramWebhookHandler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args) -> None:  # noqa: A003
+        return
+
+    def do_POST(self) -> None:  # noqa: N802
+        if TELEGRAM_WEBHOOK_PATH and not self.path.startswith(TELEGRAM_WEBHOOK_PATH):
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length > 0 else b""
+        if TELEGRAM_WEBHOOK_SECRET:
+            secret_header = self.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if secret_header != TELEGRAM_WEBHOOK_SECRET:
+                self.send_response(403)
+                self.end_headers()
+                return
+        try:
+            payload = json.loads(body.decode("utf-8")) if body else {}
+        except Exception:
+            self.send_response(400)
+            self.end_headers()
+            return
+        try:
+            process_telegram_update(payload)
+        except Exception as exc:  # pylint: disable=broad-except
+            log(f"⚠️ Telegram webhook handler error: {exc}", Fore.YELLOW)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+def start_telegram_webhook_server() -> None:
+    global _TELEGRAM_WEBHOOK_THREAD, _TELEGRAM_WEBHOOK_SERVER, TELEGRAM_WEBHOOK_PATH
+    if _TELEGRAM_WEBHOOK_THREAD is not None:
+        return
+    if TELEGRAM_WEBHOOK_PORT <= 0:
+        return
+    if not TG_TOKEN:
+        return
+    host = TELEGRAM_WEBHOOK_HOST or "0.0.0.0"
+    path = TELEGRAM_WEBHOOK_PATH or "/telegram"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    TELEGRAM_WEBHOOK_PATH = path
+    try:
+        server = ThreadingHTTPServer((host, TELEGRAM_WEBHOOK_PORT), _TelegramWebhookHandler)
+    except Exception as exc:
+        log(f"⚠️ Failed to start Telegram webhook server: {exc}", Fore.YELLOW)
+        return
+
+    def _serve() -> None:
+        log(f"ℹ️ Telegram webhook server listening on http://{host}:{TELEGRAM_WEBHOOK_PORT}{path}", Fore.LIGHTBLACK_EX)
+        try:
+            server.serve_forever()
+        except Exception as exc:  # pylint: disable=broad-except
+            log(f"⚠️ Telegram webhook server stopped: {exc}", Fore.YELLOW)
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    _TELEGRAM_WEBHOOK_SERVER = server
+    _TELEGRAM_WEBHOOK_THREAD = thread
+    thread.start()
+
+
+def _build_help_message() -> str:
+    commands = TELEGRAM_COMMANDS_LIST or _default_command_payload()
+    lines = ["Доступные команды:"]
+    for entry in commands:
+        lines.append(f"/{entry['command']} — {entry['description']}")
+    return "\n".join(lines)
+
+
+def _format_positions_message(limit: int = 10) -> str:
+    positions = LATEST_STATUS.get("positions") or []
+    if not positions:
+        return "Открытых позиций нет."
+    lines = ["Открытые позиции:"]
+    for pos in positions[:limit]:
+        entry_price = pos.get("entry")
+        entry_txt = f" @ {entry_price:.4f}" if entry_price and math.isfinite(entry_price) else ""
+        lines.append(
+            f"{pos.get('symbol')} — {pos.get('side')} {pos.get('amount'):.4f}{entry_txt} (PnL {pos.get('unrealized', 0.0):+.2f} USDT)"
+        )
+    if len(positions) > limit:
+        lines.append(f"… ещё {len(positions) - limit}")
+    return "\n".join(lines)
+
+
+def _format_status_message() -> str:
+    if not LATEST_STATUS:
+        return "Статус пока недоступен."
+    lines = [
+        f"Цикл #{LATEST_STATUS.get('cycle', '?')} ({LATEST_STATUS.get('cycle_kind', 'normal')}/{LATEST_STATUS.get('cycle_mode', 'last')})",
+    ]
+    if LATEST_STATUS.get("timestamp"):
+        lines.append(f"Обновлено: {LATEST_STATUS['timestamp']}")
+    if LATEST_STATUS.get("equity_end") is not None:
+        lines.append(
+            f"Баланс: {LATEST_STATUS.get('equity_end', 0.0):.2f} USDT, доступно {LATEST_STATUS.get('available_end', 0.0):.2f} USDT"
+        )
+    elif LATEST_STATUS.get("equity_start") is not None:
+        lines.append(
+            f"Баланс: {LATEST_STATUS.get('equity_start', 0.0):.2f} USDT, доступно {LATEST_STATUS.get('available_start', 0.0):.2f} USDT"
+        )
+    if LATEST_STATUS.get("closed_pnl") is not None:
+        lines.append(f"PnL (6h closed): {LATEST_STATUS['closed_pnl']:+.2f} USDT")
+    if LATEST_STATUS.get("unrealized") is not None:
+        lines.append(f"PnL (open unrealized): {LATEST_STATUS['unrealized']:+.2f} USDT")
+    lines.append(f"Открытых позиций: {len(LATEST_STATUS.get('positions') or [])}")
+    return "\n".join(lines)
+
+
+def _format_risk_message() -> str:
+    return (
+        "Риск-профиль:\n"
+        f"Базовый риск: {RISK_PCT:.4f}\n"
+        f"Текущий риск: {CURRENT_RISK_PCT:.4f}\n"
+        f"Диапазон: {MIN_DYNAMIC_RISK_PCT:.4f} – {MAX_DYNAMIC_RISK_PCT:.4f}\n"
+        f"Плечо (env): {LEVERAGE}x"
+    )
+
+
+def _format_log_history_message(lines: int = 12) -> str:
+    if not _LOG_HISTORY:
+        return "История логов пуста."
+    tail = list(_LOG_HISTORY)[-lines:]
+    return "Последние события:\n" + "\n".join(tail)
+
+
+def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int] = None) -> None:
+    if not text:
+        return
+    parts = text.strip().split()
+    if not parts:
+        return
+    command = parts[0].lstrip("/")
+    if "@" in command:
+        command = command.split("@", 1)[0]
+    command = command.lower()
+    args = parts[1:]
+    if command in {"start", "help"}:
+        reply = _build_help_message()
+    elif command == "status":
+        reply = _format_status_message()
+    elif command == "positions":
+        reply = _format_positions_message()
+    elif command == "risk":
+        reply = _format_risk_message()
+    elif command == "logs":
+        reply = _format_log_history_message()
+    elif command == "version":
+        reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
+    else:
+        reply = "Неизвестная команда. Используйте /help."
+    send_tg(
+        reply,
+        chat_id_override=chat_id,
+        thread_id=thread_id,
+        no_log_forward=True,
+    )
 
 
 def _current_changelog_signature() -> dict:
@@ -5935,6 +6408,8 @@ def run_cycle():
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
+    configure_telegram_bot()
+    start_telegram_webhook_server()
     _init_ai_cycle_usage()
     metadata_state = maybe_refresh_metadata()
     if isinstance(metadata_state, dict) and metadata_state.get("reload_required"):
@@ -6039,6 +6514,14 @@ def run_cycle():
     cycle_kind_display = cycle_kind or "normal"
     cycle_mode_display = cycle_mode or "last"
     log(f"[CYCLE] {cycle_number_display} ({cycle_kind_display}/{cycle_mode_display})", Fore.LIGHTBLACK_EX)
+    LATEST_STATUS.update({
+        "cycle": next_cycle_number,
+        "cycle_kind": cycle_kind_display,
+        "cycle_mode": cycle_mode_display,
+        "timestamp": session_dt.isoformat(),
+        "equity_start": equity,
+        "available_start": available_margin,
+    })
     if DYNAMIC_RISK_ENABLED and abs(CURRENT_RISK_PCT - current_risk_baseline) > max(1e-5, current_risk_baseline * 0.01):
         risk_state_msg = (
             f"[RISK] Cycle risk pct {CURRENT_RISK_PCT:.4f} (base {RISK_PCT:.4f}, range {MIN_DYNAMIC_RISK_PCT:.4f}-{MAX_DYNAMIC_RISK_PCT:.4f})"
@@ -7609,6 +8092,27 @@ def run_cycle():
     if not final_positions_available:
         final_positions_map = dict(positions_map)
 
+    positions_summary: list[dict[str, Any]] = []
+    for sym_active, payload in (final_positions_map or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        amount_val = safe_float(payload.get("amount") or payload.get("contracts"))
+        if amount_val is None or not math.isfinite(amount_val) or abs(amount_val) <= 0:
+            continue
+        entry_val = safe_float(payload.get("entryPrice") or payload.get("average") or payload.get("avgEntryPrice"))
+        unreal_val = safe_float(payload.get("unrealizedPnl") or (payload.get("raw") or {}).get("unrealisedPnl"))
+        side_label = "LONG" if amount_val > 0 else "SHORT"
+        positions_summary.append(
+            {
+                "symbol": sym_active,
+                "side": side_label,
+                "amount": float(amount_val),
+                "entry": float(entry_val) if entry_val is not None else None,
+                "unrealized": float(unreal_val) if unreal_val is not None else 0.0,
+            }
+        )
+    LATEST_STATUS["positions"] = positions_summary
+
     no_active_positions = final_positions_available and final_positions_count == 0
     flat_skipped_all = (
         no_active_positions
@@ -7833,6 +8337,7 @@ def run_cycle():
             unreal_total, unreal_count = _sum_unrealized_pnl(final_positions_map)
 
             unreal_reported = False
+            pnl_value: float | None = None
             if closed_pnl_value is not None:
                 risk_msg = _adjust_dynamic_risk_from_pnl(closed_pnl_value, "closed", closed_pnl_count)
                 if risk_msg:
@@ -7876,6 +8381,14 @@ def run_cycle():
                                 pass
             if not unreal_reported:
                 _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
+            LATEST_STATUS.update(
+                {
+                    "equity_end": equity_end,
+                    "available_end": available_end,
+                    "closed_pnl": closed_pnl_value if closed_pnl_value is not None else pnl_value,
+                    "unrealized": unreal_total,
+                }
+            )
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
@@ -7888,6 +8401,7 @@ def run_cycle():
     end_banner = f"{session_separator} END SESSION {end_stamp} {session_separator}"
     log(end_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nEND SESSION {end_stamp}\n{session_separator}")
+    _flush_tg_log_buffer(force=True)
     _record_cycle_completion(
         cycle_state,
         cycle_kind=cycle_kind or "normal",
@@ -7900,6 +8414,9 @@ def run_cycle():
 
 def main():
     ensure_version_backup()
+    refresh_settings()
+    configure_telegram_bot()
+    start_telegram_webhook_server()
     while True:
         try:
             delay_minutes = run_cycle()

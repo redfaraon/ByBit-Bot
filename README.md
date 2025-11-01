@@ -15,6 +15,28 @@
    export OPENAI_API_KEY=your_openai_key
    ```
 
+   Optional Telegram controls:
+   ```bash
+   export TELEGRAM_FORWARD_LOGS=1              # enable buffered log forwarding
+   export TELEGRAM_LOG_BATCH_SIZE=12          # messages per Telegram batch
+   export TELEGRAM_LOG_FLUSH_INTERVAL=5       # seconds before flushing a smaller batch
+   export TELEGRAM_LOG_THREAD_ID=12345        # topic/thread for log batches
+   export TELEGRAM_WEBHOOK_URL=https://...    # set webhook endpoint (leave empty to disable)
+   export TELEGRAM_WEBHOOK_HOST=0.0.0.0       # local webhook bind host
+   export TELEGRAM_WEBHOOK_PORT=8082          # local webhook port
+   export TELEGRAM_WEBHOOK_PATH=/telegram     # webhook path prefix
+   export TELEGRAM_WEBHOOK_SECRET=secret123   # optional Telegram secret token
+   export TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,-1005678901234
+   export TELEGRAM_COMMANDS="status:Текущий статус;help:Справка"  # slash-command overrides
+   ```
+
+   Dynamic trailing-stop tuning:
+   ```bash
+   export TRAILING_DYNAMIC_TRIGGER_ATR=1.4    # ATR distance before tightening trailing stop
+   export TRAILING_DYNAMIC_FACTOR=0.65        # ATR multiplier for tightened trailing stop
+   export TRAILING_DYNAMIC_MIN_ATR=0.35       # floor ATR multiplier when tightening
+   ```
+
 3. Run the bot:
    ```bash
    python bybitbot.py

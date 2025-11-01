@@ -187,3 +187,7 @@ Recent commits (last 8)
 - Fixed cycle counter init so start banner shows correct number and prevents fallback launch failures.
 2025.10.31.02
 - Added dynamic trailing-stop tightening based on ATR profit distance to lock in gains with less whipsaw.
+2025.10.31.03
+- Added Telegram webhook command handling with buffered log forwarding and topic fallbacks.
+- Made Telegram sending thread-safe, batching log flushes, and reconfigured after env reload.
+- Documented new Telegram and trailing stop environment switches and aligned loader version metadata.
