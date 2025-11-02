@@ -1,3 +1,9 @@
+11.2
+- Added Telegram `/schedule` command that can schedule, reschedule, or cancel the next cycle directly from the webhook with immediate override support.
+- Added `/tokens` webhook command to inspect and adjust OpenAI token budgets (cycle soft limit, hard stop, cheap-model threshold) and persist updates to `.env`.
+- Reload `.env` values on every cycle, providing new defaults for release topic id and OpenAI budgets so manual edits take effect immediately.
+- Announce new commits and releases in the Releases topic (ID 7) with commit timestamp, hash, message, version, and changelog details.
+
 2025.10.27.7
 - Restore GPT-4.1-mini as the primary model until 70k tokens and keep GPT-4o-mini as the fallback per cycle.
 - Reapply AI-provided stop/take targets when skipping opens and improve trailing-stop placement defaults.

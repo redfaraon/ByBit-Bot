@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "2025.10.31.03")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "11.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 CYCLE_STATE_FILE = REPO_ROOT / "cycle_state.json"
@@ -49,6 +49,7 @@ class BackupCandidate:
     cycle_counter: int
     commit_hash: str | None = None
     commit_message: str | None = None
+    commit_timestamp: str | None = None
     on_result: Callable[[bool], None] | None = None
 
     def finalize(self, success: bool) -> None:
@@ -378,11 +379,11 @@ def _sanitize_commit_message(message: str | None) -> str | None:
     return first_line or None
 
 
-def _resolve_commit_details(ref: str | None) -> tuple[str | None, str | None]:
+def _resolve_commit_metadata(ref: str | None) -> tuple[str | None, str | None, str | None]:
     target = (ref or "").strip()
     if not target:
-        return None, None
-    cmd = ["git", "show", "-s", "--format=%H%x1f%s", target]
+        return None, None, None
+    cmd = ["git", "show", "-s", "--format=%H%x1f%s%x1f%cI", target]
     try:
         result = subprocess.run(
             cmd,
@@ -392,15 +393,24 @@ def _resolve_commit_details(ref: str | None) -> tuple[str | None, str | None]:
             cwd=REPO_ROOT,
         )
     except Exception:
-        return None, None
+        return None, None, None
     raw = result.stdout.strip()
     if not raw:
-        return None, None
-    if "\x1f" in raw:
-        commit_hash, commit_msg = raw.split("\x1f", 1)
-    else:
-        commit_hash, commit_msg = raw, ""
-    return (commit_hash.strip() or None, _sanitize_commit_message(commit_msg))
+        return None, None, None
+    parts = raw.split("\x1f")
+    commit_hash = parts[0].strip() if parts else ""
+    commit_msg = parts[1] if len(parts) > 1 else ""
+    commit_ts = parts[2] if len(parts) > 2 else ""
+    return (
+        commit_hash or None,
+        _sanitize_commit_message(commit_msg),
+        commit_ts.strip() or None,
+    )
+
+
+def _resolve_commit_details(ref: str | None) -> tuple[str | None, str | None]:
+    commit_hash, commit_message, _ = _resolve_commit_metadata(ref)
+    return commit_hash, commit_message
 
 
 def _build_backup_candidates(
@@ -432,7 +442,7 @@ def _build_backup_candidates(
             branch_history[name] = "missing"
             _save_fallback_history(history)
             return
-        commit_hash, commit_message = _resolve_commit_details(name)
+        commit_hash, commit_message, commit_timestamp = _resolve_commit_metadata(name)
         if not commit_hash:
             branch_history[name] = "missing"
             _save_fallback_history(history)
@@ -477,6 +487,7 @@ def _build_backup_candidates(
                 cycle_counter=cycle_counter,
                 commit_hash=commit_hash,
                 commit_message=commit_message,
+                commit_timestamp=commit_timestamp,
                 on_result=on_result,
             )
         )
@@ -491,7 +502,7 @@ def _build_backup_candidates(
         script_path = _materialize_commit_script(commit_hash)
         if not script_path:
             return
-        _, commit_message = _resolve_commit_details(commit_hash)
+        _, commit_message, commit_timestamp = _resolve_commit_metadata(commit_hash)
         version_label = f"tag.{name}"
         source_label = f"{name} tag"
         if cycle_kind == "normal":
@@ -525,6 +536,7 @@ def _build_backup_candidates(
                 cycle_counter=cycle_counter,
                 commit_hash=commit_hash,
                 commit_message=commit_message,
+                commit_timestamp=commit_timestamp,
                 on_result=on_result,
             )
         )
@@ -548,7 +560,7 @@ def _build_backup_candidates(
             commit_history[selected_commit] = "missing"
             _save_fallback_history(history)
             return
-        _, commit_message = _resolve_commit_details(selected_commit)
+        _, commit_message, commit_timestamp = _resolve_commit_metadata(selected_commit)
         version_label = f"commit.{selected_commit[:8]}"
         source_label = f"commit {selected_commit[:8]}"
         if cycle_kind == "normal":
@@ -582,6 +594,7 @@ def _build_backup_candidates(
                 cycle_counter=cycle_counter,
                 commit_hash=selected_commit,
                 commit_message=commit_message,
+                commit_timestamp=commit_timestamp,
                 on_result=on_result,
             )
         )
@@ -666,6 +679,7 @@ def _run_script_candidate(
     fallback_context: str | None = None,
     commit_hash: str | None = None,
     commit_message: str | None = None,
+    commit_timestamp: str | None = None,
     cycle_kind: str | None = None,
     cycle_mode: str | None = None,
     cycle_counter: int | None = None,
@@ -693,6 +707,10 @@ def _run_script_candidate(
         env["BYBITBOT_SOURCE_MESSAGE"] = commit_message
     else:
         env.pop("BYBITBOT_SOURCE_MESSAGE", None)
+    if commit_timestamp:
+        env["BYBITBOT_SOURCE_TIMESTAMP"] = commit_timestamp
+    else:
+        env.pop("BYBITBOT_SOURCE_TIMESTAMP", None)
     if cycle_kind:
         env["BYBITBOT_CYCLE_KIND"] = cycle_kind
     else:
@@ -732,7 +750,7 @@ def _run_current():
     os.environ["BYBITBOT_EXPECTED_VERSION"] = LATEST_VERSION
     os.environ["BYBITBOT_VERSION_LABEL"] = BOT_VERSION
     current_head = _current_head()
-    commit_hash, commit_message = _resolve_commit_details(current_head or "HEAD")
+    commit_hash, commit_message, commit_timestamp = _resolve_commit_metadata(current_head or "HEAD")
     if not commit_hash:
         commit_hash = current_head or "unknown"
     os.environ["BYBITBOT_SOURCE_LABEL"] = "HEAD"
@@ -745,6 +763,13 @@ def _run_current():
         os.environ["BYBITBOT_SOURCE_MESSAGE"] = commit_message
     else:
         os.environ.pop("BYBITBOT_SOURCE_MESSAGE", None)
+    if commit_timestamp:
+        os.environ["BYBITBOT_SOURCE_TIMESTAMP"] = commit_timestamp
+    else:
+        os.environ.pop("BYBITBOT_SOURCE_TIMESTAMP", None)
+    os.environ.pop("BYBITBOT_FAILURE_HASH", None)
+    os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
+    os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
     os.environ["BYBITBOT_CYCLE_KIND"] = os.environ.get("BYBITBOT_CYCLE_KIND", "normal")
     os.environ["BYBITBOT_CYCLE_MODE"] = "last"
     if "BYBITBOT_CYCLE_COUNTER" not in os.environ:
@@ -782,6 +807,21 @@ def _run_backups(reason: str) -> bool:
         print("[BOOT] No backup candidates available.", file=sys.stderr)
         return False
     candidate = random.choice(candidates)
+    failure_hash = failure_message = failure_timestamp = None
+    if head_hash:
+        failure_hash, failure_message, failure_timestamp = _resolve_commit_metadata(head_hash)
+    if failure_hash:
+        os.environ["BYBITBOT_FAILURE_HASH"] = failure_hash
+    else:
+        os.environ.pop("BYBITBOT_FAILURE_HASH", None)
+    if failure_message:
+        os.environ["BYBITBOT_FAILURE_MESSAGE"] = failure_message
+    else:
+        os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
+    if failure_timestamp:
+        os.environ["BYBITBOT_FAILURE_TIMESTAMP"] = failure_timestamp
+    else:
+        os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
     success = _run_script_candidate(
         candidate.script_path,
         candidate.version_label,
@@ -790,11 +830,15 @@ def _run_backups(reason: str) -> bool:
         fallback_context=candidate.context,
         commit_hash=candidate.commit_hash,
         commit_message=candidate.commit_message,
+        commit_timestamp=candidate.commit_timestamp,
         cycle_kind=candidate.cycle_kind,
         cycle_mode=candidate.cycle_mode,
         cycle_counter=candidate.cycle_counter,
         suppress_routine_increment=True,
     )
+    os.environ.pop("BYBITBOT_FAILURE_HASH", None)
+    os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
+    os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
     candidate.finalize(success)
     return success
 
@@ -836,7 +880,20 @@ def main():
                 context = f"probe {short}"
                 version_label = f"commit.{short}"
                 source_label = f"probe {short}"
-                commit_hash, commit_message = _resolve_commit_details(fallback_head)
+                commit_hash, commit_message, commit_timestamp = _resolve_commit_metadata(fallback_head)
+                failure_hash, failure_message, failure_timestamp = commit_hash, commit_message, commit_timestamp
+                if failure_hash:
+                    os.environ["BYBITBOT_FAILURE_HASH"] = failure_hash
+                else:
+                    os.environ.pop("BYBITBOT_FAILURE_HASH", None)
+                if failure_message:
+                    os.environ["BYBITBOT_FAILURE_MESSAGE"] = failure_message
+                else:
+                    os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
+                if failure_timestamp:
+                    os.environ["BYBITBOT_FAILURE_TIMESTAMP"] = failure_timestamp
+                else:
+                    os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
                 success = _run_script_candidate(
                     script_path,
                     version_label,
@@ -845,11 +902,15 @@ def main():
                     fallback_context=context,
                     commit_hash=commit_hash or fallback_head,
                     commit_message=commit_message,
+                    commit_timestamp=commit_timestamp,
                     cycle_kind="backup",
                     cycle_mode="current",
                     cycle_counter=cycles,
                     suppress_routine_increment=True,
                 )
+                os.environ.pop("BYBITBOT_FAILURE_HASH", None)
+                os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
+                os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
                 if success:
                     history.setdefault("commits", {})[fallback_head] = "success"
                     history["fallback_active"] = False

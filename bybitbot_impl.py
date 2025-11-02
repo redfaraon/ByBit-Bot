@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 2025.10.31.03
+# Version: 11.2
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -27,7 +27,7 @@ import requests
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from colorama import Fore, Style, init
 from openai import OpenAI
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except ImportError:
@@ -43,7 +43,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.10.31.03"
+BOT_VERSION = "11.2"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -90,7 +90,11 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("positions", "Открытые позиции"),
     ("risk", "Текущий риск-профиль"),
     ("logs", "Последние события"),
+    ("schedule", "Запланировать следующую сессию"),
+    ("tokens", "Лимиты OpenAI токенов"),
+    ("version", "Текущая версия и changelog"),
 ]
+TELEGRAM_RELEASE_THREAD_ID: int | None = None
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -836,6 +840,72 @@ def _current_git_head() -> Optional[str]:
         return None
 
 
+def _resolve_commit_metadata(ref: str | None) -> tuple[str | None, str | None, str | None]:
+    target = (ref or "").strip()
+    if not target:
+        return None, None, None
+    cmd = ["git", "show", "-s", "--format=%H%x1f%s%x1f%cI", target]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=SCRIPT_DIR,
+        )
+    except Exception:
+        return None, None, None
+    raw = result.stdout.strip()
+    if not raw:
+        return None, None, None
+    parts = raw.split("\x1f")
+    commit_hash = parts[0].strip() if parts else ""
+    commit_msg = parts[1].strip() if len(parts) > 1 else ""
+    commit_ts = parts[2].strip() if len(parts) > 2 else ""
+    return (
+        commit_hash or None,
+        _sanitize_commit_subject(commit_msg),
+        commit_ts or None,
+    )
+
+
+def _sanitize_commit_subject(message: str | None) -> Optional[str]:
+    if not message:
+        return None
+    return message.strip().splitlines()[0].strip() or None
+
+
+def _notify_release_event(
+    event_type: str,
+    commit_hash: str | None,
+    commit_message: str | None,
+    commit_timestamp: str | None,
+) -> None:
+    thread_target: Optional[int] = TELEGRAM_RELEASE_THREAD_ID
+    if thread_target is None:
+        thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
+    header = "🆕 Новый релиз" if event_type == "release" else "🆕 Новый коммит"
+    lines = [header]
+    formatted_ts = _format_commit_timestamp(commit_timestamp) if commit_timestamp else None
+    if formatted_ts:
+        lines.append(f"Дата: {formatted_ts}")
+    elif commit_timestamp:
+        lines.append(f"Дата (UTC): {commit_timestamp}")
+    if commit_hash:
+        lines.append(f"Коммит: {commit_hash[:8]} ({commit_hash})")
+    if commit_message:
+        lines.append(f"Сообщение: {commit_message}")
+    lines.append(f"Версия: {BOT_VERSION}")
+    if BOT_CHANGELOG:
+        lines.append("Changelog:")
+        lines.append(BOT_CHANGELOG)
+    send_tg(
+        "\n".join(lines),
+        thread_id=thread_target,
+        no_log_forward=True,
+    )
+
+
 def maybe_refresh_metadata() -> dict[str, Any]:
     global BOT_VERSION, BOT_CHANGELOG, _LAST_COMMIT_HASH
 
@@ -865,15 +935,20 @@ def maybe_refresh_metadata() -> dict[str, Any]:
     os.environ["BYBITBOT_CHANGELOG_TEXT"] = BOT_CHANGELOG
 
     version_changed = BOT_VERSION != previous_version
+    commit_hash_meta, commit_message_meta, commit_timestamp_meta = _resolve_commit_metadata(head)
     if version_changed:
         ensure_version_backup()
         log(f"🆕 Обнаружена новая версия: {previous_version} > {BOT_VERSION}", Fore.LIGHTBLUE_EX)
         send_tg(f"🆕 Обновлена версия до {BOT_VERSION}")
+        if head:
+            _notify_release_event("release", commit_hash_meta, commit_message_meta, commit_timestamp_meta)
     elif metadata_changed:
         log("🆕 Обновлён changelog без изменения версии.", Fore.LIGHTBLACK_EX)
         send_tg("🆕 Обновлён changelog без изменения версии.")
     elif commit_changed and previous_hash is not None:
         log("🆕 Обновлена HEAD коммита без изменения changelog.", Fore.LIGHTBLACK_EX)
+        if head:
+            _notify_release_event("commit", commit_hash_meta, commit_message_meta, commit_timestamp_meta)
 
     return {
         "commit_changed": bool(commit_changed),
@@ -1750,9 +1825,21 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
 
 
 def load_environment():
-    load_dotenv(".env")
-    if os.path.exists(".env.local"):
-        load_dotenv(".env.local", override=True)
+    env_paths = [
+        SCRIPT_DIR / ".env",
+        SCRIPT_DIR / ".env.local",
+    ]
+    merged: dict[str, str] = {}
+    for path in env_paths:
+        if not path.exists():
+            continue
+        values = dotenv_values(path)
+        for key, value in values.items():
+            if value is None:
+                continue
+            merged[key] = value
+    for key, value in merged.items():
+        os.environ[key] = value
 
 
 def env_int(name: str, default: int) -> int:
@@ -1820,6 +1907,29 @@ def _parse_ratio_scheme(value: str | None, default: list[tuple[float, float]]) -
     return result if result else list(default)
 
 
+def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    commands: list[dict[str, str]] = []
+    for chunk in raw.split(";"):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        if ":" in piece:
+            command_part, description_part = piece.split(":", 1)
+        else:
+            command_part, description_part = piece, piece
+        command_clean = command_part.strip().lstrip("/")
+        description_clean = description_part.strip() or command_clean
+        if not command_clean:
+            continue
+        commands.append({
+            "command": command_clean[:32],
+            "description": description_clean[:256],
+        })
+    return commands
+
+
 def refresh_settings():
     load_environment()
     global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR, TRAILING_ATR_MULT
@@ -1841,7 +1951,7 @@ def refresh_settings():
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
-    global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST
+    global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
@@ -1923,6 +2033,8 @@ def refresh_settings():
         TELEGRAM_ALLOWED_CHAT_IDS = set()
     commands_raw = os.getenv("TELEGRAM_COMMANDS")
     TELEGRAM_COMMANDS_LIST = _parse_telegram_command_list(commands_raw)
+    release_topic_raw = os.getenv("TELEGRAM_RELEASE_TOPIC_ID") or os.getenv("TELEGRAM_RELEASE_THREAD_ID")
+    TELEGRAM_RELEASE_THREAD_ID = safe_int(release_topic_raw) if release_topic_raw else 7
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
@@ -1941,7 +2053,8 @@ def refresh_settings():
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
-    TG_TOPIC_ID = safe_int(os.getenv("TELEGRAM_TOPIC_ID"))
+    topic_raw = os.getenv("TELEGRAM_TOPIC_ID") or os.getenv("TG_TOPIC_ID")
+    TG_TOPIC_ID = safe_int(topic_raw)
     TG_GIT_TOPIC_ID = safe_int(os.getenv("TELEGRAM_GIT_TOPIC_ID", "581"))
     try:
         TG_MIN_INTERVAL = float(os.getenv("TELEGRAM_MIN_INTERVAL", "1.5"))
@@ -1983,6 +2096,21 @@ def refresh_settings():
     except (TypeError, ValueError):
         AI_TOKEN_BUDGET_CYCLE = 170_000
     AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
+    try:
+        AI_SECONDARY_BUDGET_START = int(os.getenv("OPENAI_SECONDARY_BUDGET_START", str(AI_SECONDARY_BUDGET_START)))
+    except (TypeError, ValueError):
+        pass
+    AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
+    hard_stop_raw = os.getenv("OPENAI_HARD_STOP_BUDGET")
+    if hard_stop_raw is not None:
+        hard_stop_clean = hard_stop_raw.strip()
+        if not hard_stop_clean:
+            AI_HARD_STOP_BUDGET = 0
+        else:
+            try:
+                AI_HARD_STOP_BUDGET = max(0, int(float(hard_stop_clean)))
+            except (TypeError, ValueError):
+                pass
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
@@ -2372,6 +2500,9 @@ _TELEGRAM_COMMAND_SIGNATURE: tuple[tuple[str, str], ...] = ()
 _TELEGRAM_WEBHOOK_SIGNATURE: tuple[str, str | None] | None = None
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
 LATEST_STATUS: dict[str, Any] = {}
+_SCHEDULE_EVENT = threading.Event()
+_SCHEDULE_OVERRIDE_LOCK = threading.RLock()
+_SCHEDULE_OVERRIDE: dict[str, Any] | None = None
 
 def _send_git_notification(message: str):
     log(message, Fore.LIGHTBLACK_EX)
@@ -2622,29 +2753,6 @@ def _build_tg_message_link(chat_id: str, message_id: int | None) -> Optional[str
     return f"https://t.me/c/{channel_id}/{message_id}"
 
 
-def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
-    if not raw:
-        return []
-    commands: list[dict[str, str]] = []
-    for chunk in raw.split(";"):
-        piece = chunk.strip()
-        if not piece:
-            continue
-        if ":" in piece:
-            command_part, description_part = piece.split(":", 1)
-        else:
-            command_part, description_part = piece, piece
-        command_clean = command_part.strip().lstrip("/")
-        description_clean = description_part.strip() or command_clean
-        if not command_clean:
-            continue
-        commands.append({
-            "command": command_clean[:32],
-            "description": description_clean[:256],
-        })
-    return commands
-
-
 def _default_command_payload() -> list[dict[str, str]]:
     return [{"command": cmd, "description": desc} for cmd, desc in TELEGRAM_DEFAULT_COMMANDS]
 
@@ -2876,6 +2984,268 @@ def _format_log_history_message(lines: int = 12) -> str:
     return "Последние события:\n" + "\n".join(tail)
 
 
+def _read_runtime_status() -> dict[str, Any]:
+    try:
+        raw = RUNTIME_STATUS_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_local_dt(value: datetime.datetime | None) -> str:
+    if not value:
+        return "не запланировано"
+    try:
+        local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+        local_dt = value.astimezone(local_tz)
+    except Exception:
+        local_dt = value
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _format_schedule_overview() -> str:
+    status = _read_runtime_status()
+    lines = []
+    if status:
+        lines.append(f"Текущий статус: {status.get('status', 'unknown')}")
+        next_local = status.get("next_run_local")
+        next_utc = status.get("next_run_utc")
+        if next_local:
+            lines.append(f"Следующий запуск: {next_local}")
+        elif next_utc:
+            lines.append(f"Следующий запуск (UTC): {next_utc}")
+        else:
+            lines.append("Следующий запуск: не запланирован.")
+        if status.get("next_run_minutes") is not None:
+            lines.append(f"Оставшееся время (мин): {status['next_run_minutes']}")
+    else:
+        lines.append("Статус цикла недоступен.")
+    with _SCHEDULE_OVERRIDE_LOCK:
+        override = dict(_SCHEDULE_OVERRIDE) if _SCHEDULE_OVERRIDE else None
+    if override:
+        target_dt = override.get("target")
+        delay = override.get("delay")
+        origin = override.get("note") or "ручное"
+        lines.append(
+            "Ручное расписание: "
+            f"{_format_local_dt(target_dt)} (~{delay:.1f} мин), источник: {origin}"
+        )
+    else:
+        lines.append("Ручное расписание не активно.")
+    return "\n".join(lines)
+
+
+def _parse_minutes_argument(token: str) -> Optional[float]:
+    pattern = re.fullmatch(r"\s*(\d+(?:[\.,]\d+)?)([a-zA-Z]*)\s*", token)
+    if not pattern:
+        return None
+    value = float(pattern.group(1).replace(",", "."))
+    unit = pattern.group(2).lower()
+    if unit in ("", "m", "min", "mins", "minute", "minutes"):
+        return value
+    if unit in ("h", "hr", "hrs", "hour", "hours"):
+        return value * 60.0
+    return None
+
+
+def _parse_schedule_datetime(expression: str) -> Optional[datetime.datetime]:
+    expr = expression.strip()
+    if not expr:
+        return None
+    if expr.lower() in {"now", "сейчас"}:
+        return datetime.datetime.now(datetime.timezone.utc)
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", expr):
+        local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+        now_local = datetime.datetime.now(local_tz)
+        parts = expr.split(":")
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = int(parts[2]) if len(parts) > 2 else 0
+        candidate = now_local.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        if candidate <= now_local:
+            candidate += datetime.timedelta(days=1)
+        return candidate.astimezone(datetime.timezone.utc)
+    cleaned = expr.replace("T", " ").replace("Z", "+00:00")
+    try:
+        parsed = datetime.datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+        parsed = parsed.replace(tzinfo=local_tz)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _set_manual_schedule(
+    *,
+    delay_minutes: Optional[float],
+    target_dt: Optional[datetime.datetime],
+    note: str,
+) -> str:
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if target_dt is not None:
+        target = target_dt
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=datetime.timezone.utc)
+        delta = (target - now_utc).total_seconds() / 60.0
+        delay = max(0.0, delta)
+    elif delay_minutes is not None:
+        delay = max(0.0, float(delay_minutes))
+        target = now_utc + datetime.timedelta(minutes=delay)
+    else:
+        delay = 0.0
+        target = now_utc
+    with _SCHEDULE_OVERRIDE_LOCK:
+        global _SCHEDULE_OVERRIDE
+        _SCHEDULE_OVERRIDE = {
+            "delay": delay,
+            "target": target,
+            "note": note,
+            "set_at": now_utc,
+        }
+    _SCHEDULE_EVENT.set()
+    _write_runtime_status(delay, target, "scheduled")
+    if delay <= 0.01:
+        return "⏱ Следующая сессия будет запущена немедленно."
+    return f"⏱ Следующая сессия запланирована через {delay:.1f} мин ({_format_local_dt(target)})."
+
+
+def _clear_manual_schedule() -> str:
+    with _SCHEDULE_OVERRIDE_LOCK:
+        global _SCHEDULE_OVERRIDE
+        had_override = _SCHEDULE_OVERRIDE is not None
+        _SCHEDULE_OVERRIDE = None
+    _SCHEDULE_EVENT.set()
+    _write_runtime_status(None, None, "running")
+    if had_override:
+        return "⏱ Ручное расписание отменено, возвращаемся к автоматическому режиму."
+    return "⏱ Ручное расписание не активно."
+
+
+def _consume_schedule_override(default_delay: Optional[float]) -> tuple[float, Optional[datetime.datetime], bool]:
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    with _SCHEDULE_OVERRIDE_LOCK:
+        global _SCHEDULE_OVERRIDE
+        override = _SCHEDULE_OVERRIDE
+        if override:
+            _SCHEDULE_OVERRIDE = None
+    if override:
+        target = override.get("target")
+        if isinstance(target, datetime.datetime):
+            target_dt = target if target.tzinfo else target.replace(tzinfo=datetime.timezone.utc)
+            delay_minutes = max(0.0, (target_dt - now_utc).total_seconds() / 60.0)
+        else:
+            try:
+                delay_minutes = max(0.0, float(override.get("delay") or 0.0))
+            except (TypeError, ValueError):
+                delay_minutes = max(0.0, float(default_delay or DEFAULT_NEXT_RUN_MINUTES))
+            target_dt = now_utc + datetime.timedelta(minutes=delay_minutes)
+        return delay_minutes, target_dt, True
+    base_delay = default_delay if (default_delay is not None and default_delay > 0) else DEFAULT_NEXT_RUN_MINUTES
+    target_dt = now_utc + datetime.timedelta(minutes=base_delay)
+    return base_delay, target_dt, False
+
+
+def _persist_env_values(updates: dict[str, str | None]) -> bool:
+    if not updates:
+        return False
+    path = SCRIPT_DIR / ".env"
+    try:
+        existing_lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        existing_lines = []
+    except Exception:
+        existing_lines = []
+    seen: set[str] = set()
+    new_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            new_lines.append(line)
+            continue
+        key, _, _ = line.partition("=")
+        key = key.strip()
+        if key in updates:
+            value = updates[key]
+            if value is None:
+                new_lines.append(f"{key}=")
+            else:
+                new_lines.append(f"{key}={value}")
+            seen.add(key)
+        else:
+            new_lines.append(line)
+    for key, value in updates.items():
+        if key in seen:
+            continue
+        if value is None:
+            new_lines.append(f"{key}=")
+        else:
+            new_lines.append(f"{key}={value}")
+    try:
+        path.write_text("\n".join(new_lines).strip() + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _format_token_usage_message() -> str:
+    hard_stop = AI_HARD_STOP_BUDGET or 0
+    secondary = AI_SECONDARY_BUDGET_START or 0
+    lines = [
+        f"Использовано токенов: {AI_TOKEN_USAGE_TOTAL}",
+        f"Лимит цикла: {AI_TOKEN_BUDGET_CYCLE}",
+        f"Порог дешёвой модели: {secondary if secondary else 'отключён'}",
+        f"Жёсткий стоп: {hard_stop if hard_stop else 'отключён'}",
+    ]
+    if AI_TOKEN_USAGE_BY_MODEL:
+        lines.append("Статистика по моделям:")
+        for model, stats in sorted(AI_TOKEN_USAGE_BY_MODEL.items()):
+            prompt = stats.get("prompt", 0)
+            completion = stats.get("completion", 0)
+            total = stats.get("total", prompt + completion)
+            lines.append(f"- {model}: {total} (prompt {prompt}, completion {completion})")
+    return "\n".join(lines)
+
+
+def _handle_schedule_command(args: list[str]) -> str:
+    if not args:
+        return _format_schedule_overview()
+    first = args[0].lower()
+    if first in {"cancel", "clear", "reset", "stop"}:
+        return _clear_manual_schedule()
+    if first in {"now", "run", "start"}:
+        return _set_manual_schedule(delay_minutes=0.0, target_dt=None, note="manual")
+    if first in {"in", "через"} and len(args) > 1:
+        minutes = _parse_minutes_argument(args[1])
+        if minutes is None:
+            return "⏱ Не удалось разобрать интервал. Пример: /schedule in 45"
+        return _set_manual_schedule(delay_minutes=minutes, target_dt=None, note="manual")
+    if first in {"at", "в"} and len(args) > 1:
+        target = _parse_schedule_datetime(" ".join(args[1:]))
+        if target is None:
+            return "⏱ Не удалось разобрать время запуска. Пример: /schedule at 23:15"
+        return _set_manual_schedule(delay_minutes=None, target_dt=target, note="manual")
+    minutes = _parse_minutes_argument(args[0])
+    if minutes is not None:
+        return _set_manual_schedule(delay_minutes=minutes, target_dt=None, note="manual")
+    target = _parse_schedule_datetime(" ".join(args))
+    if target is not None:
+        return _set_manual_schedule(delay_minutes=None, target_dt=target, note="manual")
+    return (
+        "⏱ Использование: /schedule 30 (в минутах), "
+        "/schedule at 23:15, /schedule 2025-01-01 12:00, "
+        "/schedule cancel"
+    )
+
+
+
+
 def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int] = None) -> None:
     if not text:
         return
@@ -2897,6 +3267,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _format_risk_message()
     elif command == "logs":
         reply = _format_log_history_message()
+    elif command in {"schedule", "next"}:
+        reply = _handle_schedule_command(args)
+    elif command in {"tokens", "token"}:
+        reply = _handle_tokens_command(args)
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
     else:
@@ -6533,12 +6907,20 @@ def run_cycle():
             pass
     source_label = os.getenv("BYBITBOT_SOURCE_LABEL")
     source_ref = os.getenv("BYBITBOT_SOURCE_REF")
-    source_message = os.getenv("BYBITBOT_SOURCE_MESSAGE")
+    source_hash = os.getenv("BYBITBOT_SOURCE_HASH")
+    source_timestamp_env = os.getenv("BYBITBOT_SOURCE_TIMESTAMP")
+    source_message_raw = os.getenv("BYBITBOT_SOURCE_MESSAGE")
+    source_message = (source_message_raw or "").splitlines()[0].strip() if source_message_raw else ""
+    failure_hash = os.getenv("BYBITBOT_FAILURE_HASH")
+    failure_message_raw = os.getenv("BYBITBOT_FAILURE_MESSAGE")
+    failure_message = (failure_message_raw or "").splitlines()[0].strip() if failure_message_raw else ""
+    failure_timestamp = os.getenv("BYBITBOT_FAILURE_TIMESTAMP")
     source_context = os.getenv("BYBITBOT_FALLBACK_CONTEXT")
     cycle_descriptor = ""
-    commit_hash, commit_message, commit_timestamp = get_current_commit_info()
+    head_commit_hash, head_commit_message, head_commit_timestamp = get_current_commit_info()
     commit_descriptor = ""
     commit_short = ""
+    commit_timestamp_for_display = head_commit_timestamp
     branch_name = get_current_branch_name()
     if source_label and source_ref:
         cycle_label_parts: list[str] = []
@@ -6553,29 +6935,66 @@ def run_cycle():
                 cycle_label_parts.append(f"#{cycle_counter}")
         cycle_segment = f"[{cycle_label_parts[0]}] " if cycle_label_parts else ""
         cycle_descriptor = cycle_segment.strip()
-        source_message_line = (source_message or "").splitlines()[0].strip() if source_message else ""
-        git_line = f"[GIT] {cycle_segment}{source_ref} - {source_label}"
-        if source_message_line:
-            git_line += f": {source_message_line}"
+
+        def _build_commit_segment(
+            role: str,
+            commit_hash_value: str | None,
+            timestamp_value: str | None,
+            message_value: str | None,
+            label_value: str | None = None,
+        ) -> str:
+            if not (commit_hash_value or message_value or label_value):
+                return ""
+            segment = role
+            if commit_hash_value:
+                segment += f" {commit_hash_value[:8]}"
+            if label_value:
+                label_clean = label_value.strip()
+                if label_clean:
+                    commit_fragment = (commit_hash_value or "")[:8].lower()
+                    if not commit_fragment or commit_fragment not in label_clean.lower():
+                        segment += f" ({label_clean})"
+            if timestamp_value:
+                formatted = _format_commit_timestamp(timestamp_value)
+                segment += f" @ {formatted if formatted else timestamp_value}"
+            if message_value:
+                segment += f" - {message_value}"
+            return segment
+
+        failure_segment = _build_commit_segment("fail", failure_hash, failure_timestamp, failure_message)
+        backup_segment = _build_commit_segment(
+            "backup",
+            source_hash or source_ref,
+            source_timestamp_env,
+            source_message,
+            source_label,
+        )
+        segments = [segment for segment in (failure_segment, backup_segment) if segment]
+        if segments:
+            git_line = f"[GIT] {cycle_segment}{' -> '.join(segments)}"
+        else:
+            fallback_line = f"{source_ref} - {source_label}"
+            if source_message:
+                fallback_line += f": {source_message}"
+            git_line = f"[GIT] {cycle_segment}{fallback_line}"
         if source_context:
             git_line += f" ({source_context})"
         if branch_name:
             git_line += f" | branch {branch_name}"
-        if commit_timestamp:
-            formatted_ts = _format_commit_timestamp(commit_timestamp)
-            if formatted_ts:
-                git_line += f" | committed {formatted_ts}"
         _send_git_notification(git_line)
-        commit_short = (source_ref or "")[:8]
-        commit_descriptor = commit_short or (source_ref or "")
-        if source_message_line:
-            commit_descriptor = f"{commit_descriptor} {source_message_line}"
+        effective_hash = source_hash or source_ref or ""
+        commit_short = effective_hash[:8]
+        descriptor_base = commit_short or (source_ref or source_label or "")
+        commit_descriptor = descriptor_base.strip()
+        if source_message:
+            commit_descriptor = f"{commit_descriptor} {source_message}".strip()
+        commit_timestamp_for_display = source_timestamp_env or commit_timestamp_for_display
     else:
-        if commit_hash:
-            short_hash = commit_hash[:8]
-            message_text = (commit_message or "no commit message").splitlines()[0]
-            timestamp_text = commit_timestamp or "timestamp unavailable"
-            formatted_ts = _format_commit_timestamp(commit_timestamp)
+        if head_commit_hash:
+            short_hash = head_commit_hash[:8]
+            message_text = (head_commit_message or "no commit message").splitlines()[0]
+            timestamp_text = head_commit_timestamp or "timestamp unavailable"
+            formatted_ts = _format_commit_timestamp(head_commit_timestamp)
             if formatted_ts:
                 timestamp_display = formatted_ts
             else:
@@ -6587,7 +7006,11 @@ def run_cycle():
             commit_short = short_hash
             commit_descriptor = f"{short_hash} {message_text}"
     commit_descriptor = commit_descriptor.strip()
-    commit_time_display = _format_commit_timestamp(commit_timestamp) if commit_timestamp else None
+    commit_time_display = (
+        _format_commit_timestamp(commit_timestamp_for_display)
+        if commit_timestamp_for_display
+        else None
+    )
     last_equity = equity
     last_available_margin = available_margin
     log(f"✅ Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
@@ -8427,54 +8850,61 @@ def main():
         except Exception:
             _write_runtime_status(None, None, "error")
             raise
-        if not delay_minutes or delay_minutes <= 0:
-            delay_minutes = DEFAULT_NEXT_RUN_MINUTES
+        base_delay = delay_minutes if delay_minutes and delay_minutes > 0 else DEFAULT_NEXT_RUN_MINUTES
+        while True:
+            delay_minutes, target_dt, override_applied = _consume_schedule_override(base_delay)
+            if delay_minutes <= 0:
+                break
+            try:
+                remaining_seconds = max(0.0, float(delay_minutes) * 60.0)
+            except (TypeError, ValueError):
+                base_delay = DEFAULT_NEXT_RUN_MINUTES
+                delay_minutes = base_delay
+                continue
+            if remaining_seconds <= 0:
+                break
+            if target_dt is None:
+                target_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
+            local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+            next_local = target_dt.astimezone(local_tz)
+            eta_msg = (
+                f"ℹ️ Следующая сессия запланирована на {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                f"(~{delay_minutes:.1f} мин)"
+            )
+            log(eta_msg, Fore.LIGHTBLACK_EX)
+            send_tg(eta_msg)
+            _write_runtime_status(delay_minutes, target_dt, "sleeping")
 
-        try:
-            remaining_seconds = max(0.0, float(delay_minutes) * 60.0)
-        except (TypeError, ValueError):
-            remaining_seconds = float(DEFAULT_NEXT_RUN_MINUTES) * 60.0
-
-        if remaining_seconds <= 0:
-            continue
-
-        next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
-        local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
-        next_local = next_run_dt.astimezone(local_tz)
-        eta_msg = (
-            f"ℹ️ Следующая сессия запланирована на {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
-            f"(~{delay_minutes:.1f} мин)"
-        )
-        log(eta_msg, Fore.LIGHTBLACK_EX)
-        send_tg(eta_msg)
-
-        progress_enabled = remaining_seconds >= 180
-        if progress_enabled:
-            progress_interval = min(300.0, max(90.0, remaining_seconds / 4.0))
-        else:
-            progress_interval = remaining_seconds
-
-        try:
-            while remaining_seconds > 0:
-                step = min(progress_interval, remaining_seconds)
-                time.sleep(step)
-                remaining_seconds -= step
-                if remaining_seconds <= 0:
-                    break
-                if not progress_enabled:
-                    continue
-                minutes_left = remaining_seconds / 60.0
-                eta_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
-                eta_local = eta_dt.astimezone(local_tz)
-                progress_msg = (
-                    f"ℹ️ Осталось ~{minutes_left:.1f} мин до следующей сессии "
-                    f"({eta_local.strftime('%H:%M:%S %Z')})"
-                )
-                log(progress_msg, Fore.LIGHTBLACK_EX)
-                send_tg(progress_msg)
-        except KeyboardInterrupt:
-            log("Interrupted during sleep.", Fore.YELLOW)
-            _write_runtime_status(None, None, "stopped")
+            progress_enabled = remaining_seconds >= 180
+            progress_interval = (
+                min(300.0, max(90.0, remaining_seconds / 4.0)) if progress_enabled else remaining_seconds
+            )
+            interrupted = False
+            try:
+                while remaining_seconds > 0:
+                    step = min(progress_interval, remaining_seconds)
+                    if _SCHEDULE_EVENT.wait(step):
+                        _SCHEDULE_EVENT.clear()
+                        interrupted = True
+                        break
+                    remaining_seconds -= step
+                    if remaining_seconds <= 0 or not progress_enabled:
+                        continue
+                    minutes_left = remaining_seconds / 60.0
+                    eta_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
+                    eta_local = eta_dt.astimezone(local_tz)
+                    progress_msg = (
+                        f"ℹ️ Осталось ~{minutes_left:.1f} мин до следующей сессии "
+                        f"({eta_local.strftime('%H:%M:%S %Z')})"
+                    )
+                    log(progress_msg, Fore.LIGHTBLACK_EX)
+                    send_tg(progress_msg)
+            except KeyboardInterrupt:
+                log("Interrupted during sleep.", Fore.YELLOW)
+                _write_runtime_status(None, None, "stopped")
+                break
+            if interrupted:
+                continue
             break
     _write_runtime_status(None, None, "stopped")
 
@@ -8510,3 +8940,57 @@ if __name__ == "__main__":
 
 
 
+def _handle_tokens_command(args: list[str]) -> str:
+    global AI_TOKEN_BUDGET_CYCLE, AI_HARD_STOP_BUDGET, AI_SECONDARY_BUDGET_START
+    global AI_TOKEN_USAGE_TOTAL, AI_TOKEN_USAGE_BY_MODEL
+    if not args:
+        return _format_token_usage_message()
+    action = args[0].lower()
+    if action in {"status", "show"}:
+        return _format_token_usage_message()
+    if action in {"reset"}:
+        AI_TOKEN_USAGE_TOTAL = 0
+        AI_TOKEN_USAGE_BY_MODEL.clear()
+        return "🔄 Счётчики токенов сброшены для текущего цикла."
+    if action in {"budget", "soft"}:
+        value_token = args[1] if len(args) > 1 else None
+        parsed = _parse_minutes_argument(value_token or "") if value_token else None
+        if parsed is None:
+            return "❌ Укажите числовой лимит токенов. Пример: /tokens budget 150000"
+        AI_TOKEN_BUDGET_CYCLE = max(1000, int(parsed))
+        os.environ["OPENAI_TOKEN_BUDGET_PER_CYCLE"] = str(AI_TOKEN_BUDGET_CYCLE)
+        _persist_env_values({"OPENAI_TOKEN_BUDGET_PER_CYCLE": str(AI_TOKEN_BUDGET_CYCLE)})
+        return f"✅ Лимит токенов на цикл обновлён: {AI_TOKEN_BUDGET_CYCLE}"
+    if action in {"hard", "stop"}:
+        value_token = args[1] if len(args) > 1 else None
+        if not value_token or value_token.lower() in {"off", "none", "0"}:
+            AI_HARD_STOP_BUDGET = 0
+            os.environ.pop("OPENAI_HARD_STOP_BUDGET", None)
+            _persist_env_values({"OPENAI_HARD_STOP_BUDGET": ""})
+            return "✅ Жёсткий стоп отключён."
+        parsed = _parse_minutes_argument(value_token)
+        if parsed is None:
+            return "❌ Укажите числовое значение. Пример: /tokens hard 200000"
+        AI_HARD_STOP_BUDGET = max(0, int(parsed))
+        os.environ["OPENAI_HARD_STOP_BUDGET"] = str(AI_HARD_STOP_BUDGET)
+        _persist_env_values({"OPENAI_HARD_STOP_BUDGET": str(AI_HARD_STOP_BUDGET)})
+        return f"✅ Жёсткий стоп обновлён: {AI_HARD_STOP_BUDGET}"
+    if action in {"secondary", "cheap"}:
+        value_token = args[1] if len(args) > 1 else None
+        if not value_token or value_token.lower() in {"off", "none", "0"}:
+            AI_SECONDARY_BUDGET_START = 0
+            os.environ.pop("OPENAI_SECONDARY_BUDGET_START", None)
+            _persist_env_values({"OPENAI_SECONDARY_BUDGET_START": ""})
+            return "✅ Порог переключения на дешёвую модель отключён."
+        parsed = _parse_minutes_argument(value_token)
+        if parsed is None:
+            return "❌ Укажите числовое значение. Пример: /tokens secondary 70000"
+        AI_SECONDARY_BUDGET_START = max(0, int(parsed))
+        os.environ["OPENAI_SECONDARY_BUDGET_START"] = str(AI_SECONDARY_BUDGET_START)
+        _persist_env_values({"OPENAI_SECONDARY_BUDGET_START": str(AI_SECONDARY_BUDGET_START)})
+        return f"✅ Порог переключения обновлён: {AI_SECONDARY_BUDGET_START}"
+    return (
+        "ℹ️ Использование: /tokens, /tokens budget 150000, "
+        "/tokens hard 200000, /tokens hard off, "
+        "/tokens secondary 70000, /tokens reset"
+    )
