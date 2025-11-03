@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 .env
 .env.*
@@ -9,4 +9,5 @@ backups/
 runtime_status.json
 changelog_state.json
 fallback_history.json
+results_state.json
 assets/

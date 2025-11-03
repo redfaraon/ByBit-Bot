@@ -1,3 +1,9 @@
+﻿11.3
+- Send 6-hour PnL summaries and newly closed order breakdowns to the Results topic (ID 22196) with deduped reporting and state persistence.
+- Push open-position snapshots to the Status topic (ID 22198) each cycle for quick monitoring.
+- Added new Telegram topic configuration knobs and git change tracking to highlight local work-in-progress.
+- Added Unified Trading deposit/withdraw telemetry to Status topic (ID 22198).
+
 11.2
 - Added Telegram `/schedule` command that can schedule, reschedule, or cancel the next cycle directly from the webhook with immediate override support.
 - Added `/tokens` webhook command to inspect and adjust OpenAI token budgets (cycle soft limit, hard stop, cheap-model threshold) and persist updates to `.env`.

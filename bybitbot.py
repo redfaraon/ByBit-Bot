@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "11.2")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "11.3")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
 CYCLE_STATE_FILE = REPO_ROOT / "cycle_state.json"
@@ -861,6 +861,18 @@ def main():
             env_cycle_counter = None
 
     if history.get("fallback_active"):
+        fallback_head = history.get("fallback_last_head")
+        current_head = _current_head()
+        if current_head and fallback_head and current_head != fallback_head:
+            history["fallback_active"] = False
+            history["fallback_cycles"] = 0
+            history["fallback_last_head"] = None
+            history["fallback_source"] = None
+            history["fallback_target"] = None
+            _save_fallback_history(history)
+            print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", file=sys.stderr)
+            _run_current()
+            return
         fallback_cycles_recorded = int(history.get("fallback_cycles") or 0)
         if fallback_cycles_recorded != completed_fallback_cycles:
             history["fallback_cycles"] = completed_fallback_cycles

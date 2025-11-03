@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 11.2
+# Version: 11.3
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -43,7 +43,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "11.2"
+BOT_VERSION = "11.3"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -53,6 +53,7 @@ CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
 EQUITY_HISTORY_FILE = SCRIPT_DIR / "equity_history.json"
 CYCLE_STATE_FILE = SCRIPT_DIR / "cycle_state.json"
 FALLBACK_HISTORY_FILE = SCRIPT_DIR / "fallback_history.json"
+RESULTS_STATE_FILE = SCRIPT_DIR / "results_state.json"
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
@@ -95,6 +96,10 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("version", "Текущая версия и changelog"),
 ]
 TELEGRAM_RELEASE_THREAD_ID: int | None = None
+TELEGRAM_COMMAND_THREAD_ID: int | None = None
+TELEGRAM_INPROGRESS_THREAD_ID: int | None = None
+TELEGRAM_RESULTS_THREAD_ID: int | None = None
+TELEGRAM_STATUS_THREAD_ID: int | None = None
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -1952,7 +1957,8 @@ def refresh_settings():
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
-    global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID
+    global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
+    global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
@@ -2036,6 +2042,14 @@ def refresh_settings():
     TELEGRAM_COMMANDS_LIST = _parse_telegram_command_list(commands_raw)
     release_topic_raw = os.getenv("TELEGRAM_RELEASE_TOPIC_ID") or os.getenv("TELEGRAM_RELEASE_THREAD_ID")
     TELEGRAM_RELEASE_THREAD_ID = safe_int(release_topic_raw) if release_topic_raw else 7
+    command_topic_raw = os.getenv("TELEGRAM_COMMAND_TOPIC_ID") or os.getenv("TELEGRAM_COMMAND_THREAD_ID")
+    TELEGRAM_COMMAND_THREAD_ID = safe_int(command_topic_raw) if command_topic_raw else TELEGRAM_COMMAND_THREAD_ID
+    inprogress_topic_raw = os.getenv("TELEGRAM_INPROGRESS_TOPIC_ID") or os.getenv("TELEGRAM_INPROGRESS_THREAD_ID")
+    TELEGRAM_INPROGRESS_THREAD_ID = safe_int(inprogress_topic_raw) if inprogress_topic_raw else TELEGRAM_INPROGRESS_THREAD_ID
+    results_topic_raw = os.getenv("TELEGRAM_RESULTS_TOPIC_ID") or os.getenv("TELEGRAM_RESULTS_THREAD_ID")
+    TELEGRAM_RESULTS_THREAD_ID = safe_int(results_topic_raw) if results_topic_raw else TELEGRAM_RESULTS_THREAD_ID
+    status_topic_raw = os.getenv("TELEGRAM_STATUS_TOPIC_ID") or os.getenv("TELEGRAM_STATUS_THREAD_ID")
+    TELEGRAM_STATUS_THREAD_ID = safe_int(status_topic_raw) if status_topic_raw else TELEGRAM_STATUS_THREAD_ID
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
@@ -2092,16 +2106,20 @@ def refresh_settings():
         AI_MODEL_THRESHOLD = 5
     AI_MODEL_THRESHOLD = max(0, AI_MODEL_THRESHOLD)
     AI_MODEL = AI_MODEL_PRIMARY or AI_MODEL_CHEAP or "gpt-4.1-mini"
+    default_budget = globals().get("AI_TOKEN_BUDGET_CYCLE", 170_000)
     try:
-        AI_TOKEN_BUDGET_CYCLE = int(os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", str(AI_TOKEN_BUDGET_CYCLE)))
+        raw_budget = os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", str(default_budget))
+        AI_TOKEN_BUDGET_CYCLE = int(raw_budget)
     except (TypeError, ValueError):
-        AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
+        AI_TOKEN_BUDGET_CYCLE = max(1000, int(default_budget) if isinstance(default_budget, (int, float)) else 170_000)
     else:
         AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
+    default_secondary = globals().get("AI_SECONDARY_BUDGET_START", 70_000)
     try:
-        AI_SECONDARY_BUDGET_START = int(os.getenv("OPENAI_SECONDARY_BUDGET_START", str(AI_SECONDARY_BUDGET_START)))
+        raw_secondary = os.getenv("OPENAI_SECONDARY_BUDGET_START", str(default_secondary))
+        AI_SECONDARY_BUDGET_START = int(raw_secondary)
     except (TypeError, ValueError):
-        AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
+        AI_SECONDARY_BUDGET_START = max(0, int(default_secondary) if isinstance(default_secondary, (int, float)) else 70_000)
     else:
         AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
     hard_stop_raw = os.getenv("OPENAI_HARD_STOP_BUDGET")
@@ -2113,7 +2131,8 @@ def refresh_settings():
             try:
                 AI_HARD_STOP_BUDGET = max(0, int(float(hard_stop_clean)))
             except (TypeError, ValueError):
-                AI_HARD_STOP_BUDGET = max(0, AI_HARD_STOP_BUDGET)
+                fallback_hard = globals().get("AI_HARD_STOP_BUDGET", 0)
+                AI_HARD_STOP_BUDGET = max(0, fallback_hard if isinstance(fallback_hard, (int, float)) else 0)
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
@@ -2371,6 +2390,14 @@ if "TG_RETRY_BACKOFF" not in globals():
     TG_RETRY_BACKOFF = 1.5
 if "TG_GIT_TOPIC_ID" not in globals():
     TG_GIT_TOPIC_ID = 581
+if "TELEGRAM_COMMAND_THREAD_ID" not in globals():
+    TELEGRAM_COMMAND_THREAD_ID = None
+if "TELEGRAM_INPROGRESS_THREAD_ID" not in globals():
+    TELEGRAM_INPROGRESS_THREAD_ID = None
+if "TELEGRAM_RESULTS_THREAD_ID" not in globals():
+    TELEGRAM_RESULTS_THREAD_ID = None
+if "TELEGRAM_STATUS_THREAD_ID" not in globals():
+    TELEGRAM_STATUS_THREAD_ID = None
 if "NEW_IDEAS_LIMIT" not in globals():
     NEW_IDEAS_LIMIT = 6
 NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
@@ -2506,11 +2533,31 @@ LATEST_STATUS: dict[str, Any] = {}
 _SCHEDULE_EVENT = threading.Event()
 _SCHEDULE_OVERRIDE_LOCK = threading.RLock()
 _SCHEDULE_OVERRIDE: dict[str, Any] | None = None
+_LAST_WORKTREE_STATE_DIRTY: bool = False
+_LAST_WORKTREE_STATE_HASH: str = ""
 
 def _send_git_notification(message: str):
     log(message, Fore.LIGHTBLACK_EX)
     thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
     send_tg(message, thread_id=thread_target)
+
+
+def _send_inprogress_notification(message: str):
+    log(message, Fore.LIGHTBLACK_EX)
+    thread_target = TELEGRAM_INPROGRESS_THREAD_ID if TELEGRAM_INPROGRESS_THREAD_ID is not None else TG_TOPIC_ID
+    send_tg(message, thread_id=thread_target, no_log_forward=True)
+
+
+def _send_results_notification(message: str):
+    log(message, Fore.CYAN)
+    thread_target = TELEGRAM_RESULTS_THREAD_ID if TELEGRAM_RESULTS_THREAD_ID is not None else TG_TOPIC_ID
+    send_tg(message, thread_id=thread_target, no_log_forward=True)
+
+
+def _send_status_notification(message: str):
+    log(message, Fore.LIGHTBLUE_EX)
+    thread_target = TELEGRAM_STATUS_THREAD_ID if TELEGRAM_STATUS_THREAD_ID is not None else TG_TOPIC_ID
+    send_tg(message, thread_id=thread_target, no_log_forward=True)
 
 
 def _split_message(text: str, chunk_limit: int = 3800) -> list[str]:
@@ -2731,6 +2778,39 @@ def _save_changelog_state(state: dict) -> None:
         CHANGELOG_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log(f"⚠️ Не удалось сохранить состояние changelog: {exc}", Fore.YELLOW)
+
+
+def _load_results_state() -> dict:
+    try:
+        raw = RESULTS_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log(f"[RESULTS] Не удалось прочитать results_state.json: {exc}", Fore.YELLOW)
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log("[RESULTS] Файл results_state.json повреждён, начинаем заново.", Fore.YELLOW)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_results_state(state: dict) -> None:
+    try:
+        RESULTS_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"[RESULTS] Не удалось сохранить results_state.json: {exc}", Fore.YELLOW)
+
+
+def _results_order_key(detail: dict[str, Any]) -> str:
+    order_id = str(detail.get("id") or "").strip()
+    if order_id:
+        return order_id
+    symbol = str(detail.get("symbol") or "").upper()
+    timestamp = detail.get("timestamp") or ""
+    pnl = detail.get("pnl")
+    return f"{symbol}|{timestamp}|{pnl}"
 
 
 def _build_tg_message_link(chat_id: str, message_id: int | None) -> Optional[str]:
@@ -3252,6 +3332,11 @@ def _handle_schedule_command(args: list[str]) -> str:
 def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int] = None) -> None:
     if not text:
         return
+    command_thread = TELEGRAM_COMMAND_THREAD_ID
+    if command_thread is not None and thread_id != command_thread:
+        log(f"[CMD] Игнорирую команду вне темы Commands (thread={thread_id})", Fore.LIGHTBLACK_EX)
+        return
+    response_thread = thread_id if thread_id is not None else command_thread
     parts = text.strip().split()
     if not parts:
         return
@@ -3281,7 +3366,7 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
     send_tg(
         reply,
         chat_id_override=chat_id,
-        thread_id=thread_id,
+        thread_id=response_thread,
         no_log_forward=True,
     )
 
@@ -3310,7 +3395,8 @@ def ensure_changelog_announcement() -> dict:
     if BOT_CHANGELOG:
         lines.append(BOT_CHANGELOG)
     message_text = "\n".join(lines)
-    message_id = send_tg(message_text, disable_web_page_preview=True)
+    release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
+    message_id = send_tg(message_text, disable_web_page_preview=True, thread_id=release_thread)
     if not message_id:
         return state
     link = _build_tg_message_link(TG_CHAT, message_id)
@@ -4161,13 +4247,13 @@ def _collect_recent_closed_pnl(
     window_end: datetime.datetime | None = None,
     *,
     limit_per_symbol: int = 200,
-) -> tuple[float | None, int, list[str]]:
+) -> tuple[float | None, int, list[str], list[dict[str, Any]]]:
     """
     Sum realized PnL from closed orders (and, if needed, trades) within [window_start, window_end].
-    Returns (total_pnl, fill_count, warnings).
+    Returns (total_pnl, fill_count, warnings, details).
     """
     if not symbols:
-        return None, 0, []
+        return None, 0, [], []
     warnings: list[str] = []
     since_ms = int(window_start.timestamp() * 1000)
     until_ms = int(window_end.timestamp() * 1000) if window_end else None
@@ -4175,6 +4261,7 @@ def _collect_recent_closed_pnl(
     total_pnl = 0.0
     fill_count = 0
     seen_order_ids: set[str] = set()
+    order_details: list[dict[str, Any]] = []
     normalized_symbols = []
     for sym in symbols:
         if not sym:
@@ -4214,8 +4301,27 @@ def _collect_recent_closed_pnl(
                 seen_order_ids.add(order_id)
             total_pnl += pnl_val
             fill_count += 1
+            detail = {
+                "id": order_id or "",
+                "symbol": symbol,
+                "side": str(order.get("side") or "").upper() or "?",
+                "amount": safe_float(
+                    order.get("amount")
+                    or order.get("filled")
+                    or order.get("qty")
+                    or order.get("reduce_only_size")
+                ),
+                "price": safe_float(order.get("average") or order.get("price")),
+                "pnl": float(pnl_val),
+                "timestamp": (
+                    datetime.datetime.fromtimestamp(order_ts / 1000, tz=datetime.timezone.utc).isoformat()
+                    if order_ts is not None
+                    else None
+                ),
+            }
+            order_details.append(detail)
     if fill_count > 0:
-        return total_pnl, fill_count, warnings
+        return total_pnl, fill_count, warnings, order_details
     # Fallback to trade history if orders did not expose realised PnL
     seen_trade_ids: set[str] = set()
     for symbol in normalized_symbols:
@@ -4258,9 +4364,23 @@ def _collect_recent_closed_pnl(
             if fee_cost is not None and fee_currency in {"USDT", "USDC", "USD"}:
                 total_pnl -= fee_cost
             fill_count += 1
+            detail = {
+                "id": trade_id or "",
+                "symbol": symbol,
+                "side": str(trade.get("side") or "").upper() or "?",
+                "amount": safe_float(trade.get("amount") or trade.get("qty") or trade.get("contracts")),
+                "price": safe_float(trade.get("price")),
+                "pnl": float(pnl_val),
+                "timestamp": (
+                    datetime.datetime.fromtimestamp(trade_ts / 1000, tz=datetime.timezone.utc).isoformat()
+                    if trade_ts is not None
+                    else None
+                ),
+            }
+            order_details.append(detail)
     if fill_count > 0:
-        return total_pnl, fill_count, warnings
-    return None, 0, warnings
+        return total_pnl, fill_count, warnings, order_details
+    return None, 0, warnings, order_details
 
 
 def _sum_unrealized_pnl(positions_map: dict[str, Any] | None) -> tuple[float, int]:
@@ -4597,6 +4717,84 @@ def fetch_usdt_equity(exchange):
     if isinstance(balance, dict):
         balance["_realizedPnl"] = realized_val
     return total_val, free_val, balance
+
+
+def _parse_timestamp_any(value) -> Optional[datetime.datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+    if isinstance(value, (int, float)):
+        val = int(value)
+        if val > 1_000_000_000_000:
+            return datetime.datetime.fromtimestamp(val / 1000, tz=datetime.timezone.utc)
+        if val > 1_000_000_000:
+            return datetime.datetime.fromtimestamp(val, tz=datetime.timezone.utc)
+        return None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        if trimmed.isdigit():
+            return _parse_timestamp_any(int(trimmed))
+        try:
+            return datetime.datetime.fromisoformat(trimmed.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    return None
+
+
+def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
+    """Fetch recent deposit and withdrawal records for Unified Trading account."""
+    summary: dict[str, Any] = {
+        "records": [],
+        "totals": {"deposit": {}, "withdraw": {}},
+        "warnings": [],
+    }
+    def _record(kind: str, amount: float, coin: str, timestamp: Optional[datetime.datetime], status: str, raw: dict[str, Any]) -> None:
+        entry = {
+            "type": kind,
+            "coin": coin,
+            "amount": float(amount),
+            "timestamp": timestamp,
+            "status": status,
+            "raw": raw,
+        }
+        summary["records"].append(entry)
+        totals = summary["totals"].setdefault(kind, {})
+        totals[coin] = totals.get(coin, 0.0) + float(amount)
+
+    params_common = {"limit": limit}
+    try:
+        resp = exchange.privateGetV5AssetDepositQueryRecord(params_common)
+        rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+        for row in rows:
+            amount = safe_float(row.get("amount"))
+            if amount is None:
+                continue
+            coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
+            ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
+            status = str(row.get("status") or row.get("state") or "").upper()
+            _record("deposit", float(amount), coin, ts, status, row)
+    except Exception as exc:
+        summary["warnings"].append(f"[STATUS] Не удалось получить депозиты: {exc}")
+
+    try:
+        resp = exchange.privateGetV5AssetWithdrawQueryRecord(params_common)
+        rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+        for row in rows:
+            amount = safe_float(row.get("amount") or row.get("qty"))
+            if amount is None:
+                continue
+            coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
+            ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
+            status = str(row.get("status") or row.get("state") or "").upper()
+            _record("withdraw", float(amount), coin, ts, status, row)
+    except Exception as exc:
+        summary["warnings"].append(f"[STATUS] Не удалось получить выводы: {exc}")
+
+    summary["records"].sort(key=lambda item: item.get("timestamp") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), reverse=True)
+    return summary
 
 
 def compute_order_amount(order, current_position):
@@ -5199,9 +5397,27 @@ def _sync_with_remote() -> None:
             check=True,
         )
         working_tree_dirty = bool(status_proc.stdout.strip())
+        status_snapshot = status_proc.stdout or ""
     except Exception as exc:
         log(f"[WARN] Git status failed before sync: {exc}", Fore.YELLOW)
         return
+    global _LAST_WORKTREE_STATE_DIRTY, _LAST_WORKTREE_STATE_HASH
+    if working_tree_dirty:
+        current_hash = hashlib.sha256(status_snapshot.encode("utf-8")).hexdigest()
+        if (not _LAST_WORKTREE_STATE_DIRTY) or (current_hash != _LAST_WORKTREE_STATE_HASH):
+            lines = status_snapshot.strip().splitlines()
+            preview_lines = lines[:10]
+            preview = "\n".join(f"- {line}" for line in preview_lines) if preview_lines else "- изменения без подробностей"
+            if len(lines) > len(preview_lines):
+                preview += f"\n… и ещё {len(lines) - len(preview_lines)} файлов"
+            _send_inprogress_notification(f"[WIP] Есть незакоммиченные изменения:\n{preview}")
+        _LAST_WORKTREE_STATE_DIRTY = True
+        _LAST_WORKTREE_STATE_HASH = current_hash
+    else:
+        if _LAST_WORKTREE_STATE_DIRTY:
+            _send_inprogress_notification("[WIP] Рабочее дерево очищено.")
+        _LAST_WORKTREE_STATE_DIRTY = False
+        _LAST_WORKTREE_STATE_HASH = ""
     try:
         fetch_proc = subprocess.run(
             ["git", "fetch", "--all", "--prune"],
@@ -7290,7 +7506,7 @@ def run_cycle():
     if start_pnl_list:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         window_start = now_utc - datetime.timedelta(hours=PNL_LOOKBACK_HOURS)
-        start_closed_pnl_value, start_closed_pnl_count, start_warnings = _collect_recent_closed_pnl(
+        start_closed_pnl_value, start_closed_pnl_count, start_warnings, _ = _collect_recent_closed_pnl(
             ex,
             start_pnl_list,
             window_start,
@@ -8538,6 +8754,64 @@ def run_cycle():
             }
         )
     LATEST_STATUS["positions"] = positions_summary
+    try:
+        if positions_summary:
+            status_lines = ["📈 Открытые позиции:"]
+            for pos in positions_summary[:20]:
+                entry_val = pos.get("entry")
+                entry_txt = ""
+                if entry_val is not None and math.isfinite(entry_val):
+                    entry_txt = f" @ {entry_val:.4f}"
+                amount_val = pos.get("amount")
+                amount_txt = f"{amount_val:.4f}" if amount_val is not None and math.isfinite(amount_val) else "?"
+                unreal_txt = pos.get("unrealized", 0.0)
+                status_lines.append(
+                    f"- {pos.get('symbol')} {pos.get('side')} {amount_txt}{entry_txt} (PnL {unreal_txt:+.2f} USDT)"
+                )
+            if len(positions_summary) > 20:
+                status_lines.append(f"… ещё {len(positions_summary) - 20} позиций")
+        else:
+            status_lines = ["📈 Открытых позиций нет."]
+        cash_flows = fetch_unified_cash_flows(ex, limit=20)
+        for warn in cash_flows.get("warnings", []):
+            log(warn, Fore.YELLOW)
+        records = cash_flows.get("records") or []
+        totals = cash_flows.get("totals") or {}
+        deposits_total = totals.get("deposit") or {}
+        withdrawals_total = totals.get("withdraw") or {}
+        if deposits_total or withdrawals_total:
+            status_lines.append("")
+            status_lines.append("💵 Unified Trading (последние операции):")
+            if deposits_total:
+                deposit_summary = ", ".join(
+                    f"{coin}:{amount:.4f}" for coin, amount in sorted(deposits_total.items())
+                )
+                status_lines.append(f"- Ввод: {deposit_summary}")
+            else:
+                status_lines.append("- Ввод: нет")
+            if withdrawals_total:
+                withdraw_summary = ", ".join(
+                    f"{coin}:-{amount:.4f}" for coin, amount in sorted(withdrawals_total.items())
+                )
+                status_lines.append(f"- Вывод: {withdraw_summary}")
+            else:
+                status_lines.append("- Вывод: нет")
+        if records:
+            status_lines.append("🧾 Операции:")
+            for entry in records[:5]:
+                coin = entry.get("coin") or "?"
+                amount = entry.get("amount")
+                sign = "+" if entry.get("type") == "deposit" else "-"
+                amount_txt = f"{sign}{abs(amount):.4f}" if isinstance(amount, (int, float)) and math.isfinite(amount) else "?"
+                ts = entry.get("timestamp")
+                ts_display = _format_local_dt(ts) if isinstance(ts, datetime.datetime) else "n/a"
+                status = entry.get("status") or ""
+                status_lines.append(f"- {entry.get('type').capitalize()} {amount_txt} {coin} ({ts_display}) {status}")
+            if len(records) > 5:
+                status_lines.append(f"… ещё {len(records) - 5} операций")
+        _send_status_notification("\n".join(status_lines))
+    except Exception as exc_status:
+        log(f"[STATUS] Не удалось отправить список позиций: {exc_status}", Fore.YELLOW)
 
     no_active_positions = final_positions_available and final_positions_count == 0
     flat_skipped_all = (
@@ -8722,11 +8996,14 @@ def run_cycle():
         send_kwargs["disable_web_page_preview"] = True
     if changelog_message_id:
         send_kwargs["reply_to_message_id"] = changelog_message_id
+    release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
+    send_kwargs.setdefault("thread_id", release_thread)
     if changelog_message_id or link:
         send_tg(f"ℹ️ Версия {version_display}", **send_kwargs)
     else:
-        send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}")
+        send_tg(f"ℹ️ Версия {BOT_VERSION}. {BOT_CHANGELOG}", thread_id=release_thread)
     balance_snapshot_end: dict[str, Any] | None = None
+    closed_order_details: list[dict[str, Any]] = []
     try:
         equity_end, available_end, balance_snapshot_end = fetch_usdt_equity(ex)
     except Exception as exc_equity:
@@ -8750,7 +9027,7 @@ def run_cycle():
             if isinstance(global_open_orders, dict):
                 closed_symbols_set.update(global_open_orders.keys())
             window_start = now_utc - datetime.timedelta(hours=PNL_LOOKBACK_HOURS)
-            closed_pnl_value, closed_pnl_count, closed_warnings = _collect_recent_closed_pnl(
+            closed_pnl_value, closed_pnl_count, closed_warnings, closed_order_details = _collect_recent_closed_pnl(
                 ex,
                 sorted(closed_symbols_set),
                 window_start,
@@ -8764,6 +9041,8 @@ def run_cycle():
 
             unreal_reported = False
             pnl_value: float | None = None
+            reference_value: float | None = None
+            pnl_basis: str | None = None
             if closed_pnl_value is not None:
                 risk_msg = _adjust_dynamic_risk_from_pnl(closed_pnl_value, "closed", closed_pnl_count)
                 if risk_msg:
@@ -8805,6 +9084,72 @@ def run_cycle():
                                 send_tg(baseline_msg)
                             except Exception:
                                 pass
+            results_lines: list[str] = ["📊 Итоги последних 6 часов"]
+            if closed_pnl_value is not None:
+                results_lines.append(f"PnL (закрытые ордера): {closed_pnl_value:+.2f} USDT ({closed_pnl_count} ордеров)")
+            elif pnl_value is not None:
+                basis_label = pnl_basis or "equity"
+                extra = f", ref {reference_value:.2f}" if reference_value is not None and math.isfinite(reference_value) else ""
+                results_lines.append(f"PnL ({basis_label}): {pnl_value:+.2f} USDT{extra}")
+            else:
+                results_lines.append("PnL: данные недоступны.")
+
+            results_state = _load_results_state()
+            reported_ids = set(results_state.get("closed_order_ids") or [])
+            new_orders: list[dict[str, Any]] = []
+            new_keys: list[str] = []
+            for detail in closed_order_details:
+                key = _results_order_key(detail)
+                if not key or key in reported_ids:
+                    continue
+                new_orders.append(detail)
+                new_keys.append(key)
+            if new_orders:
+                total_new_pnl = sum(detail.get("pnl", 0.0) for detail in new_orders if isinstance(detail.get("pnl"), (int, float)))
+                results_lines.append(f"Σ новых закрытий: {total_new_pnl:+.2f} USDT ({len(new_orders)} ордеров)")
+                results_lines.append("🧾 Закрытые ордера (новые):")
+                new_orders_sorted = sorted(new_orders, key=lambda d: d.get("timestamp") or "")
+                for detail in new_orders_sorted[:10]:
+                    amount_val = detail.get("amount")
+                    price_val = detail.get("price")
+                    amount_txt = f"{amount_val:.4f}" if isinstance(amount_val, (int, float)) and math.isfinite(amount_val) else "?"
+                    price_txt = f"{price_val:.4f}" if isinstance(price_val, (int, float)) and math.isfinite(price_val) else "?"
+                    ts_iso = detail.get("timestamp")
+                    if ts_iso:
+                        try:
+                            dt_obj = datetime.datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+                        except Exception:
+                            dt_obj = None
+                    else:
+                        dt_obj = None
+                    ts_display = _format_local_dt(dt_obj) if dt_obj else "n/a"
+                    pnl_val = detail.get("pnl")
+                    pnl_txt = f"{pnl_val:+.2f}" if isinstance(pnl_val, (int, float)) and math.isfinite(pnl_val) else "n/a"
+                    results_lines.append(
+                        f"- {detail.get('symbol')} {detail.get('side')} {amount_txt} @ {price_txt} → {pnl_txt} USDT ({ts_display})"
+                    )
+                if len(new_orders) > 10:
+                    results_lines.append(f"… и ещё {len(new_orders) - 10} ордеров")
+            else:
+                results_lines.append("🧾 Новых закрытых ордеров за 6ч нет.")
+            _send_results_notification("\n".join(results_lines))
+            if new_keys:
+                updated_ids = list(reported_ids) + new_keys
+                max_len = 500
+                if len(updated_ids) > max_len:
+                    updated_ids = updated_ids[-max_len:]
+                results_state["closed_order_ids"] = updated_ids
+                results_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                latest_ts = None
+                for detail in closed_order_details:
+                    ts_iso = detail.get("timestamp")
+                    if not ts_iso:
+                        continue
+                    if latest_ts is None or ts_iso > latest_ts:
+                        latest_ts = ts_iso
+                if latest_ts:
+                    results_state["last_timestamp"] = latest_ts
+                _save_results_state(results_state)
             if not unreal_reported:
                 _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
             LATEST_STATUS.update(
