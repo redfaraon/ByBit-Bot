@@ -1941,6 +1941,7 @@ def refresh_settings():
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
     global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
     global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
+    global AI_SECONDARY_BUDGET_START, AI_HARD_STOP_BUDGET
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
@@ -2092,15 +2093,17 @@ def refresh_settings():
     AI_MODEL_THRESHOLD = max(0, AI_MODEL_THRESHOLD)
     AI_MODEL = AI_MODEL_PRIMARY or AI_MODEL_CHEAP or "gpt-4.1-mini"
     try:
-        AI_TOKEN_BUDGET_CYCLE = int(os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", "100000"))
+        AI_TOKEN_BUDGET_CYCLE = int(os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", str(AI_TOKEN_BUDGET_CYCLE)))
     except (TypeError, ValueError):
-        AI_TOKEN_BUDGET_CYCLE = 170_000
-    AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
+        AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
+    else:
+        AI_TOKEN_BUDGET_CYCLE = max(1000, AI_TOKEN_BUDGET_CYCLE)
     try:
         AI_SECONDARY_BUDGET_START = int(os.getenv("OPENAI_SECONDARY_BUDGET_START", str(AI_SECONDARY_BUDGET_START)))
     except (TypeError, ValueError):
-        pass
-    AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
+        AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
+    else:
+        AI_SECONDARY_BUDGET_START = max(0, AI_SECONDARY_BUDGET_START)
     hard_stop_raw = os.getenv("OPENAI_HARD_STOP_BUDGET")
     if hard_stop_raw is not None:
         hard_stop_clean = hard_stop_raw.strip()
@@ -2110,7 +2113,7 @@ def refresh_settings():
             try:
                 AI_HARD_STOP_BUDGET = max(0, int(float(hard_stop_clean)))
             except (TypeError, ValueError):
-                pass
+                AI_HARD_STOP_BUDGET = max(0, AI_HARD_STOP_BUDGET)
     AI_KEY = os.getenv("OPENAI_API_KEY")
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
