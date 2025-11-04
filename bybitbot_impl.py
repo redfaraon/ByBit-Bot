@@ -4745,17 +4745,32 @@ def _parse_timestamp_any(value) -> Optional[datetime.datetime]:
 
 
 def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
-    """Fetch recent deposit and withdrawal records for Unified Trading account."""
+    """Fetch Unified↔Funding transfers for the past 24h."""
     summary: dict[str, Any] = {
         "records": [],
         "totals": {"deposit": {}, "withdraw": {}},
         "warnings": [],
     }
+
+    has_transfers = hasattr(exchange, "privateGetV5AssetTransferQueryInterTransferList")
     has_deposits = hasattr(exchange, "privateGetV5AssetDepositQueryRecord")
     has_withdrawals = hasattr(exchange, "privateGetV5AssetWithdrawQueryRecord")
-    if not (has_deposits or has_withdrawals):
-        summary["warnings"].append("[STATUS] API не поддерживает Unified Trading deposit/withdraw endpoints.")
-        return summary
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    since_utc = now_utc - datetime.timedelta(hours=24)
+    since_ms = int(since_utc.timestamp() * 1000)
+    until_ms = int(now_utc.timestamp() * 1000)
+
+    def _normalize_account(value: str | None) -> str:
+        val = (value or "").upper()
+        replacements = {
+            "UNIFIED_TRADING": "UNIFIED",
+            "UNIFIEDTRADE": "UNIFIED",
+            "UNIFIEDTRADEACCOUNT": "UNIFIED",
+            "UNIFIED_ACCOUNT": "UNIFIED",
+            "CONTRACT": "DERIVATIVES",
+        }
+        return replacements.get(val, val)
 
     def _record(kind: str, amount: float, coin: str, timestamp: Optional[datetime.datetime], status: str, raw: dict[str, Any]) -> None:
         entry = {
@@ -4770,42 +4785,80 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
         totals = summary["totals"].setdefault(kind, {})
         totals[coin] = totals.get(coin, 0.0) + float(amount)
 
-    params_common = {"limit": limit}
-    if has_deposits:
+    if has_transfers:
+        params_transfer = {
+            "limit": limit,
+            "startTime": since_ms,
+            "endTime": until_ms,
+        }
         try:
-            resp = exchange.privateGetV5AssetDepositQueryRecord(params_common)
-            rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+            resp = exchange.privateGetV5AssetTransferQueryInterTransferList(params_transfer)
+            rows = ((((resp or {}).get("result") or {}).get("list")) or [])
+        except Exception as exc:
+            rows = []
+            summary["warnings"].append(f"[STATUS] Не удалось получить внутренние переводы: {exc}")
+        for row in rows:
+            amount = safe_float(row.get("amount") or row.get("qty"))
+            if amount is None or amount <= 0:
+                continue
+            coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
+            ts = _parse_timestamp_any(row.get("timestamp") or row.get("updatedTime") or row.get("createdTime"))
+            if ts and ts < since_utc:
+                continue
+            from_acc = _normalize_account(row.get("fromAccountType") or row.get("fromAccount"))
+            to_acc = _normalize_account(row.get("toAccountType") or row.get("toAccount"))
+            accounts = {from_acc, to_acc}
+            if accounts != {"UNIFIED", "FUNDING"}:
+                continue
+            status = str(row.get("status") or row.get("transferStatus") or "").upper()
+            if to_acc == "UNIFIED":
+                _record("deposit", float(amount), coin, ts, status, row)
+            else:
+                _record("withdraw", float(amount), coin, ts, status, row)
+    else:
+        summary["warnings"].append("[STATUS] Endpoint inter-transfer list недоступен; операции Unified↔Funding не будут показаны.")
+
+    if not summary["records"]:
+        params_common = {"limit": limit}
+        if has_deposits:
+            try:
+                resp = exchange.privateGetV5AssetDepositQueryRecord(params_common)
+                rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+            except Exception as exc:
+                rows = []
+                summary["warnings"].append(f"[STATUS] Не удалось получить депозиты: {exc}")
             for row in rows:
+                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
+                if ts and ts < since_utc:
+                    continue
                 amount = safe_float(row.get("amount"))
-                if amount is None:
+                if amount is None or amount <= 0:
                     continue
                 coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
                 status = str(row.get("status") or row.get("state") or "").upper()
                 _record("deposit", float(amount), coin, ts, status, row)
-        except Exception as exc:
-            summary["warnings"].append(f"[STATUS] Не удалось получить депозиты: {exc}")
-    else:
-        summary["warnings"].append("[STATUS] Метод депозита недоступен в текущем API.")
-
-    if has_withdrawals:
-        try:
-            resp = exchange.privateGetV5AssetWithdrawQueryRecord(params_common)
-            rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+        if has_withdrawals:
+            try:
+                resp = exchange.privateGetV5AssetWithdrawQueryRecord(params_common)
+                rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+            except Exception as exc:
+                rows = []
+                summary["warnings"].append(f"[STATUS] Не удалось получить выводы: {exc}")
             for row in rows:
+                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
+                if ts and ts < since_utc:
+                    continue
                 amount = safe_float(row.get("amount") or row.get("qty"))
-                if amount is None:
+                if amount is None or amount <= 0:
                     continue
                 coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
                 status = str(row.get("status") or row.get("state") or "").upper()
                 _record("withdraw", float(amount), coin, ts, status, row)
-        except Exception as exc:
-            summary["warnings"].append(f"[STATUS] Не удалось получить выводы: {exc}")
-    else:
-        summary["warnings"].append("[STATUS] Метод вывода недоступен в текущем API.")
 
-    summary["records"].sort(key=lambda item: item.get("timestamp") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), reverse=True)
+    summary["records"].sort(
+        key=lambda item: item.get("timestamp") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        reverse=True,
+    )
     return summary
 
 
@@ -8780,7 +8833,13 @@ def run_cycle():
             continue
         entry_val = safe_float(payload.get("entryPrice") or payload.get("average") or payload.get("avgEntryPrice"))
         unreal_val = safe_float(payload.get("unrealizedPnl") or (payload.get("raw") or {}).get("unrealisedPnl"))
-        side_label = "LONG" if amount_val > 0 else "SHORT"
+        side_raw = str(payload.get("side") or (payload.get("info") or {}).get("side") or "").lower()
+        if side_raw in {"sell", "short"}:
+            side_label = "SHORT"
+        elif side_raw in {"buy", "long"}:
+            side_label = "LONG"
+        else:
+            side_label = "LONG" if amount_val > 0 else "SHORT"
         positions_summary.append(
             {
                 "symbol": sym_active,
@@ -8828,7 +8887,7 @@ def run_cycle():
                 status_lines.append("- Ввод: нет")
             if withdrawals_total:
                 withdraw_summary = ", ".join(
-                    f"{coin}:-{amount:.4f}" for coin, amount in sorted(withdrawals_total.items())
+                    f"{coin}:{amount:.4f}" for coin, amount in sorted(withdrawals_total.items())
                 )
                 status_lines.append(f"- Вывод: {withdraw_summary}")
             else:
@@ -9144,29 +9203,6 @@ def run_cycle():
             if new_orders:
                 total_new_pnl = sum(detail.get("pnl", 0.0) for detail in new_orders if isinstance(detail.get("pnl"), (int, float)))
                 results_lines.append(f"Σ новых закрытий: {total_new_pnl:+.2f} USDT ({len(new_orders)} ордеров)")
-                results_lines.append("🧾 Закрытые ордера (новые):")
-                new_orders_sorted = sorted(new_orders, key=lambda d: d.get("timestamp") or "")
-                for detail in new_orders_sorted[:10]:
-                    amount_val = detail.get("amount")
-                    price_val = detail.get("price")
-                    amount_txt = f"{amount_val:.4f}" if isinstance(amount_val, (int, float)) and math.isfinite(amount_val) else "?"
-                    price_txt = f"{price_val:.4f}" if isinstance(price_val, (int, float)) and math.isfinite(price_val) else "?"
-                    ts_iso = detail.get("timestamp")
-                    if ts_iso:
-                        try:
-                            dt_obj = datetime.datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
-                        except Exception:
-                            dt_obj = None
-                    else:
-                        dt_obj = None
-                    ts_display = _format_local_dt(dt_obj) if dt_obj else "n/a"
-                    pnl_val = detail.get("pnl")
-                    pnl_txt = f"{pnl_val:+.2f}" if isinstance(pnl_val, (int, float)) and math.isfinite(pnl_val) else "n/a"
-                    results_lines.append(
-                        f"- {detail.get('symbol')} {detail.get('side')} {amount_txt} @ {price_txt} → {pnl_txt} USDT ({ts_display})"
-                    )
-                if len(new_orders) > 10:
-                    results_lines.append(f"… и ещё {len(new_orders) - 10} ордеров")
             else:
                 results_lines.append("🧾 Новых закрытых ордеров за 6ч нет.")
             _send_results_notification("\n".join(results_lines))
@@ -9210,13 +9246,15 @@ def run_cycle():
     log(end_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nEND SESSION {end_stamp}\n{session_separator}")
     _flush_tg_log_buffer(force=True)
+    cycle_commit_hash = source_hash or head_commit_hash or None
+    cycle_commit_timestamp = source_timestamp_env or head_commit_timestamp or None
     _record_cycle_completion(
         cycle_state,
         cycle_kind=cycle_kind or "normal",
         cycle_mode=cycle_mode or "last",
         branch_name=branch_name,
-        commit_hash=commit_hash or source_ref or None,
-        commit_timestamp=commit_timestamp,
+        commit_hash=cycle_commit_hash or source_ref or None,
+        commit_timestamp=cycle_commit_timestamp,
     )
     return next_delay_minutes
 
