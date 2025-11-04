@@ -4751,6 +4751,12 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
         "totals": {"deposit": {}, "withdraw": {}},
         "warnings": [],
     }
+    has_deposits = hasattr(exchange, "privateGetV5AssetDepositQueryRecord")
+    has_withdrawals = hasattr(exchange, "privateGetV5AssetWithdrawQueryRecord")
+    if not (has_deposits or has_withdrawals):
+        summary["warnings"].append("[STATUS] API не поддерживает Unified Trading deposit/withdraw endpoints.")
+        return summary
+
     def _record(kind: str, amount: float, coin: str, timestamp: Optional[datetime.datetime], status: str, raw: dict[str, Any]) -> None:
         entry = {
             "type": kind,
@@ -4765,33 +4771,39 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
         totals[coin] = totals.get(coin, 0.0) + float(amount)
 
     params_common = {"limit": limit}
-    try:
-        resp = exchange.privateGetV5AssetDepositQueryRecord(params_common)
-        rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
-        for row in rows:
-            amount = safe_float(row.get("amount"))
-            if amount is None:
-                continue
-            coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-            ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
-            status = str(row.get("status") or row.get("state") or "").upper()
-            _record("deposit", float(amount), coin, ts, status, row)
-    except Exception as exc:
-        summary["warnings"].append(f"[STATUS] Не удалось получить депозиты: {exc}")
+    if has_deposits:
+        try:
+            resp = exchange.privateGetV5AssetDepositQueryRecord(params_common)
+            rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+            for row in rows:
+                amount = safe_float(row.get("amount"))
+                if amount is None:
+                    continue
+                coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
+                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
+                status = str(row.get("status") or row.get("state") or "").upper()
+                _record("deposit", float(amount), coin, ts, status, row)
+        except Exception as exc:
+            summary["warnings"].append(f"[STATUS] Не удалось получить депозиты: {exc}")
+    else:
+        summary["warnings"].append("[STATUS] Метод депозита недоступен в текущем API.")
 
-    try:
-        resp = exchange.privateGetV5AssetWithdrawQueryRecord(params_common)
-        rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
-        for row in rows:
-            amount = safe_float(row.get("amount") or row.get("qty"))
-            if amount is None:
-                continue
-            coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-            ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
-            status = str(row.get("status") or row.get("state") or "").upper()
-            _record("withdraw", float(amount), coin, ts, status, row)
-    except Exception as exc:
-        summary["warnings"].append(f"[STATUS] Не удалось получить выводы: {exc}")
+    if has_withdrawals:
+        try:
+            resp = exchange.privateGetV5AssetWithdrawQueryRecord(params_common)
+            rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
+            for row in rows:
+                amount = safe_float(row.get("amount") or row.get("qty"))
+                if amount is None:
+                    continue
+                coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
+                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
+                status = str(row.get("status") or row.get("state") or "").upper()
+                _record("withdraw", float(amount), coin, ts, status, row)
+        except Exception as exc:
+            summary["warnings"].append(f"[STATUS] Не удалось получить выводы: {exc}")
+    else:
+        summary["warnings"].append("[STATUS] Метод вывода недоступен в текущем API.")
 
     summary["records"].sort(key=lambda item: item.get("timestamp") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), reverse=True)
     return summary
@@ -5449,7 +5461,32 @@ def _sync_with_remote() -> None:
             _send_git_notification(f"[GIT] pull: {pull_output}")
     except subprocess.CalledProcessError as exc:
         details = exc.stderr or exc.stdout or str(exc)
-        log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
+        lower_details = (details or "").lower()
+        if ("fast-forward" in lower_details or "divergent" in lower_details or "need to specify how to reconcile" in lower_details) and not working_tree_dirty:
+            branch_name = get_current_branch_name() or "auto"
+            log(f"[GIT] Pull not possible (history diverged); resetting to origin/{branch_name}.", Fore.YELLOW)
+            try:
+                reset_proc = subprocess.run(
+                    ["git", "reset", "--hard", f"origin/{branch_name}"],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as reset_exc:
+                reset_details = reset_exc.stderr or reset_exc.stdout or str(reset_exc)
+                log(f"[WARN] git reset --hard origin/{branch_name} failed: {reset_details}", Fore.RED)
+            else:
+                reset_output = (reset_proc.stdout or reset_proc.stderr or "").strip()
+                if reset_output:
+                    _send_git_notification(f"[GIT] reset --hard origin/{branch_name}: {reset_output}")
+                else:
+                    _send_git_notification(f"[GIT] reset --hard origin/{branch_name}")
+                return
+        else:
+            if working_tree_dirty:
+                log("[WARN] Git pull failed and рабочее дерево грязное; пропускаем автосинх.", Fore.YELLOW)
+            log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
 
 
 def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_side, position_qty, is_long):
