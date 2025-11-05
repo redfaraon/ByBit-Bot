@@ -6226,13 +6226,16 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         fallback_take_price = float(take_price)
 
     fallback_limit_success = False
+    fallback_qty_target = max(remaining_qty, 0.0)
+    if fallback_qty_target <= 1e-9 or fallback_qty_target > qty + 1e-9:
+        fallback_qty_target = qty
     if not take_orders_success and fallback_take_price:
         try:
-            fallback_qty_precise = float(exchange.amount_to_precision(exchange_symbol, qty))
+            fallback_qty_precise = float(exchange.amount_to_precision(exchange_symbol, fallback_qty_target))
         except Exception:
-            fallback_qty_precise = float(round(qty, 8))
+            fallback_qty_precise = float(round(fallback_qty_target, 8))
         if fallback_qty_precise <= 0:
-            fallback_qty_precise = qty
+            fallback_qty_precise = fallback_qty_target
         if min_amount and fallback_qty_precise + 1e-12 < min_amount:
             min_qty_violation = True
         else:
@@ -6331,6 +6334,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         combined = "; ".join(trailing_errors)
         log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
 
+    forced_actions: list[str] = []
+    forced_errors: list[str] = []
     if not take_orders_success:
         details_parts = []
         if take_trading_stop_errors:
@@ -6343,6 +6348,74 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             details_parts.append("notional below MIN_NOTIONAL_USDT")
         details = "; ".join(details_parts) if details_parts else f"scheme={filtered_scheme}"
         log(f"[WARN] {symbol}: take-profit orders were not placed ({details})", Fore.YELLOW)
+
+        force_price = None
+        for candidate in (fallback_take_price, take_price, reference_price, price):
+            if candidate is not None and math.isfinite(candidate) and candidate > 0:
+                force_price = float(candidate)
+                break
+        force_qty_target = fallback_qty_target if fallback_qty_target > 0 else qty
+        if force_qty_target <= 0 and qty > 0:
+            force_qty_target = qty
+        if force_qty_target > 0 and force_price and math.isfinite(force_price) and force_price > 0:
+            try:
+                force_qty_precise = float(exchange.amount_to_precision(exchange_symbol, force_qty_target))
+            except Exception:
+                force_qty_precise = float(round(force_qty_target, 8))
+            if force_qty_precise <= 0:
+                force_qty_precise = force_qty_target
+            if force_qty_precise > 0:
+                force_params = dict(base_params)
+                force_params.setdefault("timeInForce", "GTC")
+                try:
+                    exchange.create_order(
+                        exchange_symbol,
+                        "limit",
+                        protection_side,
+                        force_qty_precise,
+                        force_price,
+                        force_params,
+                    )
+                except Exception as exc_force_limit:
+                    forced_errors.append(f"limit {force_qty_precise:.4f}@{force_price:.4f}: {exc_force_limit}")
+                else:
+                    created_log_parts.append(f"forced takeProfit {force_qty_precise:.4f} @ {force_price:.2f}")
+                    forced_actions.append(f"limit {force_qty_precise:.4f}@{force_price:.2f}")
+                    take_orders_success = True
+        if not take_orders_success and force_qty_target > 0:
+            try:
+                force_qty_precise = float(exchange.amount_to_precision(exchange_symbol, force_qty_target))
+            except Exception:
+                force_qty_precise = float(round(force_qty_target, 8))
+            if force_qty_precise <= 0:
+                force_qty_precise = force_qty_target
+            market_params = dict(base_params)
+            market_params.pop("takeProfit", None)
+            market_params.setdefault("closeOnTrigger", True)
+            try:
+                exchange.create_order(
+                    exchange_symbol,
+                    "market",
+                    protection_side,
+                    force_qty_precise,
+                    None,
+                    market_params,
+                )
+            except Exception as exc_force_market:
+                forced_errors.append(f"market {force_qty_precise:.4f}: {exc_force_market}")
+            else:
+                created_log_parts.append(f"forced MARKET takeProfit {force_qty_precise:.4f}")
+                forced_actions.append(f"market {force_qty_precise:.4f}")
+                take_orders_success = True
+
+    if forced_actions:
+        log(f"ℹ️ {symbol}: fallback take-profit executed ({', '.join(forced_actions)})", Fore.LIGHTBLUE_EX)
+        send_tg(
+            f"ℹ️ {symbol}: fallback take-profit executed\n"
+            + "\n".join(f"- {entry}" for entry in forced_actions)
+        )
+    if forced_errors:
+        log(f"[WARN] {symbol}: fallback take-profit errors ({'; '.join(forced_errors)})", Fore.YELLOW)
 
     if created_log_parts:
         log(f"ℹ️ {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)
@@ -9504,11 +9577,31 @@ def run_cycle():
             realized_end = balance_snapshot_end.get("_realizedPnl")
         try:
             history_entries = _load_equity_history()
+            results_state = _load_results_state()
+            results_state_dirty = False
+            raw_recent_symbols = results_state.get("recent_symbols")
+            recent_symbols_list: list[str] = []
+            recent_symbols_seen: set[str] = set()
+            if isinstance(raw_recent_symbols, (list, tuple)):
+                for entry in raw_recent_symbols:
+                    if not isinstance(entry, str):
+                        continue
+                    sym_candidate = entry.strip()
+                    if not sym_candidate:
+                        continue
+                    normalized_sym = normalize_symbol(sym_candidate, record_missing=False) or sym_candidate
+                    if normalized_sym in recent_symbols_seen:
+                        continue
+                    recent_symbols_seen.add(normalized_sym)
+                    recent_symbols_list.append(normalized_sym)
+
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             closed_symbols_set: set[str] = set(available_pairs)
             closed_symbols_set.update(order_symbols)
             closed_symbols_set.update(order_symbols_non_reduce)
             closed_symbols_set.update(position_symbols)
+            if recent_symbols_list:
+                closed_symbols_set.update(recent_symbols_list)
             if isinstance(global_open_orders, dict):
                 closed_symbols_set.update(global_open_orders.keys())
             window_start = now_utc - datetime.timedelta(hours=PNL_LOOKBACK_HOURS)
@@ -9522,6 +9615,31 @@ def run_cycle():
                 log(warning_msg, Fore.LIGHTBLACK_EX)
             if len(closed_warnings) > 3:
                 log(f"[PnL] Suppressed {len(closed_warnings) - 3} additional warnings.", Fore.LIGHTBLACK_EX)
+            if closed_order_details:
+                max_recent_symbols = 24
+                for detail in closed_order_details:
+                    sym_detail = detail.get("symbol")
+                    sym_text = str(sym_detail or "").strip()
+                    if not sym_text:
+                        continue
+                    normalized_sym = normalize_symbol(sym_text, record_missing=False) or sym_text
+                    try:
+                        recent_symbols_list.remove(normalized_sym)
+                    except ValueError:
+                        if normalized_sym not in recent_symbols_seen:
+                            recent_symbols_seen.add(normalized_sym)
+                    recent_symbols_list.append(normalized_sym)
+                    recent_symbols_seen.add(normalized_sym)
+                if len(recent_symbols_list) > max_recent_symbols:
+                    overflow = len(recent_symbols_list) - max_recent_symbols
+                    if overflow > 0:
+                        dropped = recent_symbols_list[:overflow]
+                        recent_symbols_list = recent_symbols_list[overflow:]
+                        for dropped_sym in dropped:
+                            if dropped_sym not in recent_symbols_list:
+                                recent_symbols_seen.discard(dropped_sym)
+                results_state["recent_symbols"] = recent_symbols_list
+                results_state_dirty = True
             unreal_total, unreal_count = _sum_unrealized_pnl(final_positions_map)
 
             unreal_reported = False
@@ -9599,7 +9717,6 @@ def run_cycle():
             else:
                 results_lines.append("📆 Ежесуточный PnL (%): недостаточно данных.")
 
-            results_state = _load_results_state()
             reported_ids = set(results_state.get("closed_order_ids") or [])
             new_orders: list[dict[str, Any]] = []
             new_keys: list[str] = []
@@ -9631,6 +9748,8 @@ def run_cycle():
                         latest_ts = ts_iso
                 if latest_ts:
                     results_state["last_timestamp"] = latest_ts
+                results_state_dirty = True
+            if results_state_dirty:
                 _save_results_state(results_state)
             if not unreal_reported:
                 _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
