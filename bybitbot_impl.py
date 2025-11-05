@@ -7,6 +7,7 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -52,7 +53,13 @@ REPO_ROOT = SCRIPT_DIR
 CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
 STATE_DIR = SCRIPT_DIR
 def _configure_state_paths() -> None:
-    global STATE_DIR, EQUITY_HISTORY_FILE, CYCLE_STATE_FILE, FALLBACK_HISTORY_FILE, RESULTS_STATE_FILE, RELEASE_STATE_FILE
+    global STATE_DIR
+    global EQUITY_HISTORY_FILE
+    global CYCLE_STATE_FILE
+    global FALLBACK_HISTORY_FILE
+    global RESULTS_STATE_FILE
+    global RELEASE_STATE_FILE
+    global BYBIT_CREDENTIALS_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
         STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else SCRIPT_DIR)
@@ -67,6 +74,7 @@ def _configure_state_paths() -> None:
     FALLBACK_HISTORY_FILE = STATE_DIR / "fallback_history.json"
     RESULTS_STATE_FILE = STATE_DIR / "results_state.json"
     RELEASE_STATE_FILE = STATE_DIR / "release_state.json"
+    BYBIT_CREDENTIALS_FILE = STATE_DIR / "bybit_credentials.json"
 
 _configure_state_paths()
 CYCLE_FALLBACK_INTERVAL = 5
@@ -108,6 +116,7 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("logs", "Последние события"),
     ("schedule", "Запланировать следующую сессию"),
     ("tokens", "Лимиты OpenAI токенов"),
+    ("bybitkey", "Установить BYBIT_API_KEY/BYBIT_API_SECRET"),
     ("version", "Текущая версия и changelog"),
 ]
 TELEGRAM_RELEASE_THREAD_ID: int | None = None
@@ -115,9 +124,63 @@ TELEGRAM_COMMAND_THREAD_ID: int | None = None
 TELEGRAM_INPROGRESS_THREAD_ID: int | None = None
 TELEGRAM_RESULTS_THREAD_ID: int | None = None
 TELEGRAM_STATUS_THREAD_ID: int | None = None
+TELEGRAM_TRADE_THREAD_ID: int | None = None
 TELEGRAM_MESSAGE_PREFIX: str = ""
 USER_ID: str = "default"
-USER_LABEL: str = "default"
+USER_LABEL: str = "redfaraon"
+
+
+def _load_bybit_credentials() -> tuple[str | None, str | None]:
+    try:
+        raw = BYBIT_CREDENTIALS_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, None
+    except Exception as exc:
+        log(f"[BYBIT] Не удалось прочитать сохранённые ключи: {exc}", Fore.YELLOW)
+        return None, None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log("[BYBIT] Файл bybit_credentials.json повреждён, игнорируем.", Fore.YELLOW)
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    key = data.get("apiKey")
+    secret = data.get("apiSecret")
+    return (str(key).strip() or None) if key else None, (str(secret).strip() or None) if secret else None
+
+
+def _store_bybit_credentials(api_key: str | None, api_secret: str | None) -> None:
+    if not api_key or not api_secret:
+        try:
+            BYBIT_CREDENTIALS_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log(f"[BYBIT] Не удалось удалить сохранённые ключи: {exc}", Fore.YELLOW)
+        os.environ.pop("BYBIT_API_KEY", None)
+        os.environ.pop("BYBIT_API_SECRET", None)
+        return
+    data = {"apiKey": api_key, "apiSecret": api_secret}
+    try:
+        BYBIT_CREDENTIALS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(BYBIT_CREDENTIALS_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        except Exception:
+            pass
+    except Exception as exc:
+        log(f"[BYBIT] Не удалось сохранить ключи: {exc}", Fore.YELLOW)
+        return
+    os.environ["BYBIT_API_KEY"] = api_key
+    os.environ["BYBIT_API_SECRET"] = api_secret
+
+
+def _mask_api_value(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 6:
+        return value[0] + "*" * (len(value) - 1)
+    return f"{value[:3]}***{value[-3:]}"
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -948,6 +1011,7 @@ def _notify_release_event(
         "\n".join(lines),
         thread_id=thread_target,
         no_log_forward=True,
+        no_prefix=True,
     )
     release_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     if event_type == "release":
@@ -992,12 +1056,24 @@ def maybe_refresh_metadata() -> dict[str, Any]:
     if version_changed:
         ensure_version_backup()
         log(f"🆕 Обнаружена новая версия: {previous_version} > {BOT_VERSION}", Fore.LIGHTBLUE_EX)
-        send_tg(f"🆕 Обновлена версия до {BOT_VERSION}")
+        release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
+        send_tg(
+            f"🆕 Обновлена версия до {BOT_VERSION}",
+            thread_id=release_thread,
+            no_log_forward=True,
+            no_prefix=True,
+        )
         if head:
             _notify_release_event("release", commit_hash_meta, commit_message_meta, commit_timestamp_meta)
     elif metadata_changed:
         log("🆕 Обновлён changelog без изменения версии.", Fore.LIGHTBLACK_EX)
-        send_tg("🆕 Обновлён changelog без изменения версии.")
+        release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
+        send_tg(
+            "🆕 Обновлён changelog без изменения версии.",
+            thread_id=release_thread,
+            no_log_forward=True,
+            no_prefix=True,
+        )
     elif commit_changed and previous_hash is not None:
         log("🆕 Обновлена HEAD коммита без изменения changelog.", Fore.LIGHTBLACK_EX)
         if head:
@@ -1985,6 +2061,11 @@ def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
 
 def refresh_settings():
     load_environment()
+    stored_api_key, stored_api_secret = _load_bybit_credentials()
+    if stored_api_key and not os.getenv("BYBIT_API_KEY"):
+        os.environ["BYBIT_API_KEY"] = stored_api_key
+    if stored_api_secret and not os.getenv("BYBIT_API_SECRET"):
+        os.environ["BYBIT_API_SECRET"] = stored_api_secret
     global PAIR_LIST, TIMEFRAME, LEVERAGE, RISK_PCT, SL_ATR, TP_ATR, TRAILING_ATR_MULT
     global DEFAULT_NEXT_RUN_MINUTES
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS, MAX_POSITIONS_PER_BASE
@@ -2006,18 +2087,18 @@ def refresh_settings():
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
-    global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID
+    global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
+    global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX
     _configure_state_paths()
-    USER_ID = os.getenv("BYBITBOT_USER_ID") or "default"
-    USER_LABEL = os.getenv("BYBITBOT_USER_LABEL") or USER_ID
+    USER_ID = os.getenv("BYBITBOT_USER_ID") or USER_ID or "shared"
+    USER_LABEL = os.getenv("BYBITBOT_USER_LABEL") or USER_LABEL or "redfaraon"
     prefix_override = os.getenv("TELEGRAM_MESSAGE_PREFIX")
     if prefix_override is not None:
         TELEGRAM_MESSAGE_PREFIX = prefix_override.strip()
     else:
-        multi_flag = (os.getenv("BYBITBOT_MULTIUSER") or "").strip().lower()
-        TELEGRAM_MESSAGE_PREFIX = USER_LABEL if USER_ID and multi_flag in {"1", "true", "yes", "on"} else ""
+        TELEGRAM_MESSAGE_PREFIX = USER_LABEL.strip()
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -2127,7 +2208,10 @@ def refresh_settings():
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
     topic_raw = os.getenv("TELEGRAM_TOPIC_ID") or os.getenv("TG_TOPIC_ID")
-    TG_TOPIC_ID = safe_int(topic_raw)
+    trade_topic_raw = os.getenv("TELEGRAM_TRADE_TOPIC_ID") or os.getenv("TELEGRAM_TRADE_THREAD_ID")
+    TELEGRAM_TRADE_THREAD_ID = safe_int(trade_topic_raw) if trade_topic_raw else None
+    default_topic = safe_int(topic_raw)
+    TG_TOPIC_ID = TELEGRAM_TRADE_THREAD_ID if TELEGRAM_TRADE_THREAD_ID is not None else default_topic
     TG_GIT_TOPIC_ID = safe_int(os.getenv("TELEGRAM_GIT_TOPIC_ID", "581"))
     try:
         TG_MIN_INTERVAL = float(os.getenv("TELEGRAM_MIN_INTERVAL", "1.5"))
@@ -2597,7 +2681,7 @@ _LAST_WORKTREE_STATE_HASH: str = ""
 def _send_git_notification(message: str):
     log(message, Fore.LIGHTBLACK_EX)
     thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
-    send_tg(message, thread_id=thread_target)
+    send_tg(message, thread_id=thread_target, no_prefix=True)
 
 
 def _send_inprogress_notification(message: str):
@@ -2724,11 +2808,11 @@ def send_tg(msg: str | Sequence[str], **extra):
         message_text = str(msg)
     if not message_text:
         return None
-    if TELEGRAM_MESSAGE_PREFIX:
-        message_text = f"[{TELEGRAM_MESSAGE_PREFIX}] {message_text}"
-
     extra_payload = dict(extra) if extra else {}
+    skip_prefix = bool(extra_payload.pop('no_prefix', False))
     _ = extra_payload.pop('no_log_forward', None)
+    if TELEGRAM_MESSAGE_PREFIX and not skip_prefix:
+        message_text = f"[{TELEGRAM_MESSAGE_PREFIX}] {message_text}"
     chat_override = extra_payload.pop('chat_id_override', None)
     thread_override = extra_payload.pop('thread_id', None)
     target_chat = chat_override if chat_override is not None else TG_CHAT
@@ -3474,6 +3558,8 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_schedule_command(args)
     elif command in {"tokens", "token"}:
         reply = _handle_tokens_command(args)
+    elif command in {"bybitkey", "bybit"}:
+        reply = _handle_bybit_key_command(args)
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
     else:
@@ -4110,9 +4196,14 @@ def init_exchange():
     api_key = os.getenv("BYBIT_API_KEY")
     api_secret = os.getenv("BYBIT_API_SECRET")
     if not api_key or not api_secret:
+        stored_key, stored_secret = _load_bybit_credentials()
+        if stored_key and stored_secret:
+            api_key = api_key or stored_key
+            api_secret = api_secret or stored_secret
+    if not api_key or not api_secret:
         raise RuntimeError(
-            "BYBIT_API_KEY/BYBIT_API_SECRET must be provided by the user. "
-            "Place them in users/<id>/secrets.env when running multi-user mode."
+            "Требуется указать BYBIT_API_KEY и BYBIT_API_SECRET. "
+            "Используйте /bybitkey <apiKey> <apiSecret> или добавьте их в users/<id>/secrets.env."
         )
     exchange = ccxt.bybit({
         "apiKey": api_key,
@@ -9632,4 +9723,26 @@ def _handle_tokens_command(args: list[str]) -> str:
         "ℹ️ Использование: /tokens, /tokens budget 150000, "
         "/tokens hard 200000, /tokens hard off, "
         "/tokens secondary 70000, /tokens reset"
+    )
+
+
+def _handle_bybit_key_command(args: list[str]) -> str:
+    if not args:
+        return "Использование: /bybitkey <apiKey> <apiSecret> или /bybitkey clear"
+    action = args[0].strip().lower()
+    if action in {"clear", "reset"}:
+        _store_bybit_credentials(None, None)
+        return "🗑️ Ключи Bybit удалены. Добавьте новые ключи перед следующим запуском."
+    if len(args) < 2:
+        return "Укажите apiKey и apiSecret: /bybitkey <apiKey> <apiSecret>"
+    api_key = args[0].strip()
+    api_secret = args[1].strip()
+    if not api_key or not api_secret:
+        return "Ключ и секрет не должны быть пустыми."
+    _store_bybit_credentials(api_key, api_secret)
+    masked_key = _mask_api_value(api_key)
+    masked_secret = _mask_api_value(api_secret)
+    return (
+        f"✅ Ключи Bybit обновлены (apiKey {masked_key}, secret {masked_secret}). "
+        "Перезапустите цикл или дождитесь следующего запуска, чтобы применить их."
     )
