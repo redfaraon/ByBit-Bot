@@ -79,6 +79,7 @@ def _configure_state_paths() -> None:
 _configure_state_paths()
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
+SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
 DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
 DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
 PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
@@ -2955,6 +2956,87 @@ def _results_order_key(detail: dict[str, Any]) -> str:
     timestamp = detail.get("timestamp") or ""
     pnl = detail.get("pnl")
     return f"{symbol}|{timestamp}|{pnl}"
+
+
+def _build_daily_pnl_percent_chart(
+    history: Sequence[dict[str, Any]],
+    *,
+    latest_point: tuple[datetime.datetime, float] | None = None,
+    days: int = 7,
+) -> tuple[str | None, list[tuple[datetime.date, float]]]:
+    if not history and not latest_point:
+        return None, []
+    entries: list[tuple[datetime.datetime, float]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        ts_raw = entry.get("timestamp")
+        equity_val = entry.get("equity")
+        if not isinstance(ts_raw, str) or not ts_raw:
+            continue
+        try:
+            equity_float = float(equity_val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(equity_float):
+            continue
+        ts_iso = ts_raw.replace("Z", "+00:00")
+        try:
+            ts = datetime.datetime.fromisoformat(ts_iso)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        entries.append((ts, equity_float))
+    if latest_point:
+        ts_latest, equity_latest = latest_point
+        if isinstance(ts_latest, datetime.datetime) and math.isfinite(equity_latest):
+            if ts_latest.tzinfo is None:
+                ts_latest = ts_latest.replace(tzinfo=datetime.timezone.utc)
+            entries.append((ts_latest, float(equity_latest)))
+    if len(entries) < 2:
+        return None, []
+    entries.sort(key=lambda item: item[0])
+    daily_closes: dict[datetime.date, tuple[datetime.datetime, float]] = {}
+    for ts, equity_val in entries:
+        day_key = ts.date()
+        prev = daily_closes.get(day_key)
+        if prev is None or ts >= prev[0]:
+            daily_closes[day_key] = (ts, equity_val)
+    sorted_days = sorted(daily_closes.keys())
+    if len(sorted_days) < 2:
+        return None, []
+    changes: list[tuple[datetime.date, float]] = []
+    prev_equity: float | None = None
+    for day in sorted_days:
+        _, close_equity = daily_closes[day]
+        if prev_equity is not None and prev_equity > 0:
+            pct_change = ((close_equity - prev_equity) / prev_equity) * 100.0
+            changes.append((day, pct_change))
+        prev_equity = close_equity
+    if not changes:
+        return None, []
+    tail = changes[-days:]
+    values = [pct for _, pct in tail if math.isfinite(pct)]
+    if not values:
+        return None, []
+    vmin = min(values)
+    vmax = max(values)
+    if math.isclose(vmax, vmin, rel_tol=1e-9, abs_tol=1e-9):
+        idx = len(SPARKLINE_BLOCKS) // 2
+        idx = min(idx, len(SPARKLINE_BLOCKS) - 1)
+        sparkline = SPARKLINE_BLOCKS[idx] * len(values)
+    else:
+        span = vmax - vmin
+        scale = len(SPARKLINE_BLOCKS) - 1
+        spark_chars: list[str] = []
+        for pct in values:
+            norm = (pct - vmin) / span if span else 0.0
+            idx = int(round(norm * scale))
+            idx = max(0, min(scale, idx))
+            spark_chars.append(SPARKLINE_BLOCKS[idx])
+        sparkline = "".join(spark_chars)
+    return sparkline, tail
 
 
 def _load_release_state() -> dict:
@@ -9496,6 +9578,26 @@ def run_cycle():
                 results_lines.append(f"PnL ({basis_label}): {pnl_value:+.2f} USDT{extra}")
             else:
                 results_lines.append("PnL: данные недоступны.")
+
+            latest_equity_point: tuple[datetime.datetime, float] | None = None
+            if isinstance(equity_end, (int, float)) and math.isfinite(equity_end):
+                latest_equity_point = (now_utc, float(equity_end))
+            daily_chart, daily_points = _build_daily_pnl_percent_chart(
+                history_entries,
+                latest_point=latest_equity_point,
+                days=7,
+            )
+            if daily_chart:
+                legend_tail = ", ".join(
+                    f"{day.strftime('%m-%d')}: {pct:+.1f}%"
+                    for day, pct in daily_points[-3:]
+                )
+                if legend_tail:
+                    results_lines.append(f"📆 Ежесуточный PnL (%): {daily_chart} ({legend_tail})")
+                else:
+                    results_lines.append(f"📆 Ежесуточный PnL (%): {daily_chart}")
+            else:
+                results_lines.append("📆 Ежесуточный PnL (%): недостаточно данных.")
 
             results_state = _load_results_state()
             reported_ids = set(results_state.get("closed_order_ids") or [])
