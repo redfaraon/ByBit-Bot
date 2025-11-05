@@ -1,5 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 """Entry point and fallback wrapper for bybitbot_impl."""
+import argparse
 import importlib
 import json
 import os
@@ -11,11 +12,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from dotenv import dotenv_values
+
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "11.5")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "11.6")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
-FALLBACK_HISTORY_FILE = REPO_ROOT / "fallback_history.json"
-CYCLE_STATE_FILE = REPO_ROOT / "cycle_state.json"
+STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT))
+
+def _refresh_state_paths() -> None:
+    global STATE_DIR, FALLBACK_HISTORY_FILE, CYCLE_STATE_FILE
+    state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
+    try:
+        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else REPO_ROOT)
+    except Exception:
+        STATE_DIR = REPO_ROOT
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    FALLBACK_HISTORY_FILE = STATE_DIR / "fallback_history.json"
+    CYCLE_STATE_FILE = STATE_DIR / "cycle_state.json"
+
+_refresh_state_paths()
+
+USERS_DIR = REPO_ROOT / "users"
+USERS_CONFIG_FILE = USERS_DIR / "users.json"
+USERS_DEFAULT_SECRET = "secrets.env"
 
 
 def _resolve_commit_limit(raw_value: str | None) -> int:
@@ -55,6 +77,118 @@ class BackupCandidate:
     def finalize(self, success: bool) -> None:
         if self.on_result:
             self.on_result(success)
+
+
+@dataclass
+class UserProfile:
+    user_id: str
+    label: str
+    enabled: bool
+    env_overrides: dict[str, str]
+    env_files: list[Path]
+    state_dir: Path
+
+
+def _normalize_path(value: str | Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = (REPO_ROOT / path).resolve()
+    return path
+
+
+def _load_user_registry() -> dict[str, UserProfile]:
+    if not USERS_CONFIG_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(USERS_CONFIG_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"[USERS] Failed to parse {USERS_CONFIG_FILE}: {exc}", file=sys.stderr)
+        return {}
+    if not isinstance(payload, dict):
+        print(f"[USERS] Invalid registry format in {USERS_CONFIG_FILE}", file=sys.stderr)
+        return {}
+    registry: dict[str, UserProfile] = {}
+    users_iter = payload.get("users") if isinstance(payload.get("users"), list) else []
+    for entry in users_iter:
+        if not isinstance(entry, dict):
+            continue
+        user_id = str(entry.get("id") or "").strip()
+        if not user_id:
+            continue
+        enabled = bool(entry.get("enabled", True))
+        label = str(entry.get("label") or user_id).strip() or user_id
+        env_overrides_raw = entry.get("env") or {}
+        if not isinstance(env_overrides_raw, dict):
+            env_overrides_raw = {}
+        env_overrides = {str(k): str(v) for k, v in env_overrides_raw.items() if v is not None}
+        env_files: list[Path] = []
+        extra_files = entry.get("env_files") or []
+        if isinstance(extra_files, (list, tuple)):
+            for candidate in extra_files:
+                try:
+                    env_files.append(_normalize_path(candidate))
+                except Exception:
+                    continue
+        default_secret = USERS_DIR / user_id / USERS_DEFAULT_SECRET
+        if default_secret not in env_files:
+            env_files.append(default_secret)
+        state_dir_raw = entry.get("state_dir")
+        state_dir = _normalize_path(state_dir_raw) if isinstance(state_dir_raw, str) and state_dir_raw else (REPO_ROOT / "runtime" / user_id).resolve()
+        registry[user_id] = UserProfile(
+            user_id=user_id,
+            label=label,
+            enabled=enabled,
+            env_overrides=env_overrides,
+            env_files=env_files,
+            state_dir=state_dir,
+        )
+    return registry
+
+
+def _apply_user_profile(profile: UserProfile) -> None:
+    try:
+        profile.state_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        print(f"[USERS] Failed to create state dir {profile.state_dir}: {exc}", file=sys.stderr)
+    os.environ["BYBITBOT_MULTIUSER"] = "1"
+    os.environ["BYBITBOT_USER_ID"] = profile.user_id
+    os.environ["BYBITBOT_USER_LABEL"] = profile.label
+    os.environ["BYBITBOT_STATE_DIR"] = str(profile.state_dir)
+    for key, value in profile.env_overrides.items():
+        os.environ[key] = value
+    for env_path in profile.env_files:
+        try:
+            values = dotenv_values(env_path)
+        except Exception as exc:
+            print(f"[USERS] Cannot load {env_path}: {exc}", file=sys.stderr)
+            continue
+        if not values:
+            continue
+        for key, value in values.items():
+            if value is None:
+                continue
+            os.environ[key] = value
+    _refresh_state_paths()
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="ByBit Bot launcher")
+    parser.add_argument("--user", help="Run using the specified user profile id")
+    parser.add_argument("--list-users", action="store_true", help="List configured user profiles and exit")
+    return parser.parse_args()
+
+
+def _list_user_profiles(registry: dict[str, UserProfile]) -> None:
+    if not registry:
+        print("No user profiles configured. Create users/users.json based on users/users.example.json.")
+        return
+    print("Configured user profiles:")
+    for profile in registry.values():
+        status = "enabled" if profile.enabled else "disabled"
+        print(f"- {profile.user_id} ({profile.label}) [{status}] -> state_dir={profile.state_dir}")
+        for env_file in profile.env_files:
+            print(f"    secrets: {env_file}")
+
 
 def _build_commit_changelog(limit: int | None = None):
     limit = CHANGELOG_COMMIT_LIMIT if limit is None else _resolve_commit_limit(str(limit))
@@ -844,6 +978,37 @@ def _run_backups(reason: str) -> bool:
 
 
 def main():
+    args = _parse_args()
+    registry = _load_user_registry()
+    if args.list_users:
+        _list_user_profiles(registry)
+        return
+    active_user_id = args.user or os.getenv("BYBITBOT_USER_ID")
+    if active_user_id:
+        profile = registry.get(active_user_id) if registry else None
+        if profile:
+            if not profile.enabled:
+                print(f"[USERS] Profile '{active_user_id}' is disabled.", file=sys.stderr)
+                return
+            print(f"[USERS] Activating profile '{profile.user_id}' as '{profile.label}'")
+            _apply_user_profile(profile)
+        else:
+            implicit_profile = UserProfile(
+                user_id=active_user_id,
+                label=active_user_id,
+                enabled=True,
+                env_overrides={},
+                env_files=[USERS_DIR / active_user_id / USERS_DEFAULT_SECRET],
+                state_dir=(REPO_ROOT / "runtime" / active_user_id).resolve(),
+            )
+            if args.user and USERS_CONFIG_FILE.exists():
+                print(f"[USERS] Profile '{active_user_id}' not found in {USERS_CONFIG_FILE}, using implicit configuration.", file=sys.stderr)
+            _apply_user_profile(implicit_profile)
+        else:
+            _refresh_state_paths()
+    else:
+        _refresh_state_paths()
+
     _update_current_branch()
     history = _load_fallback_history()
     history.setdefault("branches", {})

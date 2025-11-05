@@ -12,3 +12,6 @@ fallback_history.json
 results_state.json
 release_state.json
 assets/
+runtime/
+users/*/secrets.env
+users/*/secrets.local

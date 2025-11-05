@@ -1,5 +1,10 @@
 Changelog (newest first)
 
+11.6
+- Introduced multi-user profiles with per-trader state, secrets, and Telegram prefixes; run `python bybitbot.py --user <id>` to launch an isolated session.
+- Added `users/users.example.json` and per-user secret files so traders supply their own Bybit API keys while OpenAI/Telegram tokens stay shared.
+- State files (results, equity, release/fallback history) now live under each user's runtime directory, preventing cross-account bleed.
+
 11.5
 - Release topic now de-duplicates announcements, keeping a single message per new version or commit by persisting the last broadcast in `release_state.json`.
 - Added groundwork for multi-tenant support by planning secure API separation and optional per-user runtimes.

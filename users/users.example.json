@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": "trader-1",
+      "label": "Trader 1",
+      "enabled": true,
+      "state_dir": "runtime/trader-1",
+      "env": {
+        "PAIR_LIST": "BTC/USDT:USDT,ETH/USDT:USDT",
+        "RISK_PCT": "1.0",
+        "TELEGRAM_STATUS_THREAD_ID": "22198",
+        "TELEGRAM_RESULTS_THREAD_ID": "22196",
+        "TELEGRAM_COMMAND_THREAD_ID": "21412",
+        "TELEGRAM_MESSAGE_PREFIX": "Trader-1"
+      },
+      "env_files": [
+        "users/trader-1/public.env"
+      ]
+    }
+  ]
+}

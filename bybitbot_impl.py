@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 11.5
+# Version: 11.6
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -43,18 +43,32 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "11.5"
+BOT_VERSION = "11.6"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
 CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
-EQUITY_HISTORY_FILE = SCRIPT_DIR / "equity_history.json"
-CYCLE_STATE_FILE = SCRIPT_DIR / "cycle_state.json"
-FALLBACK_HISTORY_FILE = SCRIPT_DIR / "fallback_history.json"
-RESULTS_STATE_FILE = SCRIPT_DIR / "results_state.json"
-RELEASE_STATE_FILE = SCRIPT_DIR / "release_state.json"
+STATE_DIR = SCRIPT_DIR
+def _configure_state_paths() -> None:
+    global STATE_DIR, EQUITY_HISTORY_FILE, CYCLE_STATE_FILE, FALLBACK_HISTORY_FILE, RESULTS_STATE_FILE, RELEASE_STATE_FILE
+    state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
+    try:
+        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else SCRIPT_DIR)
+    except Exception:
+        STATE_DIR = SCRIPT_DIR
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    EQUITY_HISTORY_FILE = STATE_DIR / "equity_history.json"
+    CYCLE_STATE_FILE = STATE_DIR / "cycle_state.json"
+    FALLBACK_HISTORY_FILE = STATE_DIR / "fallback_history.json"
+    RESULTS_STATE_FILE = STATE_DIR / "results_state.json"
+    RELEASE_STATE_FILE = STATE_DIR / "release_state.json"
+
+_configure_state_paths()
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
@@ -101,6 +115,9 @@ TELEGRAM_COMMAND_THREAD_ID: int | None = None
 TELEGRAM_INPROGRESS_THREAD_ID: int | None = None
 TELEGRAM_RESULTS_THREAD_ID: int | None = None
 TELEGRAM_STATUS_THREAD_ID: int | None = None
+TELEGRAM_MESSAGE_PREFIX: str = ""
+USER_ID: str = "default"
+USER_LABEL: str = "default"
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -1991,6 +2008,16 @@ def refresh_settings():
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
+    global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX
+    _configure_state_paths()
+    USER_ID = os.getenv("BYBITBOT_USER_ID") or "default"
+    USER_LABEL = os.getenv("BYBITBOT_USER_LABEL") or USER_ID
+    prefix_override = os.getenv("TELEGRAM_MESSAGE_PREFIX")
+    if prefix_override is not None:
+        TELEGRAM_MESSAGE_PREFIX = prefix_override.strip()
+    else:
+        multi_flag = (os.getenv("BYBITBOT_MULTIUSER") or "").strip().lower()
+        TELEGRAM_MESSAGE_PREFIX = USER_LABEL if USER_ID and multi_flag in {"1", "true", "yes", "on"} else ""
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
@@ -2697,6 +2724,8 @@ def send_tg(msg: str | Sequence[str], **extra):
         message_text = str(msg)
     if not message_text:
         return None
+    if TELEGRAM_MESSAGE_PREFIX:
+        message_text = f"[{TELEGRAM_MESSAGE_PREFIX}] {message_text}"
 
     extra_payload = dict(extra) if extra else {}
     _ = extra_payload.pop('no_log_forward', None)
@@ -4600,6 +4629,7 @@ def _resolve_log_path(filename: str) -> Path | None:
         return None
     candidates = [
         Path(filename),
+        STATE_DIR / filename,
         SCRIPT_DIR / filename,
         SCRIPT_DIR / "assets" / filename,
         REPO_ROOT / "assets" / filename,
