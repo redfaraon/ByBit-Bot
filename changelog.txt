@@ -1,4 +1,11 @@
-﻿11.3
+Changelog (newest first)
+
+11.4
+- Hardened position protection so short positions always regain take-profit coverage, using `set_trading_stop` fallbacks and trailing-stop retries when limits are too small.
+- Unified Trading status now reports only today's (UTC) Unified↔Funding transfers and hides direct Funding account activity entirely.
+- Reorganized this changelog for clarity with a single newest-first timeline.
+
+11.3
 - Send 6-hour PnL summaries and newly closed order breakdowns to the Results topic (ID 22196) with deduped reporting and state persistence.
 - Push open-position snapshots to the Status topic (ID 22198) each cycle for quick monitoring.
 - Added new Telegram topic configuration knobs and git change tracking to highlight local work-in-progress.
@@ -13,6 +20,86 @@
 - Announce new commits and releases in the Releases topic (ID 7) with commit timestamp, hash, message, version, and changelog details.
 
 
+2025.10.31.03
+- Added Telegram webhook command handling with buffered log forwarding and topic fallbacks.
+- Made Telegram sending thread-safe, batching log flushes, and reconfigured after env reload.
+- Documented new Telegram and trailing stop environment switches and aligned loader version metadata.
+
+
+2025.10.31.02
+- Added dynamic trailing-stop tightening based on ATR profit distance to lock in gains with less whipsaw.
+
+
+2025.10.31.01
+- Fixed cycle counter init so start banner shows correct number and prevents fallback launch failures.
+
+
+2025.10.30.03
+- Reduced per-pair serialization (bars/timeframes) and cycle symbol cap to fit OpenAI limits without hurting signal quality.
+- Added explicit cycle number logging and skipped legacy branch probes during routine backups.
+
+
+2025.10.30.02
+- Excluded legacy branch from routine backup rotations to prevent surprise launches on outdated code.
+
+
+2025.10.30.01
+- Logged active branch and commit timestamp each cycle and shared 6h PnL snapshots at session start/end.
+- Persisted real trade-cycle counters to align fallback probes with actual bot runs.
+- Detailed redundant stop cleanup messages with order specs and switched trailing protection to Bybit trading-stop API.
+
+
+2025.10.28.10
+- Allowed scale-in extra orders and preserved staged ladders when cleaning limits.
+- Switched trailing-stop params to trailingAmount for Bybit USDT Perps to avoid API errors.
+
+
+2025.10.28.9
+- Preserved ladder/scale-in limit orders during cleanup to keep staged entries intact.
+
+
+2025.10.28.8
+- Fixed NameError when launching random/routine backups by guarding suppress flags and passing them explicitly.
+
+
+2025.10.28.7
+- Added ATR-based break-even stop adjustments with configurable thresholds, improving downside protection once trades move in profit.
+- Expanded dynamic risk controls: telemetry now respects break-even states and context shares current risk window with AI.
+
+
+2025.10.28.6
+- Added dynamic risk scaling driven by recent PnL, with guardrails and logging for cycle risk posture.
+- Shared risk telemetry in AI context payload to inform decision prompts.
+- Logged per-cycle risk state and ensured baseline recovery when no PnL data is available.
+
+
+2025.10.28.5
+- Defined MAX_POSITIONS_PER_BASE before settings load to fix NameError on initial import.
+
+
+2025.10.28.4
+- Tied routine counter to completed cycles and suppressed child-script increments so scheduled backups no longer loop.
+- Propagated suppress flags via environment for fallback/random launches to keep latest commit active.
+
+
+2025.10.28.3
+- Auto-discovered Bybit symbol aliases (e.g., 1000 tickers) to avoid missing market errors.
+- Added base-asset exposure guard to cap concurrent positions per coin and prevent over-leveraging.
+- Generated daily AI decision summaries in assets and refreshed PnL analytics with closed-trade data.
+
+
+2025.10.28.2
+- Added SHIB perpetual alias to avoid missing market errors when AI selects SHIB/USDT.
+- Switched PnL reporting to sum closed orders over the 6h window, with trade history fallback.
+- Version bump for loader/impl.
+
+
+2025.10.28.1
+- Enforced Bybit order sizing to honor symbol min quantity/notional, eliminating 110043 rejections.
+- Added EMA/RSI fallback decisioning when OpenAI token limits hit so cycles still trade instead of skipping.
+- Cached exchange trade rules per run and bumped version metadata.
+
+
 2025.10.27.7
 - Restore GPT-4.1-mini as the primary model until 70k tokens and keep GPT-4o-mini as the fallback per cycle.
 - Reapply AI-provided stop/take targets when skipping opens and improve trailing-stop placement defaults.
@@ -25,24 +112,130 @@
 - Fix triggerDirection calculations using live prices and drop the unused stable_impl fallback copy.
 
 
-﻿2025.10.16.16B
-- Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
-- Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
+2025.10.27.5
+- Detect failed open orders and mark them as such in session summaries, surfacing the exchange error text.
+- Log planner aliases but avoid claiming a position opened when the order was rejected.
+- Version metadata bumped for loader, impl, and stable builds.
 
 
-2025.10.16.17
-- Loader fallback skips backup builds with trailing "B" (beta).
-- Version value is maintained in CHANGELOG.txt and propagated by loader/impl.
-- Legacy backup files named bybit_intraday_30m_5pairs_v*.py are now detected alongside new bybitbot_v*.py snapshots.
+2025.10.27.4
+- Skip replacement reduce-only market orders lacking triggers to prevent unintended flat exits.
+- Normalize planner actions such as replace_orders into manage/hold flows and log the mapping.
+- Updated default version metadata in loader and implementation.
 
 
-2025.10.16.18
-- Model must nominate symbols/timeframes/indicators directly from news; defaults removed and next_run_minutes requested.
-- Session banners and Telegram announcements now report Equity, Free margin, and unrealised PnL, noting fallback builds when used.
+2025.10.27.3
+- Normalized Bybit extra-order payloads and updated version metadata.
 
 
-2025.10.17.1
-- Portfolio prompt now shares default scheduling inputs and enforces next_run_minutes so the bot self-reschedules without cron.
+2025.10.26.2
+- `_sync_with_remote` now runs `git fetch`/`git pull --ff-only --autostash` even on dirty trees and reports every git action to a dedicated Telegram topic (ID 581 by default).
+- Added `_send_git_notification` helper so commit banners and git outputs always include timestamp/message and land in the git thread.
+- Telegram thread failures (400 thread not found) now fall back to the main chat automatically, preventing stuck retries.
+
+
+2025.10.26.1
+- Universe prompt now re-generates every run from scratch using session time/day, news-only context, and a curated TF/indicator shortlist (2x EMA, vol, RSI, MACD, ATR, Stoch).
+- Initial per-symbol context is clamped to 30m/4h + those six indicators with ~10 bars, while extra needs pass through whatever the model requests.
+- Telegram notifications gained duplicate suppression, minimum interval, topic-aware routing, and retry/backoff handling (avoiding 429s); logs now include commit timestamp + version.
+
+
+2025.10.24.1
+- Universe prompt now rebuilds every cycle with a curated shortlist (EMA20/EMA50, vol, RSI, MACD, ATR, Stoch; TF 15m-4h) and includes session timestamp/day/hour.
+- Initial context always uses compact 30m/4h + six indicators; extra needs honour model requests with a 10-bar cap.
+- Telegram logging now includes commit timestamp + version, uses thread IDs, rate-limits messages, de-duplicates repeats, and retries gracefully on 429/transport errors.
+
+
+2025.10.23.3
+- Added TELEGRAM_TOPIC_ID support and thread-aware send_tg helper so alerts land in the desired group topic.
+- Clamped portfolio needs to a fixed shortlist (30m/4h, ema20/ema50/vol/rsi14/macd) and trimmed context to 10 bars for leaner prompts.
+- Misc tuning for low-confidence follow-ups and version bump to keep loader/changelog in sync.
+
+
+2025.10.22.7
+- Added low-confidence telemetry: per-symbol confidence logged, extra context auto-requested when below threshold, with configurable needs list.
+- Skipped re-creating existing manage orders and canonicalized order payloads to prevent invalid-price/qty errors.
+
+
+2025.10.22.6
+- Fixed manage/hold extra orders: default to reduce-only, allow additive scaling only with explicit intent; normalized ticker aliases across data fetches to prevent BNB/POL lookup errors.
+
+
+2025.10.22.5
+- Gracefully handles KeyboardInterrupt by stopping without triggering legacy fallbacks, ensuring manual interruptions remain safe.
+
+
+2025.10.22.4
+- Hardened OpenAI retries with exponential backoff and optional probe attempts to restore the latest commit after fallbacks.
+- Normalized ticker aliases (e.g. BNB, POL) across data fetches and order management so Bybit lookups always use canonical symbols.
+- Tightened extra-order safeguards: limit non-reduce duplicates, enforce margin checks, and prune stale limit orders before placing new ones.
+
+
+2025.10.22.3
+- Hardened AI retries and logging so fallbacks clearly state source and target, and cycles fail fast when the trade plan is unavailable.
+- Normalized ticker aliases for extra-symbol bundles so symbols like `BNB` always fetch candles/orders from Bybit.
+- Recognize protective orders even without the `reduceOnly` flag and drop non-reduce extra orders that would expand existing exposure.
+
+
+2025.10.22.2
+- Launcher now falls back to the dedicated `stable` branch whenever the latest commit fails validation, keeping prior commit/backups as secondary safeguards.
+- Trading cycle aborts when every flat symbol is skipped by the trade plan or when open positions lack stop/trailing protection, triggering an automatic rollback to stable.
+
+
+2025.10.20.6
+- Лимит открытых позиций задаёт модель: используем значение из первого запроса вместо жёсткого конфига.
+
+
+2025.10.20.5
+- Модель задаёт объёмы: используем переданные лоты/нотионал при открытиях, сохраняя маржинальные проверки.
+
+
+2025.10.20.4
+- Модель управляет плечами: применяем переданные значения и учитываем их при маржинальных расчётах.
+
+
+2025.10.20.3
+- Перешли на CryptoCompare API с RSS-фолбэком и убрали CryptoPanic, избегая 429.
+- Во втором запросе теперь передаются полные тексты новостей, заголовки остаются краткими для первого шага.
+
+
+2025.10.20.2
+- Сделан торговый план основным источником решений: теперь за цикл отправляется один многопарный запрос без индивидуальных initial-запросов.
+- Позиции вне плана переводятся в hold/skip с безопасной защитой и явной причиной.
+- В payload торгового плана добавлены снапшоты открытых позиций и ожиданий по ордерам для всей выборки.
+
+
+2025.10.20.1
+- Validate model/portfolio symbols against live Bybit markets, auto-alias MATIC→POL, and warn on delistings.
+- At cycle end, re-establish missing SL/TP protection or close the position if safeguards cannot be restored.
+- Loader marks new commits stable only after a successful protected run and preserves readable English logs.
+
+
+2025.10.19.3
+- Added automated protection validation so new builds only become stable when SL/trailing orders are present.
+- Boot loader now treats the first successful run of a commit as stable and avoids reusing failed fallbacks.
+- Added alias handling for Bybit symbol changes (e.g., POL replaces MATIC) and normalized pair checks.
+
+
+2025.10.19.2
+
+
+2025.10.19.1
+- 2025-10-19 e5df32c refactor: enhance runtime status management and default delay configuration
+- 2025-10-19 d24c0b5 refactor: enhance order type handling with aliases and normalization function
+- 2025-10-19 0f28cd5 refactor: update sync_script.sh for targeted synchronization of project files and directories
+- 2025-10-19 c508f72 refactor: streamline sync_file function and enhance synchronization logic
+- 2025-10-19 d51a298 Add sync_script.sh for synchronizing local and remote directories
+- 2025-10-19 95ea8af docs: restore cron autostart workflow
+- 2025-10-19 d05355f 2025.10.19.1: rollback and fix needs handling
+- 2025-10-19 7f118eb Initial commit (recovered)
+
+
+2025.10.18.1
+- Portfolio prompt now includes a symbol_configs block so the model can define pair-specific risk and sizing settings.
+- Selection parsing merges symbol_configs into targets and broadcasts the applied per-symbol parameters.
+- Execution layer combines base pair configs with per-decision overrides and logs the effective inputs used for orders.
+- Extra analysis timeout path now returns a safe skip decision immediately to avoid control flow bugs.
 
 
 2025.10.17.2
@@ -57,190 +250,21 @@
 - Model now receives config_defaults (.env risk/leverage/ATR settings) and can recommend overrides; overrides are sanitized, logged, and applied per-cycle.
 
 
-2025.10.18.1
-- Portfolio prompt now includes a symbol_configs block so the model can define pair-specific risk and sizing settings.
-- Selection parsing merges symbol_configs into targets and broadcasts the applied per-symbol parameters.
-- Execution layer combines base pair configs with per-decision overrides and logs the effective inputs used for orders.
-- Extra analysis timeout path now returns a safe skip decision immediately to avoid control flow bugs.
+2025.10.17.1
+- Portfolio prompt now shares default scheduling inputs and enforces next_run_minutes so the bot self-reschedules without cron.
 
 
-2025.10.19.1
-
-Recent commits (last 8)
-- 2025-10-19 e5df32c refactor: enhance runtime status management and default delay configuration
-- 2025-10-19 d24c0b5 refactor: enhance order type handling with aliases and normalization function
-- 2025-10-19 0f28cd5 refactor: update sync_script.sh for targeted synchronization of project files and directories
-- 2025-10-19 c508f72 refactor: streamline sync_file function and enhance synchronization logic
-- 2025-10-19 d51a298 Add sync_script.sh for synchronizing local and remote directories
-- 2025-10-19 95ea8af docs: restore cron autostart workflow
-- 2025-10-19 d05355f 2025.10.19.1: rollback and fix needs handling
-- 2025-10-19 7f118eb Initial commit (recovered)
+2025.10.16.18
+- Model must nominate symbols/timeframes/indicators directly from news; defaults removed and next_run_minutes requested.
+- Session banners and Telegram announcements now report Equity, Free margin, and unrealised PnL, noting fallback builds when used.
 
 
-2025.10.19.2
-
-2025.10.19.3
-- Added automated protection validation so new builds only become stable when SL/trailing orders are present.
-- Boot loader now treats the first successful run of a commit as stable and avoids reusing failed fallbacks.
-- Added alias handling for Bybit symbol changes (e.g., POL replaces MATIC) and normalized pair checks.
+2025.10.16.17
+- Loader fallback skips backup builds with trailing "B" (beta).
+- Version value is maintained in CHANGELOG.txt and propagated by loader/impl.
+- Legacy backup files named bybit_intraday_30m_5pairs_v*.py are now detected alongside new bybitbot_v*.py snapshots.
 
 
-2025.10.20.1
-- Validate model/portfolio symbols against live Bybit markets, auto-alias MATIC→POL, and warn on delistings.
-- At cycle end, re-establish missing SL/TP protection or close the position if safeguards cannot be restored.
-- Loader marks new commits stable only after a successful protected run and preserves readable English logs.
-
-
-2025.10.20.2
-- Сделан торговый план основным источником решений: теперь за цикл отправляется один многопарный запрос без индивидуальных initial-запросов.
-- Позиции вне плана переводятся в hold/skip с безопасной защитой и явной причиной.
-- В payload торгового плана добавлены снапшоты открытых позиций и ожиданий по ордерам для всей выборки.
-
-2025.10.20.3
-- Перешли на CryptoCompare API с RSS-фолбэком и убрали CryptoPanic, избегая 429.
-- Во втором запросе теперь передаются полные тексты новостей, заголовки остаются краткими для первого шага.
-
-2025.10.20.4
-- Модель управляет плечами: применяем переданные значения и учитываем их при маржинальных расчётах.
-
-2025.10.20.5
-- Модель задаёт объёмы: используем переданные лоты/нотионал при открытиях, сохраняя маржинальные проверки.
-
-2025.10.20.6
-- Лимит открытых позиций задаёт модель: используем значение из первого запроса вместо жёсткого конфига.
-
-
-2025.10.22.2
-- Launcher now falls back to the dedicated `stable` branch whenever the latest commit fails validation, keeping prior commit/backups as secondary safeguards.
-- Trading cycle aborts when every flat symbol is skipped by the trade plan or when open positions lack stop/trailing protection, triggering an automatic rollback to stable.
-
-
-2025.10.22.3
-- Hardened AI retries and logging so fallbacks clearly state source and target, and cycles fail fast when the trade plan is unavailable.
-- Normalized ticker aliases for extra-symbol bundles so symbols like `BNB` always fetch candles/orders from Bybit.
-- Recognize protective orders even without the `reduceOnly` flag and drop non-reduce extra orders that would expand existing exposure.
-
-
-2025.10.22.4
-- Hardened OpenAI retries with exponential backoff and optional probe attempts to restore the latest commit after fallbacks.
-- Normalized ticker aliases (e.g. BNB, POL) across data fetches and order management so Bybit lookups always use canonical symbols.
-- Tightened extra-order safeguards: limit non-reduce duplicates, enforce margin checks, and prune stale limit orders before placing new ones.
-
-
-2025.10.22.5
-- Gracefully handles KeyboardInterrupt by stopping without triggering legacy fallbacks, ensuring manual interruptions remain safe.
-
-
-2025.10.22.6
-- Fixed manage/hold extra orders: default to reduce-only, allow additive scaling only with explicit intent; normalized ticker aliases across data fetches to prevent BNB/POL lookup errors.
-
-
-2025.10.22.7
-- Added low-confidence telemetry: per-symbol confidence logged, extra context auto-requested when below threshold, with configurable needs list.
-- Skipped re-creating existing manage orders and canonicalized order payloads to prevent invalid-price/qty errors.
-
-
-2025.10.23.3
-- Added TELEGRAM_TOPIC_ID support and thread-aware send_tg helper so alerts land in the desired group topic.
-- Clamped portfolio needs to a fixed shortlist (30m/4h, ema20/ema50/vol/rsi14/macd) and trimmed context to 10 bars for leaner prompts.
-- Misc tuning for low-confidence follow-ups and version bump to keep loader/changelog in sync.
-
-
-2025.10.24.1
-- Universe prompt now rebuilds every cycle with a curated shortlist (EMA20/EMA50, vol, RSI, MACD, ATR, Stoch; TF 15m-4h) and includes session timestamp/day/hour.
-- Initial context always uses compact 30m/4h + six indicators; extra needs honour model requests with a 10-bar cap.
-- Telegram logging now includes commit timestamp + version, uses thread IDs, rate-limits messages, de-duplicates repeats, and retries gracefully on 429/transport errors.
-
-
-2025.10.26.1
-- Universe prompt now re-generates every run from scratch using session time/day, news-only context, and a curated TF/indicator shortlist (2x EMA, vol, RSI, MACD, ATR, Stoch).
-- Initial per-symbol context is clamped to 30m/4h + those six indicators with ~10 bars, while extra needs pass through whatever the model requests.
-- Telegram notifications gained duplicate suppression, minimum interval, topic-aware routing, and retry/backoff handling (avoiding 429s); logs now include commit timestamp + version.
-
-
-2025.10.26.2
-- `_sync_with_remote` now runs `git fetch`/`git pull --ff-only --autostash` even on dirty trees and reports every git action to a dedicated Telegram topic (ID 581 by default).
-- Added `_send_git_notification` helper so commit banners and git outputs always include timestamp/message and land in the git thread.
-- Telegram thread failures (400 thread not found) now fall back to the main chat automatically, preventing stuck retries.
-
-
-2025.10.27.3
-- Normalized Bybit extra-order payloads and updated version metadata.
-
-
-2025.10.27.4
-- Skip replacement reduce-only market orders lacking triggers to prevent unintended flat exits.
-- Normalize planner actions such as replace_orders into manage/hold flows and log the mapping.
-- Updated default version metadata in loader and implementation.
-
-
-2025.10.27.5
-- Detect failed open orders and mark them as such in session summaries, surfacing the exchange error text.
-- Log planner aliases but avoid claiming a position opened when the order was rejected.
-- Version metadata bumped for loader, impl, and stable builds.
-
-
-2025.10.28.1
-- Enforced Bybit order sizing to honor symbol min quantity/notional, eliminating 110043 rejections.
-- Added EMA/RSI fallback decisioning when OpenAI token limits hit so cycles still trade instead of skipping.
-- Cached exchange trade rules per run and bumped version metadata.
-
-2025.10.28.2
-- Added SHIB perpetual alias to avoid missing market errors when AI selects SHIB/USDT.
-- Switched PnL reporting to sum closed orders over the 6h window, with trade history fallback.
-- Version bump for loader/impl.
-
-2025.10.28.3
-- Auto-discovered Bybit symbol aliases (e.g., 1000 tickers) to avoid missing market errors.
-- Added base-asset exposure guard to cap concurrent positions per coin and prevent over-leveraging.
-- Generated daily AI decision summaries in assets and refreshed PnL analytics with closed-trade data.
-
-2025.10.28.4
-- Tied routine counter to completed cycles and suppressed child-script increments so scheduled backups no longer loop.
-- Propagated suppress flags via environment for fallback/random launches to keep latest commit active.
-
-2025.10.28.5
-- Defined MAX_POSITIONS_PER_BASE before settings load to fix NameError on initial import.
-
-2025.10.28.6
-- Added dynamic risk scaling driven by recent PnL, with guardrails and logging for cycle risk posture.
-- Shared risk telemetry in AI context payload to inform decision prompts.
-- Logged per-cycle risk state and ensured baseline recovery when no PnL data is available.
-
-2025.10.28.7
-- Added ATR-based break-even stop adjustments with configurable thresholds, improving downside protection once trades move in profit.
-- Expanded dynamic risk controls: telemetry now respects break-even states and context shares current risk window with AI.
-
-2025.10.28.8
-- Fixed NameError when launching random/routine backups by guarding suppress flags and passing them explicitly.
-
-2025.10.28.9
-- Preserved ladder/scale-in limit orders during cleanup to keep staged entries intact.
-
-2025.10.28.10
-- Allowed scale-in extra orders and preserved staged ladders when cleaning limits.
-- Switched trailing-stop params to trailingAmount for Bybit USDT Perps to avoid API errors.
-
-2025.10.30.01
-- Logged active branch and commit timestamp each cycle and shared 6h PnL snapshots at session start/end.
-- Persisted real trade-cycle counters to align fallback probes with actual bot runs.
-- Detailed redundant stop cleanup messages with order specs and switched trailing protection to Bybit trading-stop API.
-
-2025.10.30.02
-- Excluded legacy branch from routine backup rotations to prevent surprise launches on outdated code.
-
-2025.10.30.03
-- Reduced per-pair serialization (bars/timeframes) and cycle symbol cap to fit OpenAI limits without hurting signal quality.
-- Added explicit cycle number logging and skipped legacy branch probes during routine backups.
-
-2025.10.31.01
-- Fixed cycle counter init so start banner shows correct number and prevents fallback launch failures.
-
-2025.10.31.02
-- Added dynamic trailing-stop tightening based on ATR profit distance to lock in gains with less whipsaw.
-
-2025.10.31.03
-- Added Telegram webhook command handling with buffered log forwarding and topic fallbacks.
-- Made Telegram sending thread-safe, batching log flushes, and reconfigured after env reload.
-- Documented new Telegram and trailing stop environment switches and aligned loader version metadata.
-
+2025.10.16.16B
+- Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
+- Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.

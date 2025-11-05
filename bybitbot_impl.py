@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 11.3
+# Version: 11.4
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -43,7 +43,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "11.3"
+BOT_VERSION = "11.4"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -702,6 +702,16 @@ def _set_symbol_leverage(exchange, symbol: str, leverage: int, current_position:
     leverage_val = safe_int(leverage)
     if leverage_val is None or leverage_val <= 0:
         return
+    market = None
+    try:
+        market = exchange.market(symbol)
+    except Exception:
+        market = None
+    if isinstance(market, dict):
+        market_type = market.get("type") or ("linear" if market.get("linear") else "inverse" if market.get("inverse") else None)
+        if market_type not in ("swap", "future", "linear", "inverse"):
+            return
+    current_lev = safe_float((current_position or {}).get("leverage") if isinstance(current_position, dict) else None)
     current_lev = safe_float((current_position or {}).get("leverage") if isinstance(current_position, dict) else None)
     if current_lev is not None and math.isfinite(current_lev) and abs(current_lev - leverage_val) < 1e-6:
         return
@@ -4752,12 +4762,16 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
         "warnings": [],
     }
 
-    has_transfers = hasattr(exchange, "privateGetV5AssetTransferQueryInterTransferList")
-    has_deposits = hasattr(exchange, "privateGetV5AssetDepositQueryRecord")
-    has_withdrawals = hasattr(exchange, "privateGetV5AssetWithdrawQueryRecord")
+    if not hasattr(exchange, "privateGetV5AssetTransferQueryInterTransferList"):
+        summary["warnings"].append("[STATUS] Endpoint inter-transfer list недоступен; операции Unified↔Funding не будут показаны.")
+        return summary
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    since_utc = now_utc - datetime.timedelta(hours=24)
+    since_utc = datetime.datetime.combine(
+        now_utc.date(),
+        datetime.time.min,
+        tzinfo=datetime.timezone.utc,
+    )
     since_ms = int(since_utc.timestamp() * 1000)
     until_ms = int(now_utc.timestamp() * 1000)
 
@@ -4785,75 +4799,35 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
         totals = summary["totals"].setdefault(kind, {})
         totals[coin] = totals.get(coin, 0.0) + float(amount)
 
-    if has_transfers:
-        params_transfer = {
-            "limit": limit,
-            "startTime": since_ms,
-            "endTime": until_ms,
-        }
-        try:
-            resp = exchange.privateGetV5AssetTransferQueryInterTransferList(params_transfer)
-            rows = ((((resp or {}).get("result") or {}).get("list")) or [])
-        except Exception as exc:
-            rows = []
-            summary["warnings"].append(f"[STATUS] Не удалось получить внутренние переводы: {exc}")
-        for row in rows:
-            amount = safe_float(row.get("amount") or row.get("qty"))
-            if amount is None or amount <= 0:
-                continue
-            coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-            ts = _parse_timestamp_any(row.get("timestamp") or row.get("updatedTime") or row.get("createdTime"))
-            if ts and ts < since_utc:
-                continue
-            from_acc = _normalize_account(row.get("fromAccountType") or row.get("fromAccount"))
-            to_acc = _normalize_account(row.get("toAccountType") or row.get("toAccount"))
-            accounts = {from_acc, to_acc}
-            if accounts != {"UNIFIED", "FUNDING"}:
-                continue
-            status = str(row.get("status") or row.get("transferStatus") or "").upper()
-            if to_acc == "UNIFIED":
-                _record("deposit", float(amount), coin, ts, status, row)
-            else:
-                _record("withdraw", float(amount), coin, ts, status, row)
-    else:
-        summary["warnings"].append("[STATUS] Endpoint inter-transfer list недоступен; операции Unified↔Funding не будут показаны.")
-
-    if not summary["records"]:
-        params_common = {"limit": limit}
-        if has_deposits:
-            try:
-                resp = exchange.privateGetV5AssetDepositQueryRecord(params_common)
-                rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
-            except Exception as exc:
-                rows = []
-                summary["warnings"].append(f"[STATUS] Не удалось получить депозиты: {exc}")
-            for row in rows:
-                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
-                if ts and ts < since_utc:
-                    continue
-                amount = safe_float(row.get("amount"))
-                if amount is None or amount <= 0:
-                    continue
-                coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-                status = str(row.get("status") or row.get("state") or "").upper()
-                _record("deposit", float(amount), coin, ts, status, row)
-        if has_withdrawals:
-            try:
-                resp = exchange.privateGetV5AssetWithdrawQueryRecord(params_common)
-                rows = ((((resp or {}).get("result") or {}).get("rows")) or [])
-            except Exception as exc:
-                rows = []
-                summary["warnings"].append(f"[STATUS] Не удалось получить выводы: {exc}")
-            for row in rows:
-                ts = _parse_timestamp_any(row.get("successAt") or row.get("updatedTime") or row.get("createdTime"))
-                if ts and ts < since_utc:
-                    continue
-                amount = safe_float(row.get("amount") or row.get("qty"))
-                if amount is None or amount <= 0:
-                    continue
-                coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
-                status = str(row.get("status") or row.get("state") or "").upper()
-                _record("withdraw", float(amount), coin, ts, status, row)
+    params_transfer = {
+        "limit": limit,
+        "startTime": since_ms,
+        "endTime": until_ms,
+    }
+    try:
+        resp = exchange.privateGetV5AssetTransferQueryInterTransferList(params_transfer)
+        rows = ((((resp or {}).get("result") or {}).get("list")) or [])
+    except Exception as exc:
+        rows = []
+        summary["warnings"].append(f"[STATUS] Не удалось получить внутренние переводы: {exc}")
+    for row in rows:
+        amount = safe_float(row.get("amount") or row.get("qty"))
+        if amount is None or amount <= 0:
+            continue
+        coin = str(row.get("coin") or row.get("currency") or "USDT").upper()
+        ts = _parse_timestamp_any(row.get("timestamp") or row.get("updatedTime") or row.get("createdTime"))
+        if ts and ts < since_utc:
+            continue
+        from_acc = _normalize_account(row.get("fromAccountType") or row.get("fromAccount"))
+        to_acc = _normalize_account(row.get("toAccountType") or row.get("toAccount"))
+        accounts = {from_acc, to_acc}
+        if accounts != {"UNIFIED", "FUNDING"}:
+            continue
+        status = str(row.get("status") or row.get("transferStatus") or "").upper()
+        if to_acc == "UNIFIED":
+            _record("deposit", float(amount), coin, ts, status, row)
+        else:
+            _record("withdraw", float(amount), coin, ts, status, row)
 
     summary["records"].sort(
         key=lambda item: item.get("timestamp") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
@@ -5787,6 +5761,24 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if position_idx is not None:
         base_params["positionIdx"] = position_idx
 
+    market_info = None
+    try:
+        market_info = exchange.market(exchange_symbol)
+    except Exception:
+        market_info = None
+    position_category = None
+    if isinstance(market_info, dict):
+        if _is_truthy_flag(market_info.get("linear")):
+            position_category = "linear"
+        elif _is_truthy_flag(market_info.get("inverse")):
+            position_category = "inverse"
+        else:
+            market_type = str(market_info.get("type") or "").lower()
+            if market_type in {"swap", "future", "linear", "inverse"}:
+                position_category = market_type
+    if position_category is None and ":" in exchange_symbol:
+        position_category = "linear"
+
     created_log_parts: list[str] = []
     try:
         trigger_direction = get_trigger_direction_for_side(
@@ -5883,57 +5875,98 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             continue
         remaining_qty = max(0.0, remaining_qty - target_qty_precise)
         take_created.append(f"takeProfit {target_qty_precise:.4f} @ {tp_target_price:.2f}")
-    if not take_created:
-        log(f"[WARN] {symbol}: take-profit orders were not placed (scheme={filtered_scheme})", Fore.YELLOW)
-    else:
+    take_orders_success = False
+    if take_created:
         created_log_parts.extend(take_created)
+        take_orders_success = True
 
-    if trailing_offset is not None:
-        trailing_amount = abs(trailing_offset)
-        trailing_success = False
-        trailing_errors: list[str] = []
-        try:
-            trailing_params = {
-                "category": "linear",
-                "trailingStop": trailing_amount,
+    fallback_take_price = None
+    if not take_orders_success and take_price is not None and math.isfinite(take_price) and take_price > 0:
+        fallback_take_price = float(take_price)
+
+    trailing_amount = abs(trailing_offset) if trailing_offset is not None else None
+    trailing_set = False
+    take_set_via_trading_stop = False
+    trailing_errors: list[str] = []
+    take_trading_stop_errors: list[str] = []
+
+    set_trading_stop_callable = getattr(exchange, "set_trading_stop", None)
+    if callable(set_trading_stop_callable) and (trailing_amount or fallback_take_price):
+        if position_category:
+            trading_stop_params = {
+                "category": position_category,
+                "side": "Sell" if is_long else "Buy",
             }
             if position_idx is not None:
-                trailing_params["positionIdx"] = position_idx
+                trading_stop_params["positionIdx"] = position_idx
             if reference_price and math.isfinite(reference_price):
-                trailing_params["triggerPrice"] = reference_price
-            trailing_params["side"] = "Sell" if is_long else "Buy"
-            exchange.set_trading_stop(exchange_symbol, trailing_params)
-            created_log_parts.append(f"tradingStop trailing {trailing_amount:.4f}")
-            trailing_success = True
-        except AttributeError:
-            trailing_errors.append("set_trading_stop not supported by exchange")
-        except Exception as exc:
-            trailing_errors.append(str(exc))
-        if not trailing_success:
+                trading_stop_params["triggerPrice"] = reference_price
+            if trailing_amount:
+                trading_stop_params["trailingStop"] = trailing_amount
+            if fallback_take_price:
+                trading_stop_params["takeProfit"] = fallback_take_price
             try:
-                trailing_params = dict(base_params)
-                trailing_params.pop("reduceOnly", None)
-                trailing_params["category"] = "linear"
-                trailing_params["closeOnTrigger"] = True
-                trailing_params["trailingAmount"] = trailing_amount
-                trailing_params["side"] = protection_side.upper()
+                set_trading_stop_callable(exchange_symbol, trading_stop_params)
+                if trailing_amount:
+                    created_log_parts.append(f"tradingStop trailing {trailing_amount:.4f}")
+                    trailing_set = True
+                if fallback_take_price:
+                    created_log_parts.append(f"takeProfit set_trading_stop @ {fallback_take_price:.2f}")
+                    take_set_via_trading_stop = True
+            except Exception as exc:
+                if trailing_amount:
+                    trailing_errors.append(str(exc))
+                if fallback_take_price:
+                    take_trading_stop_errors.append(str(exc))
+        else:
+            if trailing_amount:
+                trailing_errors.append("market category unknown for set_trading_stop")
+            if fallback_take_price:
+                take_trading_stop_errors.append("market category unknown for set_trading_stop")
+    elif trailing_amount or fallback_take_price:
+        if trailing_amount:
+            trailing_errors.append("set_trading_stop not supported by exchange")
+        if fallback_take_price:
+            take_trading_stop_errors.append("set_trading_stop not supported by exchange")
+
+    if trailing_amount and not trailing_set:
+        if trailing_offset is not None:
+            try:
+                fallback_trailing_params = dict(base_params)
+                fallback_trailing_params.pop("reduceOnly", None)
+                fallback_trailing_params["category"] = position_category or "linear"
+                fallback_trailing_params["closeOnTrigger"] = True
+                fallback_trailing_params["trailingAmount"] = trailing_amount
+                fallback_trailing_params["side"] = protection_side.upper()
                 if reference_price and math.isfinite(reference_price):
-                    trailing_params.setdefault("triggerPrice", reference_price)
+                    fallback_trailing_params.setdefault("triggerPrice", reference_price)
                 exchange.create_order(
                     exchange_symbol,
                     "trailingStop",
                     protection_side,
                     qty,
                     None,
-                    trailing_params,
+                    fallback_trailing_params,
                 )
                 created_log_parts.append(f"trailingStop {trailing_amount:.4f}")
-                trailing_success = True
+                trailing_set = True
             except Exception as exc:
                 trailing_errors.append(str(exc))
-        if not trailing_success and trailing_errors:
-            combined = "; ".join(trailing_errors)
-            log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
+    if trailing_amount and not trailing_set and trailing_errors:
+        combined = "; ".join(trailing_errors)
+        log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
+
+    if not take_orders_success:
+        if take_set_via_trading_stop:
+            take_orders_success = True
+        elif fallback_take_price:
+            if take_trading_stop_errors:
+                details = "; ".join(take_trading_stop_errors)
+                log(f"[WARN] {symbol}: take-profit через set_trading_stop не установлен ({details})", Fore.YELLOW)
+            else:
+                log(f"[WARN] {symbol}: take-profit orders were not placed (scheme={filtered_scheme})", Fore.YELLOW)
+        else:
+            log(f"[WARN] {symbol}: take-profit orders were not placed (scheme={filtered_scheme})", Fore.YELLOW)
 
     if created_log_parts:
         log(f"ℹ️ {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)
@@ -8885,26 +8918,6 @@ def run_cycle():
                 status_lines.append(f"- Ввод: {deposit_summary}")
             else:
                 status_lines.append("- Ввод: нет")
-            if withdrawals_total:
-                withdraw_summary = ", ".join(
-                    f"{coin}:{amount:.4f}" for coin, amount in sorted(withdrawals_total.items())
-                )
-                status_lines.append(f"- Вывод: {withdraw_summary}")
-            else:
-                status_lines.append("- Вывод: нет")
-        if records:
-            status_lines.append("🧾 Операции:")
-            for entry in records[:5]:
-                coin = entry.get("coin") or "?"
-                amount = entry.get("amount")
-                sign = "+" if entry.get("type") == "deposit" else "-"
-                amount_txt = f"{sign}{abs(amount):.4f}" if isinstance(amount, (int, float)) and math.isfinite(amount) else "?"
-                ts = entry.get("timestamp")
-                ts_display = _format_local_dt(ts) if isinstance(ts, datetime.datetime) else "n/a"
-                status = entry.get("status") or ""
-                status_lines.append(f"- {entry.get('type').capitalize()} {amount_txt} {coin} ({ts_display}) {status}")
-            if len(records) > 5:
-                status_lines.append(f"… ещё {len(records) - 5} операций")
         _send_status_notification("\n".join(status_lines))
     except Exception as exc_status:
         log(f"[STATUS] Не удалось отправить список позиций: {exc_status}", Fore.YELLOW)
