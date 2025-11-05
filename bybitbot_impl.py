@@ -4107,9 +4107,16 @@ def get_news(symbol):
 
 # --- Подключение к бирже ---
 def init_exchange():
+    api_key = os.getenv("BYBIT_API_KEY")
+    api_secret = os.getenv("BYBIT_API_SECRET")
+    if not api_key or not api_secret:
+        raise RuntimeError(
+            "BYBIT_API_KEY/BYBIT_API_SECRET must be provided by the user. "
+            "Place them in users/<id>/secrets.env when running multi-user mode."
+        )
     exchange = ccxt.bybit({
-        "apiKey": os.getenv("BYBIT_API_KEY",""),
-        "secret": os.getenv("BYBIT_API_SECRET",""),
+        "apiKey": api_key,
+        "secret": api_secret,
         "enableRateLimit": True,
         "options": {
             "defaultType": "swap",

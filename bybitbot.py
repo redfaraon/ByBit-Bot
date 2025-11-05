@@ -1004,8 +1004,6 @@ def main():
             if args.user and USERS_CONFIG_FILE.exists():
                 print(f"[USERS] Profile '{active_user_id}' not found in {USERS_CONFIG_FILE}, using implicit configuration.", file=sys.stderr)
             _apply_user_profile(implicit_profile)
-        else:
-            _refresh_state_paths()
     else:
         _refresh_state_paths()
 
