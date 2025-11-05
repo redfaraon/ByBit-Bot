@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 11.4
+# Version: 11.5
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -43,7 +43,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "11.4"
+BOT_VERSION = "11.5"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -54,6 +54,7 @@ EQUITY_HISTORY_FILE = SCRIPT_DIR / "equity_history.json"
 CYCLE_STATE_FILE = SCRIPT_DIR / "cycle_state.json"
 FALLBACK_HISTORY_FILE = SCRIPT_DIR / "fallback_history.json"
 RESULTS_STATE_FILE = SCRIPT_DIR / "results_state.json"
+RELEASE_STATE_FILE = SCRIPT_DIR / "release_state.json"
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
@@ -896,6 +897,18 @@ def _notify_release_event(
     commit_message: str | None,
     commit_timestamp: str | None,
 ) -> None:
+    release_state = _load_release_state()
+    if event_type == "release":
+        last_version = release_state.get("last_version")
+        last_release_hash = release_state.get("last_release_hash")
+        if BOT_VERSION and last_version == BOT_VERSION:
+            if not commit_hash or not last_release_hash or commit_hash == last_release_hash:
+                return
+    elif event_type == "commit":
+        last_commit_hash = release_state.get("last_commit_hash")
+        if commit_hash and commit_hash == last_commit_hash:
+            return
+
     thread_target: Optional[int] = TELEGRAM_RELEASE_THREAD_ID
     if thread_target is None:
         thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
@@ -919,6 +932,14 @@ def _notify_release_event(
         thread_id=thread_target,
         no_log_forward=True,
     )
+    release_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if event_type == "release":
+        release_state["last_version"] = BOT_VERSION
+        if commit_hash:
+            release_state["last_release_hash"] = commit_hash
+    elif event_type == "commit" and commit_hash:
+        release_state["last_commit_hash"] = commit_hash
+    _save_release_state(release_state)
 
 
 def maybe_refresh_metadata() -> dict[str, Any]:
@@ -2823,6 +2844,61 @@ def _results_order_key(detail: dict[str, Any]) -> str:
     return f"{symbol}|{timestamp}|{pnl}"
 
 
+def _load_release_state() -> dict:
+    try:
+        raw = RELEASE_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log(f"[RELEASE] Не удалось прочитать release_state.json: {exc}", Fore.YELLOW)
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log("[RELEASE] Файл release_state.json повреждён, начинаем заново.", Fore.YELLOW)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_release_state(state: dict) -> None:
+    try:
+        RELEASE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"[RELEASE] Не удалось сохранить release_state.json: {exc}", Fore.YELLOW)
+
+
+def _infer_market_category(symbol: str, market_info: dict | None) -> str | None:
+    category = None
+    if isinstance(market_info, dict):
+        base_info = market_info.get("info") if isinstance(market_info.get("info"), dict) else {}
+        contract_type = str(
+            market_info.get("contractType")
+            or (base_info.get("contractType") if isinstance(base_info, dict) else "")
+        ).lower()
+        if _is_truthy_flag(market_info.get("linear")) or "linear" in contract_type:
+            category = "linear"
+        elif _is_truthy_flag(market_info.get("inverse")) or "inverse" in contract_type:
+            category = "inverse"
+        else:
+            market_type = str(market_info.get("type") or "").lower()
+            if market_type in {"linear", "inverse"}:
+                category = market_type
+            elif market_type in {"swap", "future"}:
+                settle_coin = str(
+                    market_info.get("settle")
+                    or (base_info.get("settleCoin") if isinstance(base_info, dict) else "")
+                    or (base_info.get("settle") if isinstance(base_info, dict) else "")
+                ).upper()
+                quote_coin = str(market_info.get("quote") or "").upper()
+                if settle_coin and quote_coin:
+                    category = "linear" if settle_coin == quote_coin else "inverse"
+                else:
+                    category = "linear" if market_type == "swap" else None
+    if not category and ":" in symbol:
+        category = "linear"
+    return category
+
+
 def _build_tg_message_link(chat_id: str, message_id: int | None) -> Optional[str]:
     if not chat_id or not message_id:
         return None
@@ -4268,6 +4344,8 @@ def _collect_recent_closed_pnl(
     since_ms = int(window_start.timestamp() * 1000)
     until_ms = int(window_end.timestamp() * 1000) if window_end else None
     markets_available = set(getattr(exchange, "markets", {}) or {})
+    exchange_id = getattr(exchange, "id", "") or ""
+    bybit_cache: dict[str, dict[str, str]] = {}
     total_pnl = 0.0
     fill_count = 0
     seen_order_ids: set[str] = set()
@@ -4281,8 +4359,31 @@ def _collect_recent_closed_pnl(
         normalized_symbols.append(sym)
     # Prefer closed orders first
     for symbol in normalized_symbols:
+        params = {}
+        if exchange_id.lower() == "bybit":
+            params = bybit_cache.get(symbol, {})
+            if not params:
+                market_info = None
+                try:
+                    market_info = exchange.market(symbol)
+                except Exception:
+                    market_info = None
+                category = _infer_market_category(symbol, market_info)
+                settle_coin = ""
+                if isinstance(market_info, dict):
+                    settle_coin = str(
+                        market_info.get("settle")
+                        or ((market_info.get("info") or {}).get("settleCoin") if isinstance(market_info.get("info"), dict) else "")
+                        or ((market_info.get("info") or {}).get("settle") if isinstance(market_info.get("info"), dict) else "")
+                    )
+                params = {}
+                if category:
+                    params["category"] = category
+                if settle_coin:
+                    params["settleCoin"] = settle_coin.upper()
+                bybit_cache[symbol] = params
         try:
-            orders = exchange.fetch_closed_orders(symbol, since=since_ms, limit=limit_per_symbol)
+            orders = exchange.fetch_closed_orders(symbol, since=since_ms, limit=limit_per_symbol, params=params or {})
         except Exception as exc:
             warnings.append(f"[PnL] fetch_closed_orders failed for {symbol}: {exc}")
             continue
@@ -4335,8 +4436,31 @@ def _collect_recent_closed_pnl(
     # Fallback to trade history if orders did not expose realised PnL
     seen_trade_ids: set[str] = set()
     for symbol in normalized_symbols:
+        params = {}
+        if exchange_id.lower() == "bybit":
+            params = bybit_cache.get(symbol, {})
+            if not params:
+                market_info = None
+                try:
+                    market_info = exchange.market(symbol)
+                except Exception:
+                    market_info = None
+                category = _infer_market_category(symbol, market_info)
+                settle_coin = ""
+                if isinstance(market_info, dict):
+                    settle_coin = str(
+                        market_info.get("settle")
+                        or ((market_info.get("info") or {}).get("settleCoin") if isinstance(market_info.get("info"), dict) else "")
+                        or ((market_info.get("info") or {}).get("settle") if isinstance(market_info.get("info"), dict) else "")
+                    )
+                params = {}
+                if category:
+                    params["category"] = category
+                if settle_coin:
+                    params["settleCoin"] = settle_coin.upper()
+                bybit_cache[symbol] = params
         try:
-            trades = exchange.fetch_my_trades(symbol, since=since_ms, limit=limit_per_symbol)
+            trades = exchange.fetch_my_trades(symbol, since=since_ms, limit=limit_per_symbol, params=params or {})
         except Exception as exc:
             warnings.append(f"[PnL] fetch_my_trades failed for {symbol}: {exc}")
             continue
@@ -5766,18 +5890,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         market_info = exchange.market(exchange_symbol)
     except Exception:
         market_info = None
-    position_category = None
-    if isinstance(market_info, dict):
-        if _is_truthy_flag(market_info.get("linear")):
-            position_category = "linear"
-        elif _is_truthy_flag(market_info.get("inverse")):
-            position_category = "inverse"
-        else:
-            market_type = str(market_info.get("type") or "").lower()
-            if market_type in {"swap", "future", "linear", "inverse"}:
-                position_category = market_type
-    if position_category is None and ":" in exchange_symbol:
-        position_category = "linear"
+    position_category = _infer_market_category(exchange_symbol, market_info)
 
     created_log_parts: list[str] = []
     try:

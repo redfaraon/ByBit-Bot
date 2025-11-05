@@ -10,4 +10,5 @@ runtime_status.json
 changelog_state.json
 fallback_history.json
 results_state.json
+release_state.json
 assets/

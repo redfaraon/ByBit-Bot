@@ -1,5 +1,9 @@
 Changelog (newest first)
 
+11.5
+- Release topic now de-duplicates announcements, keeping a single message per new version or commit by persisting the last broadcast in `release_state.json`.
+- Added groundwork for multi-tenant support by planning secure API separation and optional per-user runtimes.
+
 11.4
 - Hardened position protection so short positions always regain take-profit coverage, using `set_trading_stop` fallbacks and trailing-stop retries when limits are too small.
 - Unified Trading status now reports only today's (UTC) Unified↔Funding transfers and hides direct Funding account activity entirely.
