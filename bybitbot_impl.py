@@ -18,7 +18,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
-import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib
+import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, textwrap
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Optional, Tuple, Any, Sequence
@@ -60,6 +60,7 @@ def _configure_state_paths() -> None:
     global RESULTS_STATE_FILE
     global RELEASE_STATE_FILE
     global BYBIT_CREDENTIALS_FILE
+    global SUPPORT_SANDBOX_ROOT
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
         STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else SCRIPT_DIR)
@@ -75,6 +76,11 @@ def _configure_state_paths() -> None:
     RESULTS_STATE_FILE = STATE_DIR / "results_state.json"
     RELEASE_STATE_FILE = STATE_DIR / "release_state.json"
     BYBIT_CREDENTIALS_FILE = STATE_DIR / "bybit_credentials.json"
+    SUPPORT_SANDBOX_ROOT = STATE_DIR / "support_sandboxes"
+    try:
+        SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 _configure_state_paths()
 CYCLE_FALLBACK_INTERVAL = 5
@@ -126,9 +132,14 @@ TELEGRAM_INPROGRESS_THREAD_ID: int | None = None
 TELEGRAM_RESULTS_THREAD_ID: int | None = None
 TELEGRAM_STATUS_THREAD_ID: int | None = None
 TELEGRAM_TRADE_THREAD_ID: int | None = None
+TELEGRAM_SUPPORT_THREAD_ID: int | None = None
 TELEGRAM_MESSAGE_PREFIX: str = ""
 USER_ID: str = "default"
 USER_LABEL: str = "redfaraon"
+AI_SUPPORT_MODEL: str = ""
+SUPPORT_MAX_CONTEXT_BYTES: int = 4096
+INPROGRESS_WIP_ENABLED: bool = False
+_LAST_INPROGRESS_MESSAGE: str | None = None
 
 
 def _load_bybit_credentials() -> tuple[str | None, str | None]:
@@ -2088,10 +2099,10 @@ def refresh_settings():
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
-    global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID
+    global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
-    global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX
+    global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
     _configure_state_paths()
     USER_ID = os.getenv("BYBITBOT_USER_ID") or USER_ID or "shared"
     USER_LABEL = os.getenv("BYBITBOT_USER_LABEL") or USER_LABEL or "redfaraon"
@@ -2190,6 +2201,11 @@ def refresh_settings():
     TELEGRAM_RESULTS_THREAD_ID = safe_int(results_topic_raw) if results_topic_raw else TELEGRAM_RESULTS_THREAD_ID
     status_topic_raw = os.getenv("TELEGRAM_STATUS_TOPIC_ID") or os.getenv("TELEGRAM_STATUS_THREAD_ID")
     TELEGRAM_STATUS_THREAD_ID = safe_int(status_topic_raw) if status_topic_raw else TELEGRAM_STATUS_THREAD_ID
+    support_topic_raw = os.getenv("TELEGRAM_SUPPORT_TOPIC_ID") or os.getenv("TELEGRAM_SUPPORT_THREAD_ID")
+    if support_topic_raw:
+        TELEGRAM_SUPPORT_THREAD_ID = safe_int(support_topic_raw)
+    elif TELEGRAM_SUPPORT_THREAD_ID is None:
+        TELEGRAM_SUPPORT_THREAD_ID = 6
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
@@ -2249,6 +2265,18 @@ def refresh_settings():
         AI_MODEL_THRESHOLD = 5
     AI_MODEL_THRESHOLD = max(0, AI_MODEL_THRESHOLD)
     AI_MODEL = AI_MODEL_PRIMARY or AI_MODEL_CHEAP or "gpt-4.1-mini"
+    ai_support_model_env = os.getenv("AI_SUPPORT_MODEL")
+    if isinstance(ai_support_model_env, str) and ai_support_model_env.strip():
+        AI_SUPPORT_MODEL = ai_support_model_env.strip()
+    elif not AI_SUPPORT_MODEL:
+        AI_SUPPORT_MODEL = AI_MODEL
+    context_bytes_env = os.getenv("AI_SUPPORT_CONTEXT_BYTES")
+    if context_bytes_env:
+        try:
+            SUPPORT_MAX_CONTEXT_BYTES = max(1024, min(20000, int(str(context_bytes_env).strip())))
+        except (TypeError, ValueError):
+            pass
+    INPROGRESS_WIP_ENABLED = str(os.getenv("INPROGRESS_WIP_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
     default_budget = globals().get("AI_TOKEN_BUDGET_CYCLE", 170_000)
     try:
         raw_budget = os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", str(default_budget))
@@ -2541,9 +2569,19 @@ if "TELEGRAM_RESULTS_THREAD_ID" not in globals():
     TELEGRAM_RESULTS_THREAD_ID = None
 if "TELEGRAM_STATUS_THREAD_ID" not in globals():
     TELEGRAM_STATUS_THREAD_ID = None
+if "TELEGRAM_SUPPORT_THREAD_ID" not in globals():
+    TELEGRAM_SUPPORT_THREAD_ID = None
 if "NEW_IDEAS_LIMIT" not in globals():
     NEW_IDEAS_LIMIT = 6
 NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
+if "AI_SUPPORT_MODEL" not in globals():
+    AI_SUPPORT_MODEL = ""
+if "SUPPORT_MAX_CONTEXT_BYTES" not in globals():
+    SUPPORT_MAX_CONTEXT_BYTES = 4096
+if "INPROGRESS_WIP_ENABLED" not in globals():
+    INPROGRESS_WIP_ENABLED = False
+if "_LAST_INPROGRESS_MESSAGE" not in globals():
+    _LAST_INPROGRESS_MESSAGE = None
 
 # --- AI token tracking ---
 AI_TOKEN_BUDGET_CYCLE = 170_000
@@ -2686,6 +2724,12 @@ def _send_git_notification(message: str):
 
 
 def _send_inprogress_notification(message: str):
+    global _LAST_INPROGRESS_MESSAGE
+    if not INPROGRESS_WIP_ENABLED:
+        return
+    if message == _LAST_INPROGRESS_MESSAGE:
+        return
+    _LAST_INPROGRESS_MESSAGE = message
     log(message, Fore.LIGHTBLACK_EX)
     thread_target = TELEGRAM_INPROGRESS_THREAD_ID if TELEGRAM_INPROGRESS_THREAD_ID is not None else TG_TOPIC_ID
     send_tg(message, thread_id=thread_target, no_log_forward=True)
@@ -3213,7 +3257,13 @@ def process_telegram_update(update: dict) -> None:
         return
     entities = message.get("entities") or []
     is_command = text.startswith("/") or any((isinstance(ent, dict) and ent.get("type") == "bot_command") for ent in entities)
+    thread_id = message.get("message_thread_id")
     if not is_command:
+        if (
+            TELEGRAM_SUPPORT_THREAD_ID is not None
+            and thread_id == TELEGRAM_SUPPORT_THREAD_ID
+        ):
+            handle_support_message(chat_id, text, thread_id=thread_id, message=message)
         return
     thread_id = message.get("message_thread_id")
     handle_telegram_command(chat_id, text, thread_id=thread_id)
@@ -3291,19 +3341,201 @@ def _build_help_message() -> str:
     return "\n".join(lines)
 
 
+def _load_support_context_snippet() -> str:
+    if SUPPORT_MAX_CONTEXT_BYTES <= 0:
+        return ""
+    targets = [
+        SCRIPT_DIR / "README.md",
+        SCRIPT_DIR / "bybitbot_impl.py",
+        SCRIPT_DIR / "bybitbot.py",
+    ]
+    remaining = SUPPORT_MAX_CONTEXT_BYTES
+    chunks: list[str] = []
+    for path in targets:
+        if remaining <= 0:
+            break
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if not raw:
+            continue
+        snippet = raw[:remaining]
+        remaining -= len(snippet)
+        chunks.append(f"### {path.name}\n{snippet}")
+    return "\n\n".join(chunks)
+
+
+def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: Optional[int]) -> None:
+    question = text.strip()
+    if not question:
+        return
+    if not AI_KEY:
+        send_tg(
+            "⚠️ Не могу ответить автоматически: отсутствует OpenAI ключ.",
+            thread_id=thread_id,
+            reply_to_message_id=reply_to,
+        )
+        return
+    support_model = AI_SUPPORT_MODEL or AI_MODEL
+    context_blob = _load_support_context_snippet()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — технический помощник по торговому боту ByBit. "
+                "Отвечай кратко на русском языке, опираясь на предоставленный фрагмент кода и документацию. "
+                "Если информации недостаточно, скажи, что нужно уточнение."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Контекст:\n{context_blob}\n\nВопрос: {question}",
+        },
+    ]
+    token_estimate = estimate_tokens(messages, support_model)
+    if not _ensure_token_budget(token_estimate, support_model, "support reply"):
+        send_tg(
+            "⚠️ Лимит токенов достигнут, не могу ответить автоматически прямо сейчас.",
+            thread_id=thread_id,
+            reply_to_message_id=reply_to,
+        )
+        return
+    _log_ai_request(support_model, token_estimate, "support reply")
+    client = OpenAI(api_key=AI_KEY, timeout=20)
+    try:
+        response = client.chat.completions.create(
+            model=support_model,
+            messages=messages,
+            temperature=0.4,
+        )
+    except Exception as exc:
+        log(f"[WARN] Support reply failed: {exc}", Fore.YELLOW)
+        send_tg(
+            "⚠️ Не удалось получить ответ от модели, перешлите вопрос вручную.",
+            thread_id=thread_id,
+            reply_to_message_id=reply_to,
+        )
+        return
+    answer = (response.choices[0].message.content or "").strip()
+    if not answer:
+        answer = "⚠️ Модель не дала ответа. Нужна дополнительная информация."
+    _register_ai_usage(support_model, getattr(response, "usage", None), "support reply")
+    send_tg(answer, thread_id=thread_id, reply_to_message_id=reply_to)
+
+
+def _prepare_support_sandbox(request_text: str) -> tuple[Path | None, str]:
+    if SUPPORT_SANDBOX_ROOT is None:
+        return None, "support sandbox directory unavailable"
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^a-z0-9]+", "-", request_text.lower()).strip("-")[:24] or "request"
+    sandbox_dir = SUPPORT_SANDBOX_ROOT / f"{timestamp}_{slug}"
+    ignore = shutil.ignore_patterns(
+        ".git",
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        "*.log",
+        "support_sandboxes",
+    )
+    try:
+        shutil.copytree(REPO_ROOT, sandbox_dir, ignore=ignore)
+    except Exception as exc:
+        log(f"[WARN] Support sandbox copy failed: {exc}", Fore.YELLOW)
+        return None, f"copy failed: {exc}"
+    env_path = sandbox_dir / ".env"
+    try:
+        env_path.write_text(
+            "BYBIT_API_KEY=demo\nBYBIT_API_SECRET=demo\nSUPPORT_SANDBOX=1\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log(f"[WARN] Support sandbox env write failed: {exc}", Fore.YELLOW)
+    try:
+        request_file = sandbox_dir / "SUPPORT_REQUEST.txt"
+        request_file.write_text(
+            f"Original request:\n{textwrap.dedent(request_text).strip()}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log(f"[WARN] Support sandbox note write failed: {exc}", Fore.YELLOW)
+    sim_output = ""
+    simulation_log = sandbox_dir / "simulation.log"
+    try:
+        result = subprocess.run(
+            [sys.executable, "bybitbot.py", "--list-users"],
+            cwd=sandbox_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        sim_output = (result.stdout or "").strip()
+        simulation_log.write_text(
+            (result.stdout or "") + ("\n" + (result.stderr or "") if result.stderr else ""),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        sim_output = f"simulation failed: {exc}"
+        try:
+            simulation_log.write_text(sim_output, encoding="utf-8")
+        except Exception:
+            pass
+    return sandbox_dir, sim_output
+
+
+def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int], message: dict) -> None:
+    content = (text or "").strip()
+    if not content:
+        return
+    lower = content.lower()
+    words_wish = ("хочу", "нужно", "сделай", "добавь", "улучши", "пусть", "надо", "please", "feature")
+    is_question = "?" in content or lower.startswith(("почему", "как", "что", "когда", "где"))
+    is_wish = any(trigger in lower for trigger in words_wish) or not is_question
+    reply_to = message.get("message_id") if isinstance(message.get("message_id"), int) else None
+    if is_question and not is_wish:
+        _handle_support_question(content, thread_id=thread_id, reply_to=reply_to)
+        return
+    sandbox_dir, sim_excerpt = _prepare_support_sandbox(content)
+    if sandbox_dir is None:
+        send_tg(
+            f"⚠️ Не удалось подготовить тестовое окружение: {sim_excerpt}",
+            thread_id=thread_id,
+            reply_to_message_id=reply_to,
+        )
+        return
+    path_display = str(sandbox_dir).replace("`", "'")
+    summary_lines = [
+        "🧪 Подготовлена песочница для проверки пожелания.",
+        f"Каталог: `{path_display}`",
+    ]
+    if sim_excerpt:
+        summary_lines.append(f"Симуляция: {sim_excerpt[:200]}")
+    send_tg(
+        summary_lines,
+        thread_id=thread_id,
+        reply_to_message_id=reply_to,
+        no_prefix=True,
+        parse_mode="Markdown",
+    )
+
+
 def _format_positions_message(limit: int = 10) -> str:
     positions = LATEST_STATUS.get("positions") or []
     if not positions:
         return "Открытых позиций нет."
     lines = ["Открытые позиции:"]
+    total_unrealized = 0.0
     for pos in positions[:limit]:
         entry_price = pos.get("entry")
         entry_txt = f" @ {entry_price:.4f}" if entry_price and math.isfinite(entry_price) else ""
+        unreal_val = safe_float(pos.get("unrealized", 0.0)) or 0.0
+        total_unrealized += unreal_val
         lines.append(
-            f"{pos.get('symbol')} — {pos.get('side')} {pos.get('amount'):.4f}{entry_txt} (PnL {pos.get('unrealized', 0.0):+.2f} USDT)"
+            f"{pos.get('symbol')} — {pos.get('side')} {pos.get('amount'):.4f}{entry_txt} (PnL {unreal_val:+.2f} USDT)"
         )
     if len(positions) > limit:
         lines.append(f"… ещё {len(positions) - limit}")
+    lines.append(f"Σ PnL: {total_unrealized:+.2f} USDT")
     return "\n".join(lines)
 
 
@@ -5758,6 +5990,7 @@ def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
 
 
 def _sync_with_remote() -> None:
+    global _LAST_INPROGRESS_MESSAGE
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
         return
@@ -5783,12 +6016,15 @@ def _sync_with_remote() -> None:
             preview = "\n".join(f"- {line}" for line in preview_lines) if preview_lines else "- изменения без подробностей"
             if len(lines) > len(preview_lines):
                 preview += f"\n… и ещё {len(lines) - len(preview_lines)} файлов"
-            _send_inprogress_notification(f"[WIP] Есть незакоммиченные изменения:\n{preview}")
+            if INPROGRESS_WIP_ENABLED:
+                _send_inprogress_notification(f"[WIP] Есть незакоммиченные изменения:\n{preview}")
         _LAST_WORKTREE_STATE_DIRTY = True
         _LAST_WORKTREE_STATE_HASH = current_hash
     else:
         if _LAST_WORKTREE_STATE_DIRTY:
-            _send_inprogress_notification("[WIP] Рабочее дерево очищено.")
+            if INPROGRESS_WIP_ENABLED:
+                _send_inprogress_notification("[WIP] Рабочее дерево очищено.")
+            _LAST_INPROGRESS_MESSAGE = None
         _LAST_WORKTREE_STATE_DIRTY = False
         _LAST_WORKTREE_STATE_HASH = ""
     try:
@@ -6002,6 +6238,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     df_calc = df_primary.copy() if isinstance(df_primary, pd.DataFrame) and not df_primary.empty else None
     if df_calc is None:
+        log(f"[WARN] {symbol}: пропуск обновления защиты — нет актуальных свечей для расчёта", Fore.LIGHTBLACK_EX)
         return open_orders or []
     if "atr" not in df_calc.columns:
         try:
@@ -9335,6 +9572,7 @@ def run_cycle():
     try:
         if positions_summary:
             status_lines = ["📈 Открытые позиции:"]
+            total_unrealized = 0.0
             for pos in positions_summary[:20]:
                 entry_val = pos.get("entry")
                 entry_txt = ""
@@ -9342,12 +9580,14 @@ def run_cycle():
                     entry_txt = f" @ {entry_val:.4f}"
                 amount_val = pos.get("amount")
                 amount_txt = f"{amount_val:.4f}" if amount_val is not None and math.isfinite(amount_val) else "?"
-                unreal_txt = pos.get("unrealized", 0.0)
+                unreal_val = safe_float(pos.get("unrealized", 0.0)) or 0.0
+                total_unrealized += unreal_val
                 status_lines.append(
-                    f"- {pos.get('symbol')} {pos.get('side')} {amount_txt}{entry_txt} (PnL {unreal_txt:+.2f} USDT)"
+                    f"- {pos.get('symbol')} {pos.get('side')} {amount_txt}{entry_txt} (PnL {unreal_val:+.2f} USDT)"
                 )
             if len(positions_summary) > 20:
                 status_lines.append(f"… ещё {len(positions_summary) - 20} позиций")
+            status_lines.append(f"Σ PnL: {total_unrealized:+.2f} USDT")
         else:
             status_lines = ["📈 Открытых позиций нет."]
         cash_flows = fetch_unified_cash_flows(ex, limit=20)
