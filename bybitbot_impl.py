@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# Version: 11.6
+# Version: 11.7
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -43,7 +43,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "11.6"
+BOT_VERSION = "11.7"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -5921,6 +5921,17 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     except Exception:
         market_info = None
     position_category = _infer_market_category(exchange_symbol, market_info)
+    min_amount = None
+    min_notional = None
+    if isinstance(market_info, dict):
+        limits = market_info.get("limits")
+        if isinstance(limits, dict):
+            amount_limits = limits.get("amount")
+            if isinstance(amount_limits, dict):
+                min_amount = safe_float(amount_limits.get("min"))
+            notional_limits = limits.get("cost")
+            if isinstance(notional_limits, dict):
+                min_notional = safe_float(notional_limits.get("min"))
 
     created_log_parts: list[str] = []
     try:
@@ -5977,6 +5988,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     ratio_total = sum(ratio for ratio, _ in filtered_scheme) or 1.0
     remaining_qty = qty
     take_created: list[str] = []
+    min_qty_violation = False
+    min_notional_violation = False
+    take_limit_errors: list[str] = []
     for idx, (ratio_val, multiplier_val) in enumerate(filtered_scheme):
         share = ratio_val / ratio_total if ratio_total else 0.0
         target_qty = qty * share if idx < len(filtered_scheme) - 1 else remaining_qty
@@ -5989,6 +6003,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             target_qty_precise = float(round(target_qty, 8))
         if target_qty_precise <= 0:
             continue
+        if min_amount and target_qty_precise + 1e-12 < min_amount:
+            min_qty_violation = True
+            continue
         if explicit_take is not None and math.isfinite(explicit_take):
             if idx == 0:
                 tp_target_price = explicit_take
@@ -6000,6 +6017,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             continue
         layer_notional = target_qty_precise * tp_target_price
         if layer_notional < MIN_NOTIONAL_USDT * 0.5:
+            min_notional_violation = True
             continue
         tp_params = dict(base_params)
         tp_params["takeProfit"] = tp_target_price
@@ -6027,6 +6045,36 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if not take_orders_success and take_price is not None and math.isfinite(take_price) and take_price > 0:
         fallback_take_price = float(take_price)
 
+    fallback_limit_success = False
+    if not take_orders_success and fallback_take_price:
+        try:
+            fallback_qty_precise = float(exchange.amount_to_precision(exchange_symbol, qty))
+        except Exception:
+            fallback_qty_precise = float(round(qty, 8))
+        if fallback_qty_precise <= 0:
+            fallback_qty_precise = qty
+        if min_amount and fallback_qty_precise + 1e-12 < min_amount:
+            min_qty_violation = True
+        else:
+            fallback_params = dict(base_params)
+            fallback_params["takeProfit"] = fallback_take_price
+            fallback_params.setdefault("timeInForce", "GTC")
+            try:
+                exchange.create_order(
+                    exchange_symbol,
+                    "limit",
+                    protection_side,
+                    fallback_qty_precise,
+                    fallback_take_price,
+                    fallback_params,
+                )
+            except Exception as exc:
+                take_limit_errors.append(str(exc))
+            else:
+                created_log_parts.append(f"takeProfit {fallback_qty_precise:.4f} @ {fallback_take_price:.2f}")
+                take_orders_success = True
+                fallback_limit_success = True
+
     trailing_amount = abs(trailing_offset) if trailing_offset is not None else None
     trailing_set = False
     take_set_via_trading_stop = False
@@ -6040,12 +6088,14 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 "category": position_category,
                 "side": "Sell" if is_long else "Buy",
             }
+            trading_stop_params["symbol"] = exchange_symbol
             if position_idx is not None:
                 trading_stop_params["positionIdx"] = position_idx
             if reference_price and math.isfinite(reference_price):
                 trading_stop_params["triggerPrice"] = reference_price
             if trailing_amount:
                 trading_stop_params["trailingStop"] = trailing_amount
+                trading_stop_params["trailingAmount"] = trailing_amount
             if fallback_take_price:
                 trading_stop_params["takeProfit"] = fallback_take_price
             try:
@@ -6056,6 +6106,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 if fallback_take_price:
                     created_log_parts.append(f"takeProfit set_trading_stop @ {fallback_take_price:.2f}")
                     take_set_via_trading_stop = True
+                    take_orders_success = True
             except Exception as exc:
                 if trailing_amount:
                     trailing_errors.append(str(exc))
@@ -6080,6 +6131,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 fallback_trailing_params["category"] = position_category or "linear"
                 fallback_trailing_params["closeOnTrigger"] = True
                 fallback_trailing_params["trailingAmount"] = trailing_amount
+                fallback_trailing_params["trailingStop"] = trailing_amount
                 fallback_trailing_params["side"] = protection_side.upper()
                 if reference_price and math.isfinite(reference_price):
                     fallback_trailing_params.setdefault("triggerPrice", reference_price)
@@ -6100,16 +6152,17 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
 
     if not take_orders_success:
-        if take_set_via_trading_stop:
-            take_orders_success = True
-        elif fallback_take_price:
-            if take_trading_stop_errors:
-                details = "; ".join(take_trading_stop_errors)
-                log(f"[WARN] {symbol}: take-profit через set_trading_stop не установлен ({details})", Fore.YELLOW)
-            else:
-                log(f"[WARN] {symbol}: take-profit orders were not placed (scheme={filtered_scheme})", Fore.YELLOW)
-        else:
-            log(f"[WARN] {symbol}: take-profit orders were not placed (scheme={filtered_scheme})", Fore.YELLOW)
+        details_parts = []
+        if take_trading_stop_errors:
+            details_parts.append("; ".join(take_trading_stop_errors))
+        if take_limit_errors:
+            details_parts.append("; ".join(take_limit_errors))
+        if min_qty_violation:
+            details_parts.append("amount below min precision")
+        if min_notional_violation:
+            details_parts.append("notional below MIN_NOTIONAL_USDT")
+        details = "; ".join(details_parts) if details_parts else f"scheme={filtered_scheme}"
+        log(f"[WARN] {symbol}: take-profit orders were not placed ({details})", Fore.YELLOW)
 
     if created_log_parts:
         log(f"ℹ️ {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)

@@ -1,5 +1,9 @@
 Changelog (newest first)
 
+11.7
+- Force SOL (and other small-sized positions) to regain protection: fallback TP now places a full-quantity limit when partial layers fall below exchange precision, and `set_trading_stop`/trailing fallbacks carry both `trailingStop` and `trailingAmount` parameters.
+- Aggregated TP warnings now report why placement failed (min precision, notional, API errors) instead of silent skips.
+
 11.6
 - Introduced multi-user profiles with per-trader state, secrets, and Telegram prefixes; run `python bybitbot.py --user <id>` to launch an isolated session.
 - Added `users/users.example.json` and per-user secret files so traders supply their own Bybit API keys while OpenAI/Telegram tokens stay shared.
