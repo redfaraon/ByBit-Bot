@@ -194,6 +194,99 @@ def _mask_api_value(value: str) -> str:
         return value[0] + "*" * (len(value) - 1)
     return f"{value[:3]}***{value[-3:]}"
 
+
+def _mask_sensitive(value: str) -> str:
+    if not value:
+        return ""
+    stripped = value.strip()
+    if len(stripped) <= 6:
+        return stripped[0] + "*" * max(0, len(stripped) - 1)
+    return f"{stripped[:3]}***{stripped[-3:]}"
+
+
+def _load_users_config() -> dict[str, Any]:
+    if not USERS_CONFIG_FILE.exists():
+        return {"users": []}
+    try:
+        raw = USERS_CONFIG_FILE.read_text(encoding="utf-8")
+    except Exception as exc:
+        log(f"[USERS] Не удалось прочитать {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
+        return {"users": []}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log(f"[USERS] Некорректный JSON в {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
+        return {"users": []}
+    return data if isinstance(data, dict) else {"users": []}
+
+
+def _save_users_config(config: dict[str, Any]) -> None:
+    try:
+        USERS_DIR.mkdir(parents=True, exist_ok=True)
+        USERS_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"[USERS] Не удалось сохранить {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
+
+
+def _ensure_user_entry(user_id: str, label: str, *, state_dir: str, public_env_file: str) -> None:
+    config = _load_users_config()
+    users_list = config.setdefault("users", [])
+    if not isinstance(users_list, list):
+        users_list = []
+        config["users"] = users_list
+    entry = None
+    for existing in users_list:
+        if isinstance(existing, dict) and existing.get("id") == user_id:
+            entry = existing
+            break
+    rel_public_path = str(Path(public_env_file))
+    if entry is None:
+        entry = {
+            "id": user_id,
+            "label": label,
+            "enabled": True,
+            "state_dir": state_dir,
+            "env": {},
+            "env_files": [rel_public_path],
+        }
+        users_list.append(entry)
+    else:
+        entry["label"] = label
+        entry["enabled"] = True
+        entry["state_dir"] = state_dir
+        env_files = entry.get("env_files")
+        if not isinstance(env_files, list):
+            env_files = []
+        if rel_public_path not in env_files:
+            env_files.append(rel_public_path)
+        entry["env_files"] = env_files
+        env_overrides = entry.get("env")
+        if not isinstance(env_overrides, dict):
+            entry["env"] = {}
+    _save_users_config(config)
+
+
+def _write_user_secrets(user_id: str, api_key: str, api_secret: str) -> Path:
+    user_dir = USERS_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    secrets_path = user_dir / USERS_DEFAULT_SECRET
+    content = f"BYBIT_API_KEY={api_key}\nBYBIT_API_SECRET={api_secret}\n"
+    try:
+        secrets_path.write_text(content, encoding="utf-8")
+        try:
+            os.chmod(secrets_path, stat.S_IRUSR | stat.S_IWUSR)
+        except Exception:
+            pass
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось сохранить secrets.env: {exc}") from exc
+    public_env_path = user_dir / USERS_PUBLIC_ENV_FILE
+    if not public_env_path.exists():
+        try:
+            public_env_path.write_text("# Дополнительные настройки для пользователя\n", encoding="utf-8")
+        except Exception:
+            pass
+    return secrets_path
+
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
     "ETH/USDT:USDT",
@@ -2725,6 +2818,7 @@ _TELEGRAM_LONG_POLL_THREAD: threading.Thread | None = None
 _TELEGRAM_LONG_POLL_STOP: threading.Event | None = None
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
 LATEST_STATUS: dict[str, Any] = {}
+PENDING_USERBOT_CREATION: dict[int, dict[str, Any]] = {}
 _SCHEDULE_EVENT = threading.Event()
 _SCHEDULE_OVERRIDE_LOCK = threading.RLock()
 _SCHEDULE_OVERRIDE: dict[str, Any] | None = None
@@ -2951,7 +3045,6 @@ def send_tg(msg: str | Sequence[str], **extra):
             else:
                 log(f"⚠️ Telegram send failed after {TG_RETRY_ATTEMPTS} attempts: {last_error}", Fore.RED)
                 return last_message_id
-        return last_message_id
     finally:
         should_flush = False
         with _TG_LOCK:
@@ -2960,6 +3053,27 @@ def send_tg(msg: str | Sequence[str], **extra):
                 should_flush = True
         if should_flush:
             _flush_tg_log_buffer()
+    return last_message_id
+
+
+def _delete_tg_message(chat_id: int, message_id: int) -> bool:
+    if not TG_TOKEN or not chat_id or not message_id:
+        return False
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/deleteMessage",
+            json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+            },
+            timeout=5,
+        )
+        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        if isinstance(data, dict) and data.get("ok"):
+            return True
+    except Exception as exc:
+        log(f"[WARN] Failed to delete Telegram message {message_id} in {chat_id}: {exc}", Fore.YELLOW)
+    return False
 def _load_changelog_state() -> dict:
     try:
         raw = CHANGELOG_STATE_FILE.read_text(encoding="utf-8")
@@ -3290,6 +3404,8 @@ def process_telegram_update(update: dict) -> None:
                     handle_telegram_command(chat_id, data, thread_id=thread_id)
         return
     chat = message.get("chat") or {}
+    user_payload = message.get("from") or {}
+    from_user_id = safe_int(user_payload.get("id"))
     chat_id = chat.get("id")
     if not isinstance(chat_id, int):
         return
@@ -3303,18 +3419,19 @@ def process_telegram_update(update: dict) -> None:
     is_command = text.startswith("/") or any((isinstance(ent, dict) and ent.get("type") == "bot_command") for ent in entities)
     thread_id = message.get("message_thread_id")
     log(
-        f"[TG] update chat={chat_id} thread={thread_id} command={is_command} text={text[:64]!r}",
+        f"[TG] update chat={chat_id} thread={thread_id} from={from_user_id} command={is_command} text={text[:64]!r}",
         Fore.LIGHTBLACK_EX,
     )
     if not is_command:
+        if from_user_id is not None and _process_pending_userbot_message(from_user_id, chat_id, message):
+            return
         if (
             TELEGRAM_SUPPORT_THREAD_ID is not None
             and thread_id == TELEGRAM_SUPPORT_THREAD_ID
         ):
             handle_support_message(chat_id, text, thread_id=thread_id, message=message)
         return
-    thread_id = message.get("message_thread_id")
-    handle_telegram_command(chat_id, text, thread_id=thread_id)
+    handle_telegram_command(chat_id, text, thread_id=thread_id, user_id=from_user_id)
 
 
 class _TelegramWebhookHandler(BaseHTTPRequestHandler):
@@ -3978,13 +4095,10 @@ def _handle_schedule_command(args: list[str]) -> str:
 
 
 
-def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int] = None) -> None:
+def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int] = None, user_id: Optional[int] = None) -> None:
     if not text:
         return
     command_thread = TELEGRAM_COMMAND_THREAD_ID
-    if command_thread is not None and thread_id != command_thread:
-        log(f"[CMD] Игнорирую команду вне темы Commands (thread={thread_id})", Fore.LIGHTBLACK_EX)
-        return
     response_thread = thread_id if thread_id is not None else command_thread
     parts = text.strip().split()
     if not parts:
@@ -4020,6 +4134,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_tokens_command(args)
     elif command in {"bybitkey", "bybit"}:
         reply = _handle_bybit_key_command(args)
+    elif command == "adduser":
+        reply = _handle_add_user_command(args, user_id=user_id, origin_chat=chat_id, origin_thread=response_thread)
+        if reply is None:
+            return
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
     else:
@@ -10376,3 +10494,141 @@ def _handle_bybit_key_command(args: list[str]) -> str:
         f"✅ Ключи Bybit обновлены (apiKey {masked_key}, secret {masked_secret}). "
         "Перезапустите цикл или дождитесь следующего запуска, чтобы применить их."
     )
+
+
+def _handle_add_user_command(
+    args: list[str],
+    *,
+    user_id: Optional[int],
+    origin_chat: int,
+    origin_thread: Optional[int],
+) -> Optional[str]:
+    if user_id is None:
+        return (
+            "Для использования команды /adduser откройте личный чат с ботом и отправьте команду там "
+            "(это необходимо, чтобы ключи не попали в общий чат)."
+        )
+    if user_id in PENDING_USERBOT_CREATION:
+        return "Вы уже начали добавление юзер-бота. Завершите текущий процесс или отправьте /cancel в личном чате."
+    if not args:
+        return "Использование: /adduser <id> [метка]"
+    target_id = args[0].strip()
+    if not target_id or len(target_id) < 3 or not re.fullmatch(r"[a-zA-Z0-9_-]+", target_id):
+        return "ID пользователя должен содержать не менее 3 символов и состоять из букв, цифр, '-' или '_'."
+    label = " ".join(args[1:]).strip() or target_id
+    flow_state = {
+        "initiated_at": time.time(),
+        "origin_chat": origin_chat,
+        "origin_thread": origin_thread,
+        "target_id": target_id,
+        "label": label,
+        "stage": "await_api_key",
+        "api_key": None,
+        "api_secret": None,
+    }
+    dm_message = (
+        f"🧩 Создание юзер-бота `{target_id}` ({label}).\n"
+        "Отправьте API Key одной строкой. Сообщение будет удалено.\n"
+        "Для отмены напишите /cancel."
+    )
+    dm_msg_id = send_tg(
+        dm_message,
+        chat_id_override=user_id,
+        no_log_forward=True,
+        no_prefix=True,
+        parse_mode="Markdown",
+    )
+    if dm_msg_id is None:
+        return (
+            "Не удалось отправить личное сообщение. Убедитесь, что вы начали диалог с ботом (нажмите Start в личном чате), "
+            "и повторите /adduser."
+        )
+    PENDING_USERBOT_CREATION[user_id] = flow_state
+    return f"📬 Юзер-бот `{target_id}` — проверьте личные сообщения, чтобы передать ключи безопасно."
+def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
+    target_id = flow_state.get("target_id")
+    label = flow_state.get("label") or target_id
+    api_key = flow_state.get("api_key")
+    api_secret = flow_state.get("api_secret")
+    if not target_id or not api_key or not api_secret:
+        return False, "Недостаточно данных для создания профиля."
+    try:
+        _write_user_secrets(target_id, api_key, api_secret)
+    except Exception as exc:
+        return False, str(exc)
+    state_dir = flow_state.get("state_dir") or f"runtime/{target_id}"
+    public_env_rel = Path("users") / target_id / USERS_PUBLIC_ENV_FILE
+    try:
+        _ensure_user_entry(target_id, label, state_dir=state_dir, public_env_file=public_env_rel)
+    except Exception as exc:
+        return False, f"Не удалось обновить users.json: {exc}"
+    return True, "Профиль создан."
+
+
+def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: dict) -> bool:
+    flow_state = PENDING_USERBOT_CREATION.get(from_user_id)
+    if not flow_state:
+        return False
+    if chat_id != from_user_id:
+        return False
+    text = (message.get("text") or "").strip()
+    if not text:
+        return True
+    if text.startswith("/cancel"):
+        PENDING_USERBOT_CREATION.pop(from_user_id, None)
+        send_tg("🚫 Создание юзер-бота отменено.", chat_id_override=from_user_id, no_log_forward=True, no_prefix=True)
+        return True
+    message_id = message.get("message_id")
+    if isinstance(message_id, int):
+        _delete_tg_message(chat_id, message_id)
+    stage = flow_state.get("stage") or "await_api_key"
+    if stage == "await_api_key":
+        flow_state["api_key"] = text
+        flow_state["stage"] = "await_api_secret"
+        send_tg(
+            "🔑 API Key сохранён.\nТеперь отправьте *API Secret* (сообщение тоже будет удалено).",
+            chat_id_override=from_user_id,
+            no_log_forward=True,
+            no_prefix=True,
+            parse_mode="Markdown",
+        )
+        return True
+    if stage == "await_api_secret":
+        flow_state["api_secret"] = text
+        flow_state["stage"] = "finalizing"
+        success, detail = _finalize_userbot_profile(flow_state)
+        target_id = flow_state.get("target_id")
+        label = flow_state.get("label") or target_id
+        origin_thread = flow_state.get("origin_thread")
+        origin_chat = flow_state.get("origin_chat")
+        PENDING_USERBOT_CREATION.pop(from_user_id, None)
+        if success:
+            send_tg(
+                f"✅ Юзер-бот `{target_id}` создан.\nКлючи безопасно сохранены.",
+                chat_id_override=from_user_id,
+                no_log_forward=True,
+                no_prefix=True,
+                parse_mode="Markdown",
+            )
+            if origin_chat is not None:
+                summary = (
+                    f"✅ Пользователь `{target_id}` ({label}) добавлен.\n"
+                    f"API Key: {_mask_sensitive(flow_state.get('api_key', ''))}\n"
+                    f"API Secret: {_mask_sensitive(flow_state.get('api_secret', ''))}"
+                )
+                send_tg(
+                    summary,
+                    thread_id=origin_thread,
+                    chat_id_override=origin_chat,
+                    no_log_forward=True,
+                    parse_mode="Markdown",
+                )
+        else:
+            send_tg(
+                f"⚠️ Не удалось создать юзер-бота: {detail}",
+                chat_id_override=from_user_id,
+                no_log_forward=True,
+                no_prefix=True,
+            )
+        return True
+    return False
