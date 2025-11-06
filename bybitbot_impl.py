@@ -3302,6 +3302,10 @@ def process_telegram_update(update: dict) -> None:
     entities = message.get("entities") or []
     is_command = text.startswith("/") or any((isinstance(ent, dict) and ent.get("type") == "bot_command") for ent in entities)
     thread_id = message.get("message_thread_id")
+    log(
+        f"[TG] update chat={chat_id} thread={thread_id} command={is_command} text={text[:64]!r}",
+        Fore.LIGHTBLACK_EX,
+    )
     if not is_command:
         if (
             TELEGRAM_SUPPORT_THREAD_ID is not None
@@ -3435,6 +3439,27 @@ def _build_help_message() -> str:
     for entry in commands:
         lines.append(f"/{entry['command']} — {entry['description']}")
     return "\n".join(lines)
+
+
+def _build_start_keyboard() -> dict[str, Any]:
+    commands = TELEGRAM_COMMANDS_LIST or _default_command_payload()
+    buttons: list[list[dict[str, str]]] = []
+    row: list[dict[str, str]] = []
+    for entry in commands:
+        cmd = entry.get("command")
+        if not cmd:
+            continue
+        row.append({"text": f"/{cmd}"})
+        if len(row) >= 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return {
+        "keyboard": buttons or [[{"text": "/help"}, {"text": "/status"}]],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
 
 
 def _load_support_context_snippet() -> str:
@@ -3589,6 +3614,10 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     is_question = "?" in content or lower.startswith(("почему", "как", "что", "когда", "где"))
     is_wish = any(trigger in lower for trigger in words_wish) or not is_question
     reply_to = message.get("message_id") if isinstance(message.get("message_id"), int) else None
+    log(
+        f"[SUPPORT] chat={chat_id} thread={thread_id} question={is_question and not is_wish} text={content[:80]!r}",
+        Fore.LIGHTBLACK_EX,
+    )
     if is_question and not is_wish:
         send_tg(
             "🧠 Вопрос принят, формирую ответ…",
@@ -3965,7 +3994,17 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         command = command.split("@", 1)[0]
     command = command.lower()
     args = parts[1:]
-    if command in {"start", "help"}:
+    if command == "start":
+        reply = _build_help_message()
+        send_tg(
+            reply,
+            chat_id_override=chat_id,
+            thread_id=response_thread,
+            no_log_forward=True,
+            reply_markup=_build_start_keyboard(),
+        )
+        return
+    if command == "help":
         reply = _build_help_message()
     elif command == "status":
         reply = _format_status_message()
