@@ -7118,7 +7118,10 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 trailing_errors.append(str(exc))
     if trailing_amount and not trailing_set and trailing_errors:
         combined = "; ".join(trailing_errors)
-        log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
+        if "set_trading_stop not supported" in combined.lower():
+            log(f"ℹ️ {symbol}: биржа не поддерживает трейлинг-стоп (оставляем SL/TP).", Fore.LIGHTBLACK_EX)
+        else:
+            log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
 
     forced_actions: list[str] = []
     forced_errors: list[str] = []
@@ -11075,6 +11078,25 @@ def _handle_sandbox_command(args: list[str], *, user_id: Optional[int]) -> Optio
 
 
 
+def _send_adduser_prompt(user_id: int, text: str, *, parse_mode: str | None = "Markdown") -> bool:
+    msg_id = send_tg(
+        text,
+        chat_id_override=user_id,
+        no_log_forward=True,
+        no_prefix=True,
+        parse_mode=parse_mode,
+    )
+    return msg_id is not None
+
+
+def _bot_id_exists(bot_id: str) -> bool:
+    config = _load_users_config()
+    for entry in config.get("users") or []:
+        if isinstance(entry, dict) and entry.get("id") == bot_id:
+            return True
+    return bot_id == "default"
+
+
 def _handle_add_user_command(
     args: list[str],
     *,
@@ -11089,42 +11111,64 @@ def _handle_add_user_command(
         )
     if user_id in PENDING_USERBOT_CREATION:
         return "Вы уже начали добавление юзер-бота. Завершите текущий процесс или отправьте /cancel в личном чате."
-    if not args:
-        return "Использование: /adduser <id> [метка]"
-    target_id = args[0].strip()
-    if not target_id or len(target_id) < 3 or not re.fullmatch(r"[a-zA-Z0-9_-]+", target_id):
-        return "ID пользователя должен содержать не менее 3 символов и состоять из букв, цифр, '-' или '_'."
-    label = " ".join(args[1:]).strip() or target_id
     flow_state = {
         "initiated_at": time.time(),
         "origin_chat": origin_chat,
         "origin_thread": origin_thread,
-        "target_id": target_id,
-        "label": label,
-        "stage": "await_api_key",
+        "target_id": None,
+        "label": None,
+        "stage": "await_bot_id",
         "api_key": None,
         "api_secret": None,
         "owner_id": int(user_id),
+        "timezone": None,
+        "order_margin": None,
+        "risk_pct": None,
+        "leverage": None,
+        "min_notional": None,
+        "position_mode": None,
+        "max_positions": None,
+        "default_next_run": None,
+        "state_dir": None,
     }
-    dm_message = (
-        f"🧩 Создание юзер-бота `{target_id}` ({label}).\n"
-        "Отправьте API Key одной строкой. Сообщение будет удалено.\n"
-        "Для отмены напишите /cancel."
+    preset_bot_id = args[0].strip() if args else ""
+    preset_label = " ".join(args[1:]).strip() if len(args) > 1 else ""
+    if preset_bot_id:
+        if len(preset_bot_id) < 3 or not re.fullmatch(r"[a-zA-Z0-9_-]+", preset_bot_id):
+            return "ID пользователя должен содержать не менее 3 символов и состоять из букв, цифр, '-' или '_'."
+        if _bot_id_exists(preset_bot_id):
+            return f"Пользователь {preset_bot_id} уже существует. Выберите другой ID."
+        flow_state["target_id"] = preset_bot_id
+        flow_state["state_dir"] = str(Path("runtime") / preset_bot_id)
+        flow_state["stage"] = "await_label" if not preset_label else "await_api_key"
+        if preset_label:
+            flow_state["label"] = preset_label
+        else:
+            flow_state["label"] = preset_bot_id
+    dm_ready = _send_adduser_prompt(
+        user_id,
+        (
+            "🧩 Создание юзер-бота.\n"
+            "Ответьте на вопросы последовательно; сообщения с чувствительными данными будут удалены.\n"
+            "Для отмены отправьте /cancel.\n\n"
+            + (
+                "Введите ID бота (латиница/цифры, _ или -).\n"
+                if flow_state["stage"] == "await_bot_id"
+                else (
+                    f"ID `{preset_bot_id}` принят.\nВведите отображаемое имя бота (или оставьте пустым, чтобы использовать этот ID)."
+                    if flow_state["stage"] == "await_label"
+                    else "Введите API Key одной строкой. Сообщение будет удалено."
+                )
+            )
+        ),
     )
-    dm_msg_id = send_tg(
-        dm_message,
-        chat_id_override=user_id,
-        no_log_forward=True,
-        no_prefix=True,
-        parse_mode="Markdown",
-    )
-    if dm_msg_id is None:
+    if not dm_ready:
         return (
             "Не удалось отправить личное сообщение. Убедитесь, что вы начали диалог с ботом (нажмите Start в личном чате), "
             "и повторите /adduser."
         )
     PENDING_USERBOT_CREATION[user_id] = flow_state
-    return f"📬 Юзер-бот `{target_id}` — проверьте личные сообщения, чтобы передать ключи безопасно."
+    return "📬 Продолжение — в личных сообщениях."
 def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
     target_id = flow_state.get("target_id")
     label = flow_state.get("label") or target_id
@@ -11148,6 +11192,18 @@ def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
         )
     except Exception as exc:
         return False, f"Не удалось обновить users.json: {exc}"
+    env_updates = {
+        "LOG_TIMEZONE": flow_state.get("timezone") or "UTC",
+        "ORDER_MARGIN_UTILIZATION": f"{float(flow_state.get('order_margin') or 0.75):.6f}",
+        "RISK_PCT": f"{float(flow_state.get('risk_pct') or 0.005):.6f}",
+        "LEVERAGE": str(int(flow_state.get("leverage") or 1)),
+        "MIN_NOTIONAL_USDT": f"{float(flow_state.get('min_notional') or 0.0):.6f}",
+        "BYBIT_POSITION_MODE": (flow_state.get("position_mode") or "hedged"),
+        "MAX_OPEN_POSITIONS": str(int(flow_state.get("max_positions") or 4)),
+        "DEFAULT_NEXT_RUN_MINUTES": f"{float(flow_state.get('default_next_run') or DEFAULT_NEXT_RUN_MINUTES):.3f}",
+    }
+    public_env_abs = USERS_DIR / target_id / USERS_PUBLIC_ENV_FILE
+    _persist_env_file(public_env_abs, env_updates)
     return True, "Профиль создан."
 
 
@@ -11167,20 +11223,229 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
     message_id = message.get("message_id")
     if isinstance(message_id, int):
         _delete_tg_message(chat_id, message_id)
-    stage = flow_state.get("stage") or "await_api_key"
+    stage = flow_state.get("stage") or "await_bot_id"
+    target_id = flow_state.get("target_id")
+    if stage == "await_bot_id":
+        candidate = text.strip()
+        if len(candidate) < 3 or not re.fullmatch(r"[a-zA-Z0-9_-]+", candidate):
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ ID должен состоять из латинских букв, цифр, '_' или '-' и быть не короче 3 символов. Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if _bot_id_exists(candidate):
+            _send_adduser_prompt(
+                from_user_id,
+                f"❗ Бот `{candidate}` уже существует. Укажите другой ID.",
+                parse_mode="Markdown",
+            )
+            return True
+        flow_state["target_id"] = candidate
+        flow_state["state_dir"] = str(Path("runtime") / candidate)
+        flow_state["stage"] = "await_label"
+        prompt = (
+            f"ID `{candidate}` сохранён.\n"
+            "Введите отображаемое имя (метку) бота или оставьте поле пустым, чтобы использовать тот же ID."
+        )
+        _send_adduser_prompt(from_user_id, prompt, parse_mode="Markdown")
+        return True
+    if stage == "await_label":
+        label = text.strip() or (target_id or "bot")
+        flow_state["label"] = label
+        flow_state["stage"] = "await_api_key"
+        _send_adduser_prompt(
+            from_user_id,
+            "🔑 Теперь отправьте API Key одной строкой. Сообщение будет удалено.",
+        )
+        return True
     if stage == "await_api_key":
         flow_state["api_key"] = text
         flow_state["stage"] = "await_api_secret"
-        send_tg(
-            "🔑 API Key сохранён.\nТеперь отправьте *API Secret* (сообщение тоже будет удалено).",
-            chat_id_override=from_user_id,
-            no_log_forward=True,
-            no_prefix=True,
-            parse_mode="Markdown",
+        _send_adduser_prompt(
+            from_user_id,
+            "🔒 API Key сохранён.\nТеперь отправьте *API Secret* (сообщение тоже будет удалено).",
         )
         return True
     if stage == "await_api_secret":
         flow_state["api_secret"] = text
+        flow_state["stage"] = "await_timezone"
+        _send_adduser_prompt(
+            from_user_id,
+            "🌐 Укажите часовой пояс бота (например, `UTC+3`). Оставьте пустым для UTC.",
+        )
+        return True
+    if stage == "await_timezone":
+        timezone = text.strip() or "UTC"
+        flow_state["timezone"] = timezone
+        flow_state["stage"] = "await_order_margin"
+        _send_adduser_prompt(
+            from_user_id,
+            "💰 Максимальный процент использования депозита (ORDER_MARGIN_UTILIZATION).\n"
+            "Введите число от 0 до 1 (например, 0.75).",
+        )
+        return True
+    if stage == "await_order_margin":
+        try:
+            val = float(text.replace(",", "."))
+        except ValueError:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Введите число от 0 до 1 (например, 0.75). Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if val < 0 or val > 1:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Значение должно быть между 0 и 1. Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["order_margin"] = val
+        flow_state["stage"] = "await_risk_pct"
+        _send_adduser_prompt(
+            from_user_id,
+            "⚖️ Максимальный риск на сделку (RISK_PCT).\n"
+            "Введите долю от депозита (например, 0.005 для 0.5%).",
+        )
+        return True
+    if stage == "await_risk_pct":
+        try:
+            val = float(text.replace(",", "."))
+        except ValueError:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Введите число (например, 0.005). Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if val <= 0 or val > 1:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Значение должно быть > 0 и ≤ 1. Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["risk_pct"] = val
+        flow_state["stage"] = "await_leverage"
+        _send_adduser_prompt(
+            from_user_id,
+            "📈 Плечо (LEVERAGE). Введите целое число, например 5.",
+        )
+        return True
+    if stage == "await_leverage":
+        try:
+            leverage = int(float(text))
+        except ValueError:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Введите целое число (например, 5). Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if leverage <= 0 or leverage > 100:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Плечо должно быть в диапазоне 1–100.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["leverage"] = leverage
+        flow_state["stage"] = "await_min_notional"
+        _send_adduser_prompt(
+            from_user_id,
+            "🔢 Минимальный размер позиции (MIN_NOTIONAL_USDT). Введите число в USDT (может быть 0).",
+        )
+        return True
+    if stage == "await_min_notional":
+        try:
+            min_notional = float(text.replace(",", "."))
+        except ValueError:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Введите число (например, 5). Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if min_notional < 0:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Значение не может быть отрицательным.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["min_notional"] = min_notional
+        flow_state["stage"] = "await_position_mode"
+        _send_adduser_prompt(
+            from_user_id,
+            "🔀 Режим позиций (BYBIT_POSITION_MODE).\nВведите `hedged` (хедж) или `oneway`.",
+        )
+        return True
+    if stage == "await_position_mode":
+        mode = text.strip().lower()
+        if mode in {"hedge", "hedged", "dual", "dual_side"}:
+            normalized_mode = "hedged"
+        elif mode in {"oneway", "one_way", "single"}:
+            normalized_mode = "oneway"
+        elif not mode:
+            normalized_mode = "hedged"
+        else:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Допустимые значения: hedged или oneway. Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["position_mode"] = normalized_mode
+        flow_state["stage"] = "await_max_positions"
+        _send_adduser_prompt(
+            from_user_id,
+            "📊 Максимальное число открытых позиций (MAX_OPEN_POSITIONS). Введите целое число.",
+        )
+        return True
+    if stage == "await_max_positions":
+        try:
+            max_positions = int(float(text))
+        except ValueError:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Введите целое число (например, 4). Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if max_positions <= 0 or max_positions > 20:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Число позиций должно быть в диапазоне 1–20.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["max_positions"] = max_positions
+        flow_state["stage"] = "await_default_next_run"
+        _send_adduser_prompt(
+            from_user_id,
+            "⏱ Дефолтный интервал между циклами (DEFAULT_NEXT_RUN_MINUTES). Введите минуты (может быть дробным числом).",
+        )
+        return True
+    if stage == "await_default_next_run":
+        try:
+            default_run = float(text.replace(",", "."))
+        except ValueError:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Введите число (например, 45). Попробуйте ещё раз.",
+                parse_mode=None,
+            )
+            return True
+        if default_run < 0:
+            _send_adduser_prompt(
+                from_user_id,
+                "❗ Значение не может быть отрицательным.",
+                parse_mode=None,
+            )
+            return True
+        flow_state["default_next_run"] = default_run
         flow_state["stage"] = "finalizing"
         success, detail = _finalize_userbot_profile(flow_state)
         target_id = flow_state.get("target_id")
@@ -11188,13 +11453,25 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         origin_thread = flow_state.get("origin_thread")
         origin_chat = flow_state.get("origin_chat")
         PENDING_USERBOT_CREATION.pop(from_user_id, None)
+        _refresh_userbot_owners()
         if success:
+            config_preview = (
+                f"🛠 Параметры:\n"
+                f"- timezone: {flow_state.get('timezone') or 'UTC'}\n"
+                f"- margin: {flow_state.get('order_margin')}\n"
+                f"- risk_pct: {flow_state.get('risk_pct')}\n"
+                f"- leverage: {flow_state.get('leverage')}\n"
+                f"- min_notional: {flow_state.get('min_notional')}\n"
+                f"- position_mode: {flow_state.get('position_mode')}\n"
+                f"- max_positions: {flow_state.get('max_positions')}\n"
+                f"- default_next_run: {flow_state.get('default_next_run')}"
+            )
             send_tg(
-                f"✅ Юзер-бот `{target_id}` создан.\nКлючи безопасно сохранены.",
+                f"✅ Юзер-бот `{target_id}` создан.\nКлючи безопасно сохранены.\n{config_preview}",
                 chat_id_override=from_user_id,
                 no_log_forward=True,
                 no_prefix=True,
-                parse_mode="Markdown",
+                parse_mode=None,
             )
             if origin_chat is not None:
                 summary = (
