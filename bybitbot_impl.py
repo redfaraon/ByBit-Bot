@@ -44,7 +44,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "11.7"
+BOT_VERSION = "2025.11.06"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -514,6 +514,18 @@ def safe_int(val):
     except (ValueError, TypeError):
         return None
     return None
+
+
+def _normalize_order_side(side: str | None, amount: float | None = None) -> tuple[str, bool]:
+    normalized = (side or "").strip().lower()
+    autodetected = False
+    if normalized not in {"buy", "sell"}:
+        if amount is not None and math.isfinite(amount):
+            normalized = "buy" if amount >= 0 else "sell"
+        else:
+            normalized = "buy"
+        autodetected = True
+    return normalized, autodetected
 
 
 def get_current_branch_name() -> str | None:
@@ -1834,7 +1846,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     notional_pct = decision.get("notional_pct")
     log(f"{sym}: action={action} side={side} reason={reason}", Fore.LIGHTBLUE_EX)
     if notional_pct is not None:
-        log(f"{sym}: notional_pct={notional_pct:.3f}", Fore.LIGHTBLACK_EX)
+        log(f"{sym}: notional_pct={_format_notional_pct(notional_pct)}", Fore.LIGHTBLACK_EX)
     current_position = positions_map.get(sym)
     open_orders_symbol = open_orders_cache.get(sym)
     if open_orders_symbol is None:
@@ -2709,6 +2721,8 @@ _TELEGRAM_WEBHOOK_THREAD: threading.Thread | None = None
 _TELEGRAM_WEBHOOK_SERVER: ThreadingHTTPServer | None = None
 _TELEGRAM_COMMAND_SIGNATURE: tuple[tuple[str, str], ...] = ()
 _TELEGRAM_WEBHOOK_SIGNATURE: tuple[str, str | None] | None = None
+_TELEGRAM_LONG_POLL_THREAD: threading.Thread | None = None
+_TELEGRAM_LONG_POLL_STOP: threading.Event | None = None
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
 LATEST_STATUS: dict[str, Any] = {}
 _SCHEDULE_EVENT = threading.Event()
@@ -3005,12 +3019,12 @@ def _results_order_key(detail: dict[str, Any]) -> str:
 def _build_daily_pnl_percent_chart(
     history: Sequence[dict[str, Any]],
     *,
-    latest_point: tuple[datetime.datetime, float] | None = None,
+    latest_point: tuple[datetime.datetime, float, float | None] | tuple[datetime.datetime, float] | None = None,
     days: int = 7,
 ) -> tuple[str | None, list[tuple[datetime.date, float]]]:
     if not history and not latest_point:
         return None, []
-    entries: list[tuple[datetime.datetime, float]] = []
+    entries: list[tuple[datetime.datetime, float, float | None]] = []
     for entry in history:
         if not isinstance(entry, dict):
             continue
@@ -3031,33 +3045,63 @@ def _build_daily_pnl_percent_chart(
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=datetime.timezone.utc)
-        entries.append((ts, equity_float))
+        realized_val = entry.get("realized")
+        try:
+            realized_float = float(realized_val) if realized_val is not None else None
+        except (TypeError, ValueError):
+            realized_float = None
+        if realized_float is not None and not math.isfinite(realized_float):
+            realized_float = None
+        entries.append((ts, equity_float, realized_float))
     if latest_point:
-        ts_latest, equity_latest = latest_point
+        if len(latest_point) == 3:
+            ts_latest, equity_latest, realized_latest = latest_point
+        else:
+            ts_latest, equity_latest = latest_point  # type: ignore[misc]
+            realized_latest = None
         if isinstance(ts_latest, datetime.datetime) and math.isfinite(equity_latest):
             if ts_latest.tzinfo is None:
                 ts_latest = ts_latest.replace(tzinfo=datetime.timezone.utc)
-            entries.append((ts_latest, float(equity_latest)))
+            realized_final = None
+            if realized_latest is not None:
+                try:
+                    realized_val = float(realized_latest)
+                except (TypeError, ValueError):
+                    realized_val = None
+                else:
+                    realized_final = realized_val if math.isfinite(realized_val) else None
+            entries.append((ts_latest, float(equity_latest), realized_final))
     if len(entries) < 2:
         return None, []
     entries.sort(key=lambda item: item[0])
-    daily_closes: dict[datetime.date, tuple[datetime.datetime, float]] = {}
-    for ts, equity_val in entries:
+    daily_closes: dict[datetime.date, tuple[datetime.datetime, float, float | None]] = {}
+    for ts, equity_val, realized_val in entries:
         day_key = ts.date()
         prev = daily_closes.get(day_key)
         if prev is None or ts >= prev[0]:
-            daily_closes[day_key] = (ts, equity_val)
+            daily_closes[day_key] = (ts, equity_val, realized_val)
     sorted_days = sorted(daily_closes.keys())
     if len(sorted_days) < 2:
         return None, []
     changes: list[tuple[datetime.date, float]] = []
     prev_equity: float | None = None
+    prev_realized: float | None = None
     for day in sorted_days:
-        _, close_equity = daily_closes[day]
-        if prev_equity is not None and prev_equity > 0:
-            pct_change = ((close_equity - prev_equity) / prev_equity) * 100.0
-            changes.append((day, pct_change))
+        _, close_equity, close_realized = daily_closes[day]
+        if prev_equity is not None:
+            change_value: float | None = None
+            if prev_realized is not None and close_realized is not None:
+                change_value = close_realized - prev_realized
+            else:
+                change_value = close_equity - prev_equity
+            base_equity = prev_equity if prev_equity and math.isfinite(prev_equity) else None
+            if base_equity is None or abs(base_equity) < 1e-8:
+                base_equity = 1.0
+            if change_value is not None and math.isfinite(change_value):
+                pct_change = (change_value / base_equity) * 100.0
+                changes.append((day, pct_change))
         prev_equity = close_equity
+        prev_realized = close_realized if close_realized is not None and math.isfinite(close_realized) else prev_realized
     if not changes:
         return None, []
     tail = changes[-days:]
@@ -3333,6 +3377,58 @@ def start_telegram_webhook_server() -> None:
     thread.start()
 
 
+def start_telegram_long_polling() -> None:
+    global _TELEGRAM_LONG_POLL_THREAD, _TELEGRAM_LONG_POLL_STOP
+    if TELEGRAM_WEBHOOK_URL:
+        return
+    if _TELEGRAM_LONG_POLL_THREAD is not None:
+        return
+    if not TG_TOKEN:
+        return
+    stop_event = threading.Event()
+    _TELEGRAM_LONG_POLL_STOP = stop_event
+
+    def _poll_updates() -> None:
+        nonlocal stop_event
+        offset = 0
+        log("ℹ️ Telegram long polling started", Fore.LIGHTBLACK_EX)
+        while not stop_event.is_set():
+            try:
+                response = requests.get(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                    params={
+                        "timeout": 25,
+                        "offset": offset,
+                        "allowed_updates": ["message", "channel_post", "callback_query"],
+                    },
+                    timeout=30,
+                )
+                data = response.json()
+                if not isinstance(data, dict) or not data.get("ok"):
+                    raise RuntimeError(data)
+                updates = data.get("result") or []
+                for update in updates:
+                    try:
+                        offset = max(offset, int(update.get("update_id", 0)) + 1)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        process_telegram_update(update)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        log(f"[WARN] Telegram update processing error: {exc}", Fore.YELLOW)
+                if not updates:
+                    time.sleep(1.0)
+            except Exception as exc:  # pylint: disable=broad-except
+                if stop_event.is_set():
+                    break
+                log(f"[WARN] Telegram polling error: {exc}", Fore.YELLOW)
+                time.sleep(5.0)
+
+    thread = threading.Thread(target=_poll_updates, daemon=True)
+    _TELEGRAM_LONG_POLL_THREAD = thread
+    thread.start()
+
+
 def _build_help_message() -> str:
     commands = TELEGRAM_COMMANDS_LIST or _default_command_payload()
     lines = ["Доступные команды:"]
@@ -3425,6 +3521,7 @@ def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: O
 
 
 def _prepare_support_sandbox(request_text: str) -> tuple[Path | None, str]:
+    global SUPPORT_SANDBOX_ROOT
     if SUPPORT_SANDBOX_ROOT is None:
         return None, "support sandbox directory unavailable"
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -6677,6 +6774,18 @@ def _format_decimal(value: numbers.Real, precision: int = 6) -> str:
     return text
 
 
+def _format_notional_pct(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(numeric):
+        return str(value)
+    if 0.0 <= numeric <= 1.0:
+        return f"{numeric * 100:.1f}%"
+    return f"{numeric:.3f}"
+
+
 def _summarize_order_spec(order_dict: dict[str, Any] | None) -> str:
     if not isinstance(order_dict, dict):
         return str(order_dict)
@@ -6842,10 +6951,6 @@ def execute_extra_orders(
             params["reduceOnly"] = True
         elif "reduceOnly" in params:
             params["reduceOnly"] = bool(params["reduceOnly"])
-        side = (order.get("side") or "").lower()
-        if not side:
-            log(f"[WARN] Missing side in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
-            continue
         amount = compute_order_amount(order, current_position)
         if amount is None:
             log(f"[WARN] Unable to determine amount for extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
@@ -6857,6 +6962,16 @@ def execute_extra_orders(
             continue
         if amount <= 0:
             log(f"[WARN] Invalid amount in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+            continue
+        side_raw = order.get("side")
+        side, autodetected_side = _normalize_order_side(side_raw, amount)
+        if autodetected_side:
+            log(
+                f"[INFO] Normalized side for extra order #{idx} {symbol} to {side.upper()} (source={side_raw!r})",
+                Fore.LIGHTBLACK_EX,
+            )
+        if side not in {"buy", "sell"}:
+            log(f"[WARN] Missing valid side in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
         price = safe_float(order.get("price"))
         if price is not None and (not math.isfinite(price) or price <= 0):
@@ -7812,6 +7927,7 @@ def run_cycle():
     refresh_settings()
     configure_telegram_bot()
     start_telegram_webhook_server()
+    start_telegram_long_polling()
     _init_ai_cycle_usage()
     metadata_state = maybe_refresh_metadata()
     if isinstance(metadata_state, dict) and metadata_state.get("reload_required"):
@@ -8969,7 +9085,7 @@ def run_cycle():
             notional_pct_val = dec.get("notional_pct")
             if notional_pct_val is not None:
                 try:
-                    decision_meta_parts.append(f"notional_pct={float(notional_pct_val):.3f}")
+                    decision_meta_parts.append(f"notional_pct={_format_notional_pct(notional_pct_val)}")
                 except (TypeError, ValueError):
                     decision_meta_parts.append(f"notional_pct={notional_pct_val}")
             if symbol_leverage:
@@ -9937,9 +10053,9 @@ def run_cycle():
             else:
                 results_lines.append("PnL: данные недоступны.")
 
-            latest_equity_point: tuple[datetime.datetime, float] | None = None
+            latest_equity_point: tuple[datetime.datetime, float, float | None] | None = None
             if isinstance(equity_end, (int, float)) and math.isfinite(equity_end):
-                latest_equity_point = (now_utc, float(equity_end))
+                latest_equity_point = (now_utc, float(equity_end), float(realized_end) if isinstance(realized_end, (int, float)) and math.isfinite(realized_end) else None)
             daily_chart, daily_points = _build_daily_pnl_percent_chart(
                 history_entries,
                 latest_point=latest_equity_point,
@@ -10031,6 +10147,7 @@ def main():
     refresh_settings()
     configure_telegram_bot()
     start_telegram_webhook_server()
+    start_telegram_long_polling()
     while True:
         try:
             delay_minutes = run_cycle()
