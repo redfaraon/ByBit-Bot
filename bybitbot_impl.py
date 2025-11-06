@@ -3590,8 +3590,18 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     is_wish = any(trigger in lower for trigger in words_wish) or not is_question
     reply_to = message.get("message_id") if isinstance(message.get("message_id"), int) else None
     if is_question and not is_wish:
+        send_tg(
+            "🧠 Вопрос принят, формирую ответ…",
+            thread_id=thread_id,
+            reply_to_message_id=reply_to,
+        )
         _handle_support_question(content, thread_id=thread_id, reply_to=reply_to)
         return
+    send_tg(
+        "🧪 Получил пожелание, поднимаю тестовую песочницу…",
+        thread_id=thread_id,
+        reply_to_message_id=reply_to,
+    )
     sandbox_dir, sim_excerpt = _prepare_support_sandbox(content)
     if sandbox_dir is None:
         send_tg(
@@ -6924,16 +6934,15 @@ def execute_extra_orders(
         status_value = order.get("status")
         order_id_value = order.get("id")
         if status_value is not None and order_id_value:
-            reduce_flag = _is_truthy_flag(order.get("reduceOnly"))
-            order_type_lower = (order.get("type") or "").lower()
-            amount_val = safe_float(order.get("amount") or order.get("qty") or order.get("quantity"))
-            is_close_intent = reduce_flag and order_type_lower in {"market", "marketclose", "close", ""} and (amount_val is None or amount_val > 0)
-            if is_close_intent:
-                order = dict(order)
-                order.pop("status", None)
-                order.pop("id", None)
+            order = dict(order)
+            existing_oid = str(order_id_value)
+            success, err = cancel_order_by_id(exchange, symbol, existing_oid)
+            order.pop("status", None)
+            order.pop("id", None)
+            if success:
+                log(f"[INFO] Cancelled existing order {existing_oid} for {symbol} (AI replacement)", Fore.LIGHTBLUE_EX)
             else:
-                log(f"[INFO] Retaining existing order {order_id_value} for {symbol}; skipping extra placement.", Fore.LIGHTBLACK_EX)
+                log(f"[WARN] Failed to cancel existing order {existing_oid} for {symbol}: {err}", Fore.YELLOW)
                 continue
         raw_type = (
             order.get("type")
