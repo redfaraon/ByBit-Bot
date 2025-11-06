@@ -44,7 +44,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.06"
+BOT_VERSION = "2025.11.06.1"
 BOT_CHANGELOG = (
     "Changelog is now sourced from the latest git commits."
 )
@@ -151,6 +151,16 @@ USERS_DEFAULT_SECRET = "secrets.env"
 USERS_PUBLIC_ENV_FILE = "public.env"
 MAIN_OWNER_CHAT_ID = 775747028
 USERBOT_OWNERS: dict[str, int] = {}
+USERBOT_DEFAULTS: dict[str, Any] = {
+    "timezone": "UTC+3",
+    "order_margin": 0.75,
+    "risk_pct": 0.005,
+    "leverage": 9,
+    "min_notional": 0.1,
+    "position_mode": "oneway",
+    "max_positions": 3,
+    "default_next_run": 30.0,
+}
 
 
 def _load_bybit_credentials() -> tuple[str | None, str | None]:
@@ -2602,7 +2612,7 @@ def refresh_settings():
     except (TypeError, ValueError):
         ORDER_MARGIN_UTILIZATION = 0.95
     ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
-    MAX_NON_REDUCE_LIMITS_PER_SIDE = env_int("BYBITBOT_MAX_NON_REDUCE_LIMITS_PER_SIDE", 1)
+    MAX_NON_REDUCE_LIMITS_PER_SIDE = env_int("BYBITBOT_MAX_NON_REDUCE_LIMITS_PER_SIDE", 2)
     NON_REDUCE_PRICE_DECIMALS = env_int("BYBITBOT_NON_REDUCE_PRICE_DECIMALS", 4)
     TRADE_PLAN_MAX_ATTEMPTS = env_int("BYBITBOT_TRADE_PLAN_MAX_ATTEMPTS", 5)
     try:
@@ -2673,7 +2683,7 @@ if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
 if "MAX_NON_REDUCE_LIMITS_PER_SIDE" not in globals():
-    MAX_NON_REDUCE_LIMITS_PER_SIDE = 1
+    MAX_NON_REDUCE_LIMITS_PER_SIDE = 2
 if "NON_REDUCE_PRICE_DECIMALS" not in globals():
     NON_REDUCE_PRICE_DECIMALS = 4
 if "TRADE_PLAN_MAX_ATTEMPTS" not in globals():
@@ -3977,6 +3987,7 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
         "🧪 Получил пожелание, поднимаю тестовую песочницу…",
         thread_id=thread_id,
         reply_to_message_id=reply_to,
+        chat_id_override=chat_id,
     )
     sandbox_dir, sim_excerpt, sandbox_id = _prepare_support_sandbox(
         content,
@@ -4006,6 +4017,7 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
         reply_to_message_id=reply_to,
         no_prefix=True,
         parse_mode="Markdown",
+        chat_id_override=chat_id,
     )
 
 
@@ -6214,7 +6226,7 @@ def _canonical_decision_symbol(symbol: str | None) -> str | None:
 
 def _order_allows_increase(order: dict) -> bool:
     if not isinstance(order, dict):
-        return False
+        return True
     flags = ["allowIncrease", "allow_increase", "increase", "increasePosition", "increase_position", "scaleIn", "scale_in"]
     for key in flags:
         if _is_truthy_flag(order.get(key)):
@@ -6222,7 +6234,7 @@ def _order_allows_increase(order: dict) -> bool:
     intent = (order.get("intent") or order.get("action") or "").lower()
     if intent in {"increase", "scale_in", "add", "add_position"}:
         return True
-    return False
+    return True
 
 def _maybe_switch_model_after_usage() -> None:
     global AI_MODEL
@@ -11111,13 +11123,15 @@ def _handle_add_user_command(
         )
     if user_id in PENDING_USERBOT_CREATION:
         return "Вы уже начали добавление юзер-бота. Завершите текущий процесс или отправьте /cancel в личном чате."
+    target_id_default = str(user_id)
+    label_default = args[0].strip() if args else ""
     flow_state = {
         "initiated_at": time.time(),
         "origin_chat": origin_chat,
         "origin_thread": origin_thread,
-        "target_id": None,
-        "label": None,
-        "stage": "await_bot_id",
+        "target_id": target_id_default,
+        "label": label_default.strip() or target_id_default,
+        "stage": "await_label" if not label_default else "await_api_key",
         "api_key": None,
         "api_secret": None,
         "owner_id": int(user_id),
@@ -11129,39 +11143,23 @@ def _handle_add_user_command(
         "position_mode": None,
         "max_positions": None,
         "default_next_run": None,
-        "state_dir": None,
+        "state_dir": str(Path("runtime") / target_id_default),
     }
-    preset_bot_id = args[0].strip() if args else ""
-    preset_label = " ".join(args[1:]).strip() if len(args) > 1 else ""
-    if preset_bot_id:
-        if len(preset_bot_id) < 3 or not re.fullmatch(r"[a-zA-Z0-9_-]+", preset_bot_id):
-            return "ID пользователя должен содержать не менее 3 символов и состоять из букв, цифр, '-' или '_'."
-        if _bot_id_exists(preset_bot_id):
-            return f"Пользователь {preset_bot_id} уже существует. Выберите другой ID."
-        flow_state["target_id"] = preset_bot_id
-        flow_state["state_dir"] = str(Path("runtime") / preset_bot_id)
-        flow_state["stage"] = "await_label" if not preset_label else "await_api_key"
-        if preset_label:
-            flow_state["label"] = preset_label
-        else:
-            flow_state["label"] = preset_bot_id
-    dm_ready = _send_adduser_prompt(
-        user_id,
-        (
-            "🧩 Создание юзер-бота.\n"
-            "Ответьте на вопросы последовательно; сообщения с чувствительными данными будут удалены.\n"
-            "Для отмены отправьте /cancel.\n\n"
-            + (
-                "Введите ID бота (латиница/цифры, _ или -).\n"
-                if flow_state["stage"] == "await_bot_id"
-                else (
-                    f"ID `{preset_bot_id}` принят.\nВведите отображаемое имя бота (или оставьте пустым, чтобы использовать этот ID)."
-                    if flow_state["stage"] == "await_label"
-                    else "Введите API Key одной строкой. Сообщение будет удалено."
-                )
-            )
-        ),
+    label_prompt = (
+        f"ID бота будет `{target_id_default}`.\n"
+        "Введите отображаемое имя бота (или оставьте пустым, чтобы использовать тот же ID)."
     )
+    start_prompt = (
+        "🧩 Создание юзер-бота.\n"
+        "Ответьте на вопросы последовательно; сообщения с чувствительными данными будут удалены.\n"
+        "Для отмены отправьте /cancel.\n\n"
+        + (
+            label_prompt
+            if flow_state["stage"] == "await_label"
+            else "Введите API Key одной строкой. Сообщение будет удалено."
+        )
+    )
+    dm_ready = _send_adduser_prompt(user_id, start_prompt)
     if not dm_ready:
         return (
             "Не удалось отправить личное сообщение. Убедитесь, что вы начали диалог с ботом (нажмите Start в личном чате), "
@@ -11193,14 +11191,14 @@ def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Не удалось обновить users.json: {exc}"
     env_updates = {
-        "LOG_TIMEZONE": flow_state.get("timezone") or "UTC",
-        "ORDER_MARGIN_UTILIZATION": f"{float(flow_state.get('order_margin') or 0.75):.6f}",
-        "RISK_PCT": f"{float(flow_state.get('risk_pct') or 0.005):.6f}",
-        "LEVERAGE": str(int(flow_state.get("leverage") or 1)),
-        "MIN_NOTIONAL_USDT": f"{float(flow_state.get('min_notional') or 0.0):.6f}",
-        "BYBIT_POSITION_MODE": (flow_state.get("position_mode") or "hedged"),
-        "MAX_OPEN_POSITIONS": str(int(flow_state.get("max_positions") or 4)),
-        "DEFAULT_NEXT_RUN_MINUTES": f"{float(flow_state.get('default_next_run') or DEFAULT_NEXT_RUN_MINUTES):.3f}",
+        "LOG_TIMEZONE": flow_state.get("timezone") or USERBOT_DEFAULTS["timezone"],
+        "ORDER_MARGIN_UTILIZATION": f"{float(flow_state.get('order_margin') or USERBOT_DEFAULTS['order_margin']):.6f}",
+        "RISK_PCT": f"{float(flow_state.get('risk_pct') or USERBOT_DEFAULTS['risk_pct']):.6f}",
+        "LEVERAGE": str(int(flow_state.get("leverage") or USERBOT_DEFAULTS["leverage"])),
+        "MIN_NOTIONAL_USDT": f"{float(flow_state.get('min_notional') or USERBOT_DEFAULTS['min_notional']):.6f}",
+        "BYBIT_POSITION_MODE": (flow_state.get("position_mode") or USERBOT_DEFAULTS["position_mode"]),
+        "MAX_OPEN_POSITIONS": str(int(flow_state.get("max_positions") or USERBOT_DEFAULTS["max_positions"])),
+        "DEFAULT_NEXT_RUN_MINUTES": f"{float(flow_state.get('default_next_run') or USERBOT_DEFAULTS['default_next_run']):.3f}",
     }
     public_env_abs = USERS_DIR / target_id / USERS_PUBLIC_ENV_FILE
     _persist_env_file(public_env_abs, env_updates)
@@ -11223,33 +11221,8 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
     message_id = message.get("message_id")
     if isinstance(message_id, int):
         _delete_tg_message(chat_id, message_id)
-    stage = flow_state.get("stage") or "await_bot_id"
+    stage = flow_state.get("stage") or "await_label"
     target_id = flow_state.get("target_id")
-    if stage == "await_bot_id":
-        candidate = text.strip()
-        if len(candidate) < 3 or not re.fullmatch(r"[a-zA-Z0-9_-]+", candidate):
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ ID должен состоять из латинских букв, цифр, '_' или '-' и быть не короче 3 символов. Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
-        if _bot_id_exists(candidate):
-            _send_adduser_prompt(
-                from_user_id,
-                f"❗ Бот `{candidate}` уже существует. Укажите другой ID.",
-                parse_mode="Markdown",
-            )
-            return True
-        flow_state["target_id"] = candidate
-        flow_state["state_dir"] = str(Path("runtime") / candidate)
-        flow_state["stage"] = "await_label"
-        prompt = (
-            f"ID `{candidate}` сохранён.\n"
-            "Введите отображаемое имя (метку) бота или оставьте поле пустым, чтобы использовать тот же ID."
-        )
-        _send_adduser_prompt(from_user_id, prompt, parse_mode="Markdown")
-        return True
     if stage == "await_label":
         label = text.strip() or (target_id or "bot")
         flow_state["label"] = label
@@ -11276,29 +11249,33 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         )
         return True
     if stage == "await_timezone":
-        timezone = text.strip() or "UTC"
+        timezone = text.strip() or USERBOT_DEFAULTS["timezone"]
         flow_state["timezone"] = timezone
         flow_state["stage"] = "await_order_margin"
         _send_adduser_prompt(
             from_user_id,
-            "💰 Максимальный процент использования депозита (ORDER_MARGIN_UTILIZATION).\n"
-            "Введите число от 0 до 1 (например, 0.75).",
+            f"💰 Максимальный процент использования депозита (ORDER_MARGIN_UTILIZATION).\n"
+            f"Введите число от 0 до 1 (например, 0.75). По умолчанию {USERBOT_DEFAULTS['order_margin']}.",
         )
         return True
     if stage == "await_order_margin":
-        try:
-            val = float(text.replace(",", "."))
-        except ValueError:
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ Введите число от 0 до 1 (например, 0.75). Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
+        raw_text = text.strip()
+        if not raw_text:
+            val = USERBOT_DEFAULTS["order_margin"]
+        else:
+            try:
+                val = float(raw_text.replace(",", "."))
+            except ValueError:
+                _send_adduser_prompt(
+                    from_user_id,
+                    "❗ Введите число от 0 до 1 (например, 0.75). Попробуйте ещё раз.",
+                    parse_mode=None,
+                )
+                return True
         if val < 0 or val > 1:
             _send_adduser_prompt(
                 from_user_id,
-                "❗ Значение должно быть между 0 и 1. Попробуйте ещё раз.",
+                "❗ Введите число от 0 до 1 (например, 0.75). Попробуйте ещё раз.",
                 parse_mode=None,
             )
             return True
@@ -11306,24 +11283,28 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_risk_pct"
         _send_adduser_prompt(
             from_user_id,
-            "⚖️ Максимальный риск на сделку (RISK_PCT).\n"
-            "Введите долю от депозита (например, 0.005 для 0.5%).",
+            f"⚖️ Максимальный риск на сделку (RISK_PCT).\n"
+            f"Введите долю от депозита (например, 0.005 для 0.5%). По умолчанию {USERBOT_DEFAULTS['risk_pct']}.",
         )
         return True
     if stage == "await_risk_pct":
-        try:
-            val = float(text.replace(",", "."))
-        except ValueError:
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ Введите число (например, 0.005). Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
+        raw_text = text.strip()
+        if not raw_text:
+            val = USERBOT_DEFAULTS["risk_pct"]
+        else:
+            try:
+                val = float(raw_text.replace(",", "."))
+            except ValueError:
+                _send_adduser_prompt(
+                    from_user_id,
+                    "❗ Введите число (например, 0.005). Попробуйте ещё раз.",
+                    parse_mode=None,
+                )
+                return True
         if val <= 0 or val > 1:
             _send_adduser_prompt(
                 from_user_id,
-                "❗ Значение должно быть > 0 и ≤ 1. Попробуйте ещё раз.",
+                "❗ Введите число (например, 0.005). Попробуйте ещё раз.",
                 parse_mode=None,
             )
             return True
@@ -11331,23 +11312,27 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_leverage"
         _send_adduser_prompt(
             from_user_id,
-            "📈 Плечо (LEVERAGE). Введите целое число, например 5.",
+            f"📈 Плечо (LEVERAGE). Введите целое число, например 5. По умолчанию {USERBOT_DEFAULTS['leverage']}.",
         )
         return True
     if stage == "await_leverage":
-        try:
-            leverage = int(float(text))
-        except ValueError:
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ Введите целое число (например, 5). Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
+        raw_text = text.strip()
+        if not raw_text:
+            leverage = int(USERBOT_DEFAULTS["leverage"])
+        else:
+            try:
+                leverage = int(float(raw_text))
+            except ValueError:
+                _send_adduser_prompt(
+                    from_user_id,
+                    "❗ Введите целое число (например, 5). Попробуйте ещё раз.",
+                    parse_mode=None,
+                )
+                return True
         if leverage <= 0 or leverage > 100:
             _send_adduser_prompt(
                 from_user_id,
-                "❗ Плечо должно быть в диапазоне 1–100.",
+                "❗ Введите целое число (например, 5). Попробуйте ещё раз.",
                 parse_mode=None,
             )
             return True
@@ -11355,23 +11340,28 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_min_notional"
         _send_adduser_prompt(
             from_user_id,
-            "🔢 Минимальный размер позиции (MIN_NOTIONAL_USDT). Введите число в USDT (может быть 0).",
+            f"🔢 Минимальный размер позиции (MIN_NOTIONAL_USDT). Введите число в USDT (может быть 0). По умолчанию "
+            f"{USERBOT_DEFAULTS['min_notional']}.",
         )
         return True
     if stage == "await_min_notional":
-        try:
-            min_notional = float(text.replace(",", "."))
-        except ValueError:
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ Введите число (например, 5). Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
+        raw_text = text.strip()
+        if not raw_text:
+            min_notional = USERBOT_DEFAULTS["min_notional"]
+        else:
+            try:
+                min_notional = float(raw_text.replace(",", "."))
+            except ValueError:
+                _send_adduser_prompt(
+                    from_user_id,
+                    "❗ Введите число (например, 5). Попробуйте ещё раз.",
+                    parse_mode=None,
+                )
+                return True
         if min_notional < 0:
             _send_adduser_prompt(
                 from_user_id,
-                "❗ Значение не может быть отрицательным.",
+                "❗ Введите число (например, 5). Попробуйте ещё раз.",
                 parse_mode=None,
             )
             return True
@@ -11379,7 +11369,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_position_mode"
         _send_adduser_prompt(
             from_user_id,
-            "🔀 Режим позиций (BYBIT_POSITION_MODE).\nВведите `hedged` (хедж) или `oneway`.",
+            f"🔀 Режим позиций (BYBIT_POSITION_MODE).\nВведите `hedged` (хедж) или `oneway` (по умолчанию {USERBOT_DEFAULTS['position_mode']}).",
         )
         return True
     if stage == "await_position_mode":
@@ -11389,7 +11379,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         elif mode in {"oneway", "one_way", "single"}:
             normalized_mode = "oneway"
         elif not mode:
-            normalized_mode = "hedged"
+            normalized_mode = USERBOT_DEFAULTS["position_mode"]
         else:
             _send_adduser_prompt(
                 from_user_id,
@@ -11405,19 +11395,23 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         )
         return True
     if stage == "await_max_positions":
-        try:
-            max_positions = int(float(text))
-        except ValueError:
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ Введите целое число (например, 4). Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
+        raw_text = text.strip()
+        if not raw_text:
+            max_positions = int(USERBOT_DEFAULTS["max_positions"])
+        else:
+            try:
+                max_positions = int(float(raw_text))
+            except ValueError:
+                _send_adduser_prompt(
+                    from_user_id,
+                    "❗ Введите целое число (например, 4). Попробуйте ещё раз.",
+                    parse_mode=None,
+                )
+                return True
         if max_positions <= 0 or max_positions > 20:
             _send_adduser_prompt(
                 from_user_id,
-                "❗ Число позиций должно быть в диапазоне 1–20.",
+                "❗ Введите целое число (например, 4). Попробуйте ещё раз.",
                 parse_mode=None,
             )
             return True
@@ -11425,19 +11419,24 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_default_next_run"
         _send_adduser_prompt(
             from_user_id,
-            "⏱ Дефолтный интервал между циклами (DEFAULT_NEXT_RUN_MINUTES). Введите минуты (может быть дробным числом).",
+            f"⏱ Дефолтный интервал между циклами (DEFAULT_NEXT_RUN_MINUTES). Введите минуты (может быть дробным числом). "
+            f"По умолчанию {USERBOT_DEFAULTS['default_next_run']}.",
         )
         return True
     if stage == "await_default_next_run":
-        try:
-            default_run = float(text.replace(",", "."))
-        except ValueError:
-            _send_adduser_prompt(
-                from_user_id,
-                "❗ Введите число (например, 45). Попробуйте ещё раз.",
-                parse_mode=None,
-            )
-            return True
+        raw_text = text.strip()
+        if not raw_text:
+            default_run = float(USERBOT_DEFAULTS["default_next_run"])
+        else:
+            try:
+                default_run = float(raw_text.replace(",", "."))
+            except ValueError:
+                _send_adduser_prompt(
+                    from_user_id,
+                    "❗ Введите число (например, 45). Попробуйте ещё раз.",
+                    parse_mode=None,
+                )
+                return True
         if default_run < 0:
             _send_adduser_prompt(
                 from_user_id,
@@ -11455,16 +11454,24 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         PENDING_USERBOT_CREATION.pop(from_user_id, None)
         _refresh_userbot_owners()
         if success:
+            preview_timezone = flow_state.get("timezone") or USERBOT_DEFAULTS["timezone"]
+            preview_margin = flow_state.get("order_margin") or USERBOT_DEFAULTS["order_margin"]
+            preview_risk = flow_state.get("risk_pct") or USERBOT_DEFAULTS["risk_pct"]
+            preview_leverage = flow_state.get("leverage") or USERBOT_DEFAULTS["leverage"]
+            preview_min_notional = flow_state.get("min_notional") or USERBOT_DEFAULTS["min_notional"]
+            preview_position_mode = flow_state.get("position_mode") or USERBOT_DEFAULTS["position_mode"]
+            preview_max_positions = flow_state.get("max_positions") or USERBOT_DEFAULTS["max_positions"]
+            preview_default_next = flow_state.get("default_next_run") or USERBOT_DEFAULTS["default_next_run"]
             config_preview = (
                 f"🛠 Параметры:\n"
-                f"- timezone: {flow_state.get('timezone') or 'UTC'}\n"
-                f"- margin: {flow_state.get('order_margin')}\n"
-                f"- risk_pct: {flow_state.get('risk_pct')}\n"
-                f"- leverage: {flow_state.get('leverage')}\n"
-                f"- min_notional: {flow_state.get('min_notional')}\n"
-                f"- position_mode: {flow_state.get('position_mode')}\n"
-                f"- max_positions: {flow_state.get('max_positions')}\n"
-                f"- default_next_run: {flow_state.get('default_next_run')}"
+                f"- timezone: {preview_timezone}\n"
+                f"- margin: {preview_margin}\n"
+                f"- risk_pct: {preview_risk}\n"
+                f"- leverage: {preview_leverage}\n"
+                f"- min_notional: {preview_min_notional}\n"
+                f"- position_mode: {preview_position_mode}\n"
+                f"- max_positions: {preview_max_positions}\n"
+                f"- default_next_run: {preview_default_next}"
             )
             send_tg(
                 f"✅ Юзер-бот `{target_id}` создан.\nКлючи безопасно сохранены.\n{config_preview}",
