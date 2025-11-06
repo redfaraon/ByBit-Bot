@@ -9511,7 +9511,7 @@ def run_cycle():
                 )
                 if executed:
                     orders_activity = True
-                send_tg("🟢 " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
+                    send_tg("🟢 " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
                 if actions_performed:
                     orders_activity = True
                     positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
