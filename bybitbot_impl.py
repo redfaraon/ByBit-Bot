@@ -161,6 +161,9 @@ USERBOT_DEFAULTS: dict[str, Any] = {
     "max_positions": 3,
     "default_next_run": 30.0,
 }
+ACTIVE_POSITION_MODE: str = "oneway"
+ACTIVE_HEDGE_MODE: bool = False
+POSITION_MODE_MISMATCH_STATE: bool | None = None
 
 
 def _load_bybit_credentials() -> tuple[str | None, str | None]:
@@ -2255,7 +2258,7 @@ def refresh_settings():
     global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global AI_SECONDARY_BUDGET_START, AI_HARD_STOP_BUDGET
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
-    global POSITION_MODE, HEDGE_MODE, ORDER_MARGIN_UTILIZATION
+    global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
     global SUPPORT_CONTEXT_TIMEFRAMES, SUPPORT_CONTEXT_INDICATORS, SUPPORT_CONTEXT_LIMIT
@@ -2607,6 +2610,9 @@ def refresh_settings():
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
     POSITION_MODE = (os.getenv("BYBIT_POSITION_MODE") or "oneway").strip().lower()
     HEDGE_MODE = POSITION_MODE in ("hedge", "hedged", "dual", "dual_side", "dual-side")
+    ACTIVE_POSITION_MODE = POSITION_MODE
+    ACTIVE_HEDGE_MODE = HEDGE_MODE
+    POSITION_MODE_MISMATCH_STATE = None
     try:
         ORDER_MARGIN_UTILIZATION = float(os.getenv("ORDER_MARGIN_UTILIZATION", 0.95))
     except (TypeError, ValueError):
@@ -4806,13 +4812,14 @@ def _has_active_limit_at_price(open_orders, side: str, price: float, tolerance: 
     return False, 0.0
 
 def get_position_idx(side: str | None) -> int | None:
-    if HEDGE_MODE:
-        if (side or "").lower() == "buy":
-            return 1  # long position
-        if (side or "").lower() == "sell":
-            return 2  # short position
+    if ACTIVE_HEDGE_MODE:
+        side_lower = (side or "").lower()
+        if side_lower == "buy":
+            return 1  # long position in hedged mode
+        if side_lower == "sell":
+            return 2  # short position in hedged mode
         return None
-    # One-way mode
+    # One-way mode uses index 0; keep submitting zero until hedge mode is enabled.
     return 0
 
 def to_iso_utc(ts_value):
@@ -5778,8 +5785,28 @@ def fetch_df(exchange, symbol, tf):
     df.set_index("timestamp", inplace=True)
     return df
 
+
+def _detect_position_mode(exchange, fallback_hedge: bool) -> bool:
+    try:
+        positions = exchange.fetch_positions()
+    except Exception:
+        return fallback_hedge
+    for payload in positions or []:
+        if not isinstance(payload, dict):
+            continue
+        idx = payload.get("positionIdx")
+        if idx is None:
+            info = payload.get("info") or {}
+            idx = info.get("positionIdx")
+        idx_val = safe_int(idx)
+        if idx_val in (1, 2):
+            return True
+    return False
+
+
 def ensure_position_mode(exchange):
     desired = "hedged" if HEDGE_MODE else "oneway"
+    actual_hedge: bool | None = None
     try:
         if hasattr(exchange, "set_position_mode"):
             symbols_available = set(getattr(exchange, "symbols", []) or [])
@@ -5798,13 +5825,37 @@ def ensure_position_mode(exchange):
                 target_symbol = next(iter(symbols_available))
             if target_symbol:
                 exchange.set_position_mode(HEDGE_MODE, target_symbol)
-                log(f"ℹ️ Position mode set: {desired}", Fore.LIGHTBLACK_EX)
-    except Exception as e:
-        code = get_bybit_retcode(e)
-        if code == 110025:
-            log(f"ℹ️ Position mode already set ({desired}, code {code})", Fore.LIGHTBLACK_EX)
+                actual_hedge = HEDGE_MODE
+                log(f"[INFO] Position mode set: {desired}", Fore.LIGHTBLACK_EX)
+    except Exception as exc:
+        code = get_bybit_retcode(exc)
+        if code in {110025, 110024, 110028}:
+            log(
+                f"[INFO] Unable to switch position mode to {desired} (code {code}); using exchange-reported mode.",
+                Fore.LIGHTBLACK_EX,
+            )
+            actual_hedge = _detect_position_mode(exchange, HEDGE_MODE)
         else:
-            log(f"⚠️ Failed to set position mode ({desired}): {e}", Fore.YELLOW)
+            log(f"[WARN] Failed to set position mode ({desired}): {exc}", Fore.YELLOW)
+            actual_hedge = _detect_position_mode(exchange, HEDGE_MODE)
+    if actual_hedge is None:
+        actual_hedge = _detect_position_mode(exchange, HEDGE_MODE)
+    global ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE
+    previous_mode = ACTIVE_POSITION_MODE
+    ACTIVE_HEDGE_MODE = bool(actual_hedge)
+    ACTIVE_POSITION_MODE = "hedged" if ACTIVE_HEDGE_MODE else "oneway"
+    if ACTIVE_POSITION_MODE != previous_mode:
+        log(f"[INFO] Active position mode now {ACTIVE_POSITION_MODE}", Fore.LIGHTBLACK_EX)
+    mismatch = ACTIVE_HEDGE_MODE != HEDGE_MODE
+    if POSITION_MODE_MISMATCH_STATE != mismatch:
+        POSITION_MODE_MISMATCH_STATE = mismatch
+        if mismatch:
+            log(
+                f"[INFO] Exchange reports {ACTIVE_POSITION_MODE} mode; desired mode is {desired}. Will retry when eligible.",
+                Fore.LIGHTBLACK_EX,
+            )
+        else:
+            log("[INFO] Exchange position mode now matches the configured preference.", Fore.LIGHTBLACK_EX)
 
 
 def get_bybit_retcode(error) -> int | None:
