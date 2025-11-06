@@ -9960,6 +9960,10 @@ def run_cycle():
                 closed_symbols_set.update(recent_symbols_list)
             if isinstance(global_open_orders, dict):
                 closed_symbols_set.update(global_open_orders.keys())
+            for raw_pair in PAIR_LIST:
+                normalized_pair = normalize_symbol(raw_pair, record_missing=False)
+                if normalized_pair:
+                    closed_symbols_set.add(normalized_pair)
             window_start = now_utc - datetime.timedelta(hours=PNL_LOOKBACK_HOURS)
             closed_pnl_value, closed_pnl_count, closed_warnings, closed_order_details = _collect_recent_closed_pnl(
                 ex,
