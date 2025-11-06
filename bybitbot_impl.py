@@ -61,6 +61,7 @@ def _configure_state_paths() -> None:
     global RELEASE_STATE_FILE
     global BYBIT_CREDENTIALS_FILE
     global SUPPORT_SANDBOX_ROOT
+    global SUPPORT_SANDBOX_STATE_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
         STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else SCRIPT_DIR)
@@ -77,6 +78,7 @@ def _configure_state_paths() -> None:
     RELEASE_STATE_FILE = STATE_DIR / "release_state.json"
     BYBIT_CREDENTIALS_FILE = STATE_DIR / "bybit_credentials.json"
     SUPPORT_SANDBOX_ROOT = STATE_DIR / "support_sandboxes"
+    SUPPORT_SANDBOX_STATE_FILE = STATE_DIR / "support_sandboxes.json"
     try:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -124,6 +126,9 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("schedule", "Запланировать следующую сессию"),
     ("tokens", "Лимиты OpenAI токенов"),
     ("bybitkey", "Установить BYBIT_API_KEY/BYBIT_API_SECRET"),
+    ("adduser", "Создать нового юзер-бота (DM)"),
+    ("config", "Настройки бота и окружения"),
+    ("sandbox", "Управление песочницами"),
     ("version", "Текущая версия и changelog"),
 ]
 TELEGRAM_RELEASE_THREAD_ID: int | None = None
@@ -140,6 +145,12 @@ AI_SUPPORT_MODEL: str = ""
 SUPPORT_MAX_CONTEXT_BYTES: int = 4096
 INPROGRESS_WIP_ENABLED: bool = False
 _LAST_INPROGRESS_MESSAGE: str | None = None
+USERS_DIR = REPO_ROOT / "users"
+USERS_CONFIG_FILE = USERS_DIR / "users.json"
+USERS_DEFAULT_SECRET = "secrets.env"
+USERS_PUBLIC_ENV_FILE = "public.env"
+MAIN_OWNER_CHAT_ID = 775747028
+USERBOT_OWNERS: dict[str, int] = {}
 
 
 def _load_bybit_credentials() -> tuple[str | None, str | None]:
@@ -228,7 +239,14 @@ def _save_users_config(config: dict[str, Any]) -> None:
         log(f"[USERS] Не удалось сохранить {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
 
 
-def _ensure_user_entry(user_id: str, label: str, *, state_dir: str, public_env_file: str) -> None:
+def _ensure_user_entry(
+    user_id: str,
+    label: str,
+    *,
+    state_dir: str,
+    public_env_file: str,
+    owner_id: Optional[int] = None,
+) -> None:
     config = _load_users_config()
     users_list = config.setdefault("users", [])
     if not isinstance(users_list, list):
@@ -263,6 +281,8 @@ def _ensure_user_entry(user_id: str, label: str, *, state_dir: str, public_env_f
         env_overrides = entry.get("env")
         if not isinstance(env_overrides, dict):
             entry["env"] = {}
+    if owner_id is not None:
+        entry["owner_id"] = int(owner_id)
     _save_users_config(config)
 
 
@@ -286,6 +306,25 @@ def _write_user_secrets(user_id: str, api_key: str, api_secret: str) -> Path:
         except Exception:
             pass
     return secrets_path
+
+
+def _refresh_userbot_owners() -> None:
+    global USERBOT_OWNERS
+    owners: dict[str, int] = {}
+    config = _load_users_config()
+    for entry in config.get("users") or []:
+        if not isinstance(entry, dict):
+            continue
+        bot_id = str(entry.get("id") or "").strip()
+        if not bot_id:
+            continue
+        owner_val = safe_int(entry.get("owner_id"))
+        if owner_val is None:
+            continue
+        owners[bot_id] = owner_val
+    if MAIN_OWNER_CHAT_ID is not None:
+        owners.setdefault("default", MAIN_OWNER_CHAT_ID)
+    USERBOT_OWNERS = owners
 
 BASE_PAIR_CANDIDATES = [
     "BTC/USDT:USDT",
@@ -607,6 +646,18 @@ def safe_int(val):
     except (ValueError, TypeError):
         return None
     return None
+
+
+def is_main_owner(user_id: Optional[int]) -> bool:
+    return user_id == MAIN_OWNER_CHAT_ID if user_id is not None else False
+
+
+def is_bot_owner(user_id: Optional[int], bot_id: str) -> bool:
+    if user_id is None:
+        return False
+    if is_main_owner(user_id):
+        return True
+    return USERBOT_OWNERS.get(bot_id) == user_id
 
 
 def _normalize_order_side(side: str | None, amount: float | None = None) -> tuple[str, bool]:
@@ -2382,6 +2433,7 @@ def refresh_settings():
         except (TypeError, ValueError):
             pass
     INPROGRESS_WIP_ENABLED = str(os.getenv("INPROGRESS_WIP_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    _refresh_userbot_owners()
     default_budget = globals().get("AI_TOKEN_BUDGET_CYCLE", 170_000)
     try:
         raw_budget = os.getenv("OPENAI_TOKEN_BUDGET_PER_CYCLE", str(default_budget))
@@ -3498,6 +3550,62 @@ def start_telegram_webhook_server() -> None:
     thread.start()
 
 
+def _collect_live_status_snapshot() -> dict[str, Any]:
+    exchange = init_exchange()
+    try:
+        try:
+            ensure_position_mode(exchange)
+        except Exception:
+            pass
+        equity, available, balance_payload = fetch_usdt_equity(exchange)
+        positions_map, _ = fetch_positions_snapshot(exchange)
+        open_orders = fetch_all_open_orders_grouped(exchange, limit=200)
+    finally:
+        try:
+            exchange.close()
+        except Exception:
+            pass
+    total_unrealized = 0.0
+    for payload in positions_map.values():
+        total_unrealized += safe_float(payload.get("unrealizedPnl")) or 0.0
+    orders_count = sum(len(bucket) for bucket in open_orders.values())
+    realized = None
+    if isinstance(balance_payload, dict):
+        realized = safe_float(balance_payload.get("_realizedPnl"))
+    return {
+        "equity": equity,
+        "available": available,
+        "positions": positions_map,
+        "positions_unrealized": total_unrealized,
+        "orders": open_orders,
+        "orders_count": orders_count,
+        "realized": realized,
+    }
+
+
+def _summarize_positions_lines(positions_map: dict[str, Any], limit: int = 10) -> tuple[list[str], float, int]:
+    if not positions_map:
+        return [], 0.0, 0
+    lines: list[str] = []
+    total_unrealized = 0.0
+    items = sorted(positions_map.items())
+    for idx, (symbol, payload) in enumerate(items, start=1):
+        amount = safe_float(payload.get("amount"))
+        if amount is None:
+            amount = 0.0
+        side = payload.get("side") or ("long" if amount >= 0 else "short")
+        entry_price = safe_float(payload.get("entryPrice"))
+        unreal = safe_float(payload.get("unrealizedPnl")) or 0.0
+        total_unrealized += unreal
+        amount_text = f"{abs(amount):.4f}"
+        entry_txt = f" @ {entry_price:.4f}" if entry_price is not None and math.isfinite(entry_price) else ""
+        lines.append(f"{symbol} — {side.upper()} {amount_text}{entry_txt} (PnL {unreal:+.2f} USDT)")
+        if len(lines) >= limit:
+            break
+    overflow = max(0, len(items) - limit)
+    return lines, total_unrealized, overflow
+
+
 def start_telegram_long_polling() -> None:
     global _TELEGRAM_LONG_POLL_THREAD, _TELEGRAM_LONG_POLL_STOP
     if TELEGRAM_WEBHOOK_URL:
@@ -3662,10 +3770,123 @@ def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: O
     send_tg(answer, thread_id=thread_id, reply_to_message_id=reply_to)
 
 
-def _prepare_support_sandbox(request_text: str) -> tuple[Path | None, str]:
+def _load_sandbox_state() -> dict[str, Any]:
+    try:
+        raw = SUPPORT_SANDBOX_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"sandboxes": []}
+    except Exception:
+        return {"sandboxes": []}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"sandboxes": []}
+    if not isinstance(data, dict):
+        return {"sandboxes": []}
+    if not isinstance(data.get("sandboxes"), list):
+        data["sandboxes"] = []
+    return data
+
+
+def _save_sandbox_state(state: dict[str, Any]) -> None:
+    try:
+        SUPPORT_SANDBOX_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"[WARN] Не удалось сохранить состояние песочниц: {exc}", Fore.YELLOW)
+
+
+def _get_user_sandboxes(user_id: int) -> list[dict[str, Any]]:
+    state = _load_sandbox_state()
+    entries = state.get("sandboxes") or []
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict) and entry.get("user_id") == user_id]
+
+
+def _find_sandbox_entry(sandbox_id: str) -> dict[str, Any] | None:
+    state = _load_sandbox_state()
+    for entry in state.get("sandboxes") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("id") == sandbox_id:
+            return entry
+    return None
+
+
+def _register_sandbox_entry(
+    *,
+    user_id: int,
+    bot_id: str,
+    path: Path,
+    promotable: bool,
+    origin: str,
+) -> dict[str, Any]:
+    state = _load_sandbox_state()
+    entries = state.setdefault("sandboxes", [])
+    if not isinstance(entries, list):
+        entries = []
+        state["sandboxes"] = entries
+    entry_id = path.name
+    entry = {
+        "id": entry_id,
+        "user_id": user_id,
+        "bot_id": bot_id,
+        "path": str(path),
+        "promotable": bool(promotable),
+        "origin": origin[:200],
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    entries = [e for e in entries if not (isinstance(e, dict) and e.get("id") == entry_id)]
+    entries.append(entry)
+    state["sandboxes"] = entries
+    _save_sandbox_state(state)
+    return entry
+
+
+def _remove_sandbox_entry(sandbox_id: str) -> None:
+    state = _load_sandbox_state()
+    entries = state.get("sandboxes") or []
+    if not isinstance(entries, list):
+        entries = []
+    entries = [entry for entry in entries if not (isinstance(entry, dict) and entry.get("id") == sandbox_id)]
+    state["sandboxes"] = entries
+    _save_sandbox_state(state)
+
+
+def _sanitize_sandbox_secrets(root: Path, allowed_bot_ids: set[str], allow_root_env: bool) -> None:
+    users_root = root / "users"
+    if users_root.exists():
+        for secrets_file in users_root.glob("*/secrets.env"):
+            bot_name = secrets_file.parent.name
+            if bot_name in allowed_bot_ids:
+                continue
+            try:
+                secrets_file.write_text("# secrets hidden in sandbox\n", encoding="utf-8")
+            except Exception:
+                pass
+    env_path = root / ".env"
+    if env_path.exists() and not allow_root_env:
+        try:
+            env_path.write_text("# credentials hidden in sandbox\nSUPPORT_SANDBOX=1\n", encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _prepare_support_sandbox(
+    request_text: str,
+    *,
+    requester_id: Optional[int],
+    bot_id: str,
+    promotable: bool,
+) -> tuple[Path | None, str, str | None]:
     global SUPPORT_SANDBOX_ROOT
     if SUPPORT_SANDBOX_ROOT is None:
-        return None, "support sandbox directory unavailable"
+        return None, "support sandbox directory unavailable", None
+    requester_id_int = int(requester_id) if requester_id is not None else 0
+    user_limit = 10 if promotable else 3
+    current_sandboxes = _get_user_sandboxes(requester_id_int) if requester_id is not None else []
+    if len(current_sandboxes) >= user_limit:
+        return None, f"достигнут лимит песочниц ({user_limit}). Удалите старые песочницы командой /sandbox delete <id>.", None
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "-", request_text.lower()).strip("-")[:24] or "request"
     sandbox_dir = SUPPORT_SANDBOX_ROOT / f"{timestamp}_{slug}"
@@ -3681,15 +3902,10 @@ def _prepare_support_sandbox(request_text: str) -> tuple[Path | None, str]:
         shutil.copytree(REPO_ROOT, sandbox_dir, ignore=ignore)
     except Exception as exc:
         log(f"[WARN] Support sandbox copy failed: {exc}", Fore.YELLOW)
-        return None, f"copy failed: {exc}"
-    env_path = sandbox_dir / ".env"
-    try:
-        env_path.write_text(
-            "BYBIT_API_KEY=demo\nBYBIT_API_SECRET=demo\nSUPPORT_SANDBOX=1\n",
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        log(f"[WARN] Support sandbox env write failed: {exc}", Fore.YELLOW)
+        return None, f"copy failed: {exc}", None
+    allow_root_env = promotable and bot_id == "default"
+    allowed_bots = {bot_id} if promotable else set()
+    _sanitize_sandbox_secrets(sandbox_dir, allowed_bots, allow_root_env)
     try:
         request_file = sandbox_dir / "SUPPORT_REQUEST.txt"
         request_file.write_text(
@@ -3719,7 +3935,18 @@ def _prepare_support_sandbox(request_text: str) -> tuple[Path | None, str]:
             simulation_log.write_text(sim_output, encoding="utf-8")
         except Exception:
             pass
-    return sandbox_dir, sim_output
+    if requester_id is not None:
+        entry = _register_sandbox_entry(
+            user_id=requester_id_int,
+            bot_id=bot_id,
+            path=sandbox_dir,
+            promotable=promotable,
+            origin=request_text,
+        )
+        entry_id = entry.get("id")
+    else:
+        entry_id = sandbox_dir.name
+    return sandbox_dir, sim_output, entry_id
 
 
 def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int], message: dict) -> None:
@@ -3743,12 +3970,20 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
         )
         _handle_support_question(content, thread_id=thread_id, reply_to=reply_to)
         return
+    current_bot_id = USER_ID
+    requester_id = safe_int(message.get("from", {}).get("id"))
+    is_owner = is_bot_owner(requester_id, current_bot_id) if requester_id is not None else False
     send_tg(
         "🧪 Получил пожелание, поднимаю тестовую песочницу…",
         thread_id=thread_id,
         reply_to_message_id=reply_to,
     )
-    sandbox_dir, sim_excerpt = _prepare_support_sandbox(content)
+    sandbox_dir, sim_excerpt, sandbox_id = _prepare_support_sandbox(
+        content,
+        requester_id=requester_id,
+        bot_id=current_bot_id,
+        promotable=is_owner,
+    )
     if sandbox_dir is None:
         send_tg(
             f"⚠️ Не удалось подготовить тестовое окружение: {sim_excerpt}",
@@ -3761,6 +3996,8 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
         "🧪 Подготовлена песочница для проверки пожелания.",
         f"Каталог: `{path_display}`",
     ]
+    if sandbox_id:
+        summary_lines.append(f"ID: `{sandbox_id}`")
     if sim_excerpt:
         summary_lines.append(f"Симуляция: {sim_excerpt[:200]}")
     send_tg(
@@ -3772,11 +4009,26 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     )
 
 
-def _format_positions_message(limit: int = 10) -> str:
+def _format_positions_message(limit: int = 10, *, live: bool = False) -> str:
+    if live:
+        try:
+            snapshot = _collect_live_status_snapshot()
+        except Exception as exc:
+            log(f"[WARN] Не удалось получить live-позиции: {exc}", Fore.YELLOW)
+        else:
+            lines, total_unrealized, overflow = _summarize_positions_lines(snapshot.get("positions") or {}, limit)
+            if not lines:
+                return "Открытых позиций нет."
+            header = ["Открытые позиции (live):"]
+            header.extend(lines)
+            if overflow > 0:
+                header.append(f"… ещё {overflow}")
+            header.append(f"Σ PnL: {total_unrealized:+.2f} USDT")
+            return "\n".join(header)
     positions = LATEST_STATUS.get("positions") or []
     if not positions:
         return "Открытых позиций нет."
-    lines = ["Открытые позиции:"]
+    lines = ["Открытые позиции (последний цикл):"]
     total_unrealized = 0.0
     for pos in positions[:limit]:
         entry_price = pos.get("entry")
@@ -3792,7 +4044,24 @@ def _format_positions_message(limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def _format_status_message() -> str:
+def _format_status_message(live: bool = False) -> str:
+    if live:
+        try:
+            snapshot = _collect_live_status_snapshot()
+        except Exception as exc:
+            log(f"[WARN] Не удалось получить live-статус: {exc}", Fore.YELLOW)
+        else:
+            lines = [
+                "Статус (live):",
+                f"Баланс: {snapshot.get('equity', 0.0):.2f} USDT, доступно {snapshot.get('available', 0.0):.2f} USDT",
+                f"Открытых позиций: {len(snapshot.get('positions') or [])}",
+                f"Открытых ордеров: {snapshot.get('orders_count', 0)}",
+                f"Σ PnL по позициям: {snapshot.get('positions_unrealized', 0.0):+.2f} USDT",
+            ]
+            realized = snapshot.get("realized")
+            if realized is not None:
+                lines.append(f"Реализованный PnL (Bybit): {realized:+.2f} USDT")
+            return "\n".join(lines)
     if not LATEST_STATUS:
         return "Статус пока недоступен."
     lines = [
@@ -3887,6 +4156,8 @@ def _format_schedule_overview() -> str:
         )
     else:
         lines.append("Ручное расписание не активно.")
+    lines.append("")
+    lines.append("Команды: /schedule now, /schedule in 30, /schedule at 23:15, /schedule cancel")
     return "\n".join(lines)
 
 
@@ -4121,9 +4392,9 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
     if command == "help":
         reply = _build_help_message()
     elif command == "status":
-        reply = _format_status_message()
+        reply = _format_status_message(live=True)
     elif command == "positions":
-        reply = _format_positions_message()
+        reply = _format_positions_message(live=True)
     elif command == "risk":
         reply = _format_risk_message()
     elif command == "logs":
@@ -4133,9 +4404,23 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
     elif command in {"tokens", "token"}:
         reply = _handle_tokens_command(args)
     elif command in {"bybitkey", "bybit"}:
-        reply = _handle_bybit_key_command(args)
+        if not is_bot_owner(user_id, USER_ID):
+            reply = "🚫 Команда /bybitkey доступна только владельцу бота."
+        else:
+            reply = _handle_bybit_key_command(args)
     elif command == "adduser":
-        reply = _handle_add_user_command(args, user_id=user_id, origin_chat=chat_id, origin_thread=response_thread)
+        if not is_main_owner(user_id):
+            reply = "🚫 Команда /adduser доступна только владельцу главного бота."
+        else:
+            reply = _handle_add_user_command(args, user_id=user_id, origin_chat=chat_id, origin_thread=response_thread)
+        if reply is None:
+            return
+    elif command == "config":
+        reply = _handle_config_command(args, user_id=user_id, bot_id=USER_ID)
+        if reply is None:
+            return
+    elif command == "sandbox":
+        reply = _handle_sandbox_command(args, user_id=user_id)
         if reply is None:
             return
     elif command == "version":
@@ -10496,6 +10781,300 @@ def _handle_bybit_key_command(args: list[str]) -> str:
     )
 
 
+def _persist_env_file(path: Path, updates: dict[str, str | None]) -> bool:
+    try:
+        existing_lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        existing_lines = []
+    except Exception:
+        existing_lines = []
+    seen: set[str] = set()
+    new_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            new_lines.append(line)
+            continue
+        key, _, _ = line.partition("=")
+        key_clean = key.strip()
+        if key_clean in updates:
+            value = updates[key_clean]
+            new_lines.append(f"{key_clean}={'' if value is None else value}")
+            seen.add(key_clean)
+        else:
+            new_lines.append(line)
+    for key, value in updates.items():
+        if key in seen:
+            continue
+        new_lines.append(f"{key}={'' if value is None else value}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        path.write_text("\n".join(new_lines).strip() + "\n", encoding="utf-8")
+        return True
+    except Exception as exc:
+        log(f"[CONFIG] Не удалось обновить {path}: {exc}", Fore.YELLOW)
+        return False
+
+
+def _read_env_value(path: Path, key: str) -> Optional[str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    for line in lines:
+        if not line or "=" not in line or line.strip().startswith("#"):
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == key:
+            return v
+    return None
+
+
+def _get_bot_config_path(bot_id: str, root: Path) -> Path:
+    if bot_id == "default":
+        return root / ".env"
+    return root / "users" / bot_id / USERS_PUBLIC_ENV_FILE
+
+
+def _resolve_config_scope(scope: str, user_id: Optional[int], bot_id: str) -> tuple[str, Path, Optional[dict], str]:
+    scope_lower = scope.lower()
+    if scope_lower in {"prod", "production", "main"}:
+        return "prod", REPO_ROOT, None, bot_id
+    if scope_lower.startswith("sandbox"):
+        parts = scope_lower.split(":", 1)
+        if len(parts) == 1 or not parts[1]:
+            raise ValueError("Укажите идентификатор песочницы: sandbox:<id>")
+        sandbox_id = parts[1]
+        entry = _find_sandbox_entry(sandbox_id)
+        if not entry:
+            raise ValueError(f"Песочница {sandbox_id} не найдена.")
+        path = Path(entry.get("path") or "")
+        if not path.exists():
+            raise ValueError(f"Каталог песочницы {sandbox_id} недоступен.")
+        entry_bot = entry.get("bot_id") or bot_id
+        return "sandbox", path, entry, entry_bot
+    raise ValueError("Неизвестная область. Используйте prod или sandbox:<id>.")
+
+
+def _config_list_scopes(user_id: Optional[int], bot_id: str) -> str:
+    lines = ["Доступные области:"]
+    if is_bot_owner(user_id, bot_id):
+        lines.append("- prod — текущее прод-окружение бота")
+    sandboxes = []
+    if user_id is not None:
+        sandboxes = _get_user_sandboxes(int(user_id))
+    if sandboxes:
+        lines.append("- sandbox:<id> — одна из ваших песочниц")
+        for entry in sandboxes:
+            status = "да" if entry.get("promotable") else "нет"
+            lines.append(f"  • {entry.get('id')}: бот {entry.get('bot_id')} (promote={status})")
+    else:
+        lines.append("- У вас нет активных песочниц. Создайте их через Support.")
+    return "\n".join(lines)
+
+
+def _config_set(scope: str, key: str, value: str, *, user_id: Optional[int], bot_id: str) -> str:
+    try:
+        scope_type, root_path, sandbox_entry, target_bot_id = _resolve_config_scope(scope, user_id, bot_id)
+    except ValueError as exc:
+        return f"⚠️ {exc}"
+    if scope_type == "prod":
+        if not is_bot_owner(user_id, target_bot_id):
+            return "🚫 У вас нет прав изменять прод-окружение этого бота."
+    else:
+        entry_user = safe_int(sandbox_entry.get("user_id")) if sandbox_entry else None
+        if user_id is None or (entry_user != user_id and not is_main_owner(user_id)):
+            return "🚫 Вы можете менять параметры только в своих песочницах."
+        target_bot_id = sandbox_entry.get("bot_id") or target_bot_id
+    target_path = _get_bot_config_path(target_bot_id, root_path)
+    updates = {key: value if value.lower() != "null" else None}
+    if not _persist_env_file(target_path, updates):
+        return "⚠️ Не удалось обновить файл настроек."
+    location = "проде" if scope_type == "prod" else f"песочнице {sandbox_entry.get('id')}"
+    return f"✅ Параметр {key} обновлён в {location} ({target_path})."
+
+
+def _config_get(scope: str, key: str, *, user_id: Optional[int], bot_id: str) -> str:
+    try:
+        scope_type, root_path, sandbox_entry, target_bot_id = _resolve_config_scope(scope, user_id, bot_id)
+    except ValueError as exc:
+        return f"⚠️ {exc}"
+    if scope_type == "prod":
+        if not is_bot_owner(user_id, target_bot_id):
+            return "🚫 У вас нет прав читать параметры этого прод-окружения."
+    else:
+        entry_user = safe_int(sandbox_entry.get("user_id")) if sandbox_entry else None
+        if user_id is None or (entry_user != user_id and not is_main_owner(user_id)):
+            return "🚫 Эта песочница вам не принадлежит."
+        target_bot_id = sandbox_entry.get("bot_id") or target_bot_id
+    target_path = _get_bot_config_path(target_bot_id, root_path)
+    value = _read_env_value(target_path, key)
+    if value is None:
+        return f"ℹ️ {key} не задан в {target_path}."
+    return f"{key} = {value}"
+
+
+def _config_help(bot_id: str, user_id: Optional[int]) -> str:
+    parts = [
+        "Команда /config управляет параметрами бота.",
+        "Примеры:",
+        "  /config list — показать доступные области",
+    ]
+    if is_bot_owner(user_id, bot_id):
+        parts.append("  /config set prod KEY VALUE — изменить параметр в прод-окружении")
+        parts.append("    например: /config set prod AUTO_UPDATE 0 — отключить автообновление")
+        parts.append("    или: /config set prod TARGET_VERSION 2025.11.06")
+    parts.append("  /config set sandbox:<id> KEY VALUE — изменить параметр в песочнице")
+    parts.append("  /config get sandbox:<id> KEY — посмотреть значение в песочнице")
+    if is_bot_owner(user_id, bot_id):
+        parts.append("Для прод-окружения обязательно указывайте область (prod или sandbox).")
+    else:
+        parts.append("Невладельцам доступны только песочницы.")
+    return "\n".join(parts)
+
+
+def _handle_config_command(
+    args: list[str],
+    *,
+    user_id: Optional[int],
+    bot_id: str,
+) -> Optional[str]:
+    if user_id is None:
+        return "Команда доступна только после начала диалога с ботом. Откройте личный чат и нажмите Start."
+    if not args:
+        return _config_help(bot_id, user_id)
+    action = args[0].lower()
+    if action == "list":
+        return _config_list_scopes(user_id, bot_id)
+    if action == "set":
+        if len(args) < 4:
+            return _config_help(bot_id, user_id)
+        scope = args[1]
+        key = args[2]
+        value = " ".join(args[3:])
+        if scope.lower() in {"prod", "production"} and not is_bot_owner(user_id, bot_id):
+            return (
+                "Уточните песочницу: /config set sandbox:<id> KEY VALUE. "
+                "Невладельцы не могут менять прод-окружение."
+            )
+        return _config_set(scope, key, value, user_id=user_id, bot_id=bot_id)
+    if action == "get":
+        if len(args) < 3:
+            return "Использование: /config get <scope> <key>"
+        scope = args[1]
+        key = args[2]
+        return _config_get(scope, key, user_id=user_id, bot_id=bot_id)
+    return _config_help(bot_id, user_id)
+
+
+def _delete_sandbox_directory(path: Path) -> tuple[bool, str]:
+    try:
+        if path.exists():
+            shutil.rmtree(path)
+        return True, "Песочница удалена."
+    except Exception as exc:
+        return False, f"Не удалось удалить каталог песочницы: {exc}"
+
+
+def _promote_sandbox_entry(entry: dict[str, Any], user_id: Optional[int]) -> tuple[bool, str]:
+    sandbox_id = entry.get("id")
+    bot_id = entry.get("bot_id") or USER_ID
+    if not is_bot_owner(user_id, bot_id):
+        return False, "У вас нет прав переносить изменения этого бота."
+    sandbox_path = Path(entry.get("path") or "")
+    if not sandbox_path.exists():
+        return False, "Каталог песочницы недоступен."
+    targets: list[tuple[Path, Path]] = []
+    if bot_id == "default":
+        src = sandbox_path / ".env"
+        dest = REPO_ROOT / ".env"
+        targets.append((src, dest))
+    else:
+        src_dir = sandbox_path / "users" / bot_id
+        dest_dir = USERS_DIR / bot_id
+        src_env = src_dir / USERS_PUBLIC_ENV_FILE
+        dest_env = dest_dir / USERS_PUBLIC_ENV_FILE
+        targets.append((src_env, dest_env))
+    copied = 0
+    for src, dest in targets:
+        if not src.exists():
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        shutil.copy2(src, dest)
+        copied += 1
+    if copied == 0:
+        return False, "В песочнице не найдено нужных файлов для переноса."
+    entry["promoted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    state = _load_sandbox_state()
+    sandboxes = state.get("sandboxes") or []
+    for idx, existing in enumerate(sandboxes):
+        if isinstance(existing, dict) and existing.get("id") == sandbox_id:
+            sandboxes[idx] = entry
+            break
+    state["sandboxes"] = sandboxes
+    _save_sandbox_state(state)
+    return True, "Изменения из песочницы перенесены в прод."
+
+
+def _handle_sandbox_command(args: list[str], *, user_id: Optional[int]) -> Optional[str]:
+    if user_id is None:
+        return "Команда доступна только после начала диалога с ботом. Откройте личный чат и нажмите Start."
+    user_id_int = int(user_id)
+    action = args[0].lower() if args else "list"
+    if action in {"list", "ls"}:
+        entries = _get_user_sandboxes(user_id_int)
+        if not entries:
+            return "У вас нет активных песочниц."
+        lines = ["Ваши песочницы:"]
+        for entry in sorted(entries, key=lambda e: e.get("created_at", ""), reverse=True):
+            lines.append(
+                f"- {entry.get('id')}: бот {entry.get('bot_id')} "
+                f"(promote={'да' if entry.get('promotable') else 'нет'}, создана {entry.get('created_at')})"
+            )
+        lines.append("Удаление: /sandbox delete <id>")
+        lines.append("Перенос в прод (если доступно): /sandbox promote <id>")
+        return "\n".join(lines)
+    if action in {"delete", "rm"}:
+        if len(args) < 2:
+            return "Использование: /sandbox delete <id>"
+        sandbox_id = args[1]
+        entry = _find_sandbox_entry(sandbox_id)
+        if not entry:
+            return f"Песочница {sandbox_id} не найдена."
+        entry_user = safe_int(entry.get("user_id"))
+        if entry_user != user_id_int and not is_main_owner(user_id):
+            return "Вы можете удалять только свои песочницы."
+        success, message = _delete_sandbox_directory(Path(entry.get("path") or ""))
+        if success:
+            _remove_sandbox_entry(sandbox_id)
+        return message
+    if action == "promote":
+        if len(args) < 2:
+            return "Использование: /sandbox promote <id>"
+        sandbox_id = args[1]
+        entry = _find_sandbox_entry(sandbox_id)
+        if not entry:
+            return f"Песочница {sandbox_id} не найдена."
+        if not entry.get("promotable"):
+            return "Перенос изменений из этой песочницы запрещён."
+        entry_user = safe_int(entry.get("user_id"))
+        if entry_user != user_id_int and not is_main_owner(user_id):
+            return "Вы можете переносить изменения только из собственных песочниц."
+        success, message = _promote_sandbox_entry(entry, user_id)
+        return message
+    return (
+        "Использование: /sandbox list, /sandbox delete <id>, /sandbox promote <id>\n"
+        "Песочницы создаются автоматически через Support."
+    )
+
+
+
 def _handle_add_user_command(
     args: list[str],
     *,
@@ -10525,6 +11104,7 @@ def _handle_add_user_command(
         "stage": "await_api_key",
         "api_key": None,
         "api_secret": None,
+        "owner_id": int(user_id),
     }
     dm_message = (
         f"🧩 Создание юзер-бота `{target_id}` ({label}).\n"
@@ -10559,7 +11139,13 @@ def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
     state_dir = flow_state.get("state_dir") or f"runtime/{target_id}"
     public_env_rel = Path("users") / target_id / USERS_PUBLIC_ENV_FILE
     try:
-        _ensure_user_entry(target_id, label, state_dir=state_dir, public_env_file=public_env_rel)
+        _ensure_user_entry(
+            target_id,
+            label,
+            state_dir=state_dir,
+            public_env_file=public_env_rel,
+            owner_id=safe_int(flow_state.get("owner_id")),
+        )
     except Exception as exc:
         return False, f"Не удалось обновить users.json: {exc}"
     return True, "Профиль создан."
