@@ -21,7 +21,7 @@ os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, textwrap
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Optional, Tuple, Any, Sequence
+from typing import Optional, Tuple, Any, Sequence, Mapping
 import pandas as pd
 import ccxt
 import requests
@@ -88,6 +88,8 @@ _configure_state_paths()
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
+RESULTS_CLOSED_ORDER_DISPLAY_LIMIT = 10
+REQUIRE_TAKE_PROFIT = True
 DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
 DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
 PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
@@ -164,6 +166,26 @@ USERBOT_DEFAULTS: dict[str, Any] = {
 ACTIVE_POSITION_MODE: str = "oneway"
 ACTIVE_HEDGE_MODE: bool = False
 POSITION_MODE_MISMATCH_STATE: bool | None = None
+
+
+def _sparkline_from_values(values: Sequence[float]) -> str | None:
+    filtered = [v for v in values if isinstance(v, (int, float)) and math.isfinite(v)]
+    if not filtered:
+        return None
+    vmin = min(filtered)
+    vmax = max(filtered)
+    if math.isclose(vmax, vmin, rel_tol=1e-9, abs_tol=1e-9):
+        idx = min(len(SPARKLINE_BLOCKS) // 2, len(SPARKLINE_BLOCKS) - 1)
+        return SPARKLINE_BLOCKS[idx] * len(filtered)
+    span = vmax - vmin or 1.0
+    scale = len(SPARKLINE_BLOCKS) - 1
+    spark_chars: list[str] = []
+    for value in filtered:
+        norm = (value - vmin) / span if span else 0.0
+        idx = int(round(norm * scale))
+        idx = max(0, min(scale, idx))
+        spark_chars.append(SPARKLINE_BLOCKS[idx])
+    return "".join(spark_chars)
 
 
 def _load_bybit_credentials() -> tuple[str | None, str | None]:
@@ -2892,8 +2914,16 @@ _SCHEDULE_OVERRIDE_LOCK = threading.RLock()
 _SCHEDULE_OVERRIDE: dict[str, Any] | None = None
 _LAST_WORKTREE_STATE_DIRTY: bool = False
 _LAST_WORKTREE_STATE_HASH: str = ""
+_LAST_GIT_NOTIFICATION: tuple[str, float] | None = None
 
 def _send_git_notification(message: str):
+    global _LAST_GIT_NOTIFICATION
+    now_ts = time.time()
+    if _LAST_GIT_NOTIFICATION and _LAST_GIT_NOTIFICATION[0] == message:
+        # Skip duplicate notifications if they match the previous payload.
+        if now_ts - _LAST_GIT_NOTIFICATION[1] < 300:
+            return
+    _LAST_GIT_NOTIFICATION = (message, now_ts)
     log(message, Fore.LIGHTBLACK_EX)
     thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
     send_tg(message, thread_id=thread_target, no_prefix=True)
@@ -3198,6 +3228,59 @@ def _results_order_key(detail: dict[str, Any]) -> str:
     return f"{symbol}|{timestamp}|{pnl}"
 
 
+def _format_closed_order_line(detail: dict[str, Any]) -> str:
+    symbol = str(detail.get("symbol") or "").upper() or "?"
+    side = (detail.get("side") or "").upper()
+    pnl_val = safe_float(detail.get("pnl"))
+    amount_val = safe_float(detail.get("amount"))
+    price_val = safe_float(detail.get("price"))
+    ts_iso = detail.get("timestamp")
+    time_label = ""
+    if ts_iso:
+        try:
+            dt = datetime.datetime.fromisoformat(ts_iso)
+            local_tz = _current_local_tz()
+            if local_tz:
+                dt = dt.astimezone(local_tz)
+            time_label = dt.strftime("%H:%M")
+        except Exception:
+            time_label = ts_iso[:16]
+    amount_text = f"{amount_val:.4f}" if isinstance(amount_val, (int, float)) and math.isfinite(amount_val) else "-"
+    price_text = f"@ {price_val:.4f}" if isinstance(price_val, (int, float)) and math.isfinite(price_val) else ""
+    pnl_text = f"{pnl_val:+.2f} USDT" if pnl_val is not None and math.isfinite(pnl_val) else "n/a"
+    time_text = f" [{time_label}]" if time_label else ""
+    return f"- {symbol} {side or '?'} {amount_text} {price_text} (PnL {pnl_text}){time_text}"
+
+
+def _update_daily_closed_pnl_map(daily_map: dict[str, float], orders: Sequence[dict[str, Any]]) -> bool:
+    if not isinstance(daily_map, dict):
+        return False
+    tzinfo = _current_local_tz() or datetime.timezone.utc
+    changed = False
+    for detail in orders:
+        pnl_val = safe_float(detail.get("pnl"))
+        ts_iso = detail.get("timestamp")
+        if pnl_val is None or ts_iso is None:
+            continue
+        try:
+            dt = datetime.datetime.fromisoformat(ts_iso)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        day_key = dt.astimezone(tzinfo).date().isoformat()
+        prev = safe_float(daily_map.get(day_key)) or 0.0
+        daily_map[day_key] = prev + float(pnl_val)
+        changed = True
+    if changed:
+        max_days = 30
+        keys_sorted = sorted(daily_map.keys())
+        if len(keys_sorted) > max_days:
+            for outdated in keys_sorted[:-max_days]:
+                daily_map.pop(outdated, None)
+    return changed
+
+
 def _build_daily_pnl_percent_chart(
     history: Sequence[dict[str, Any]],
     *,
@@ -3287,25 +3370,69 @@ def _build_daily_pnl_percent_chart(
     if not changes:
         return None, []
     tail = changes[-days:]
-    values = [pct for _, pct in tail if math.isfinite(pct)]
-    if not values:
+    sparkline = _sparkline_from_values([pct for _, pct in tail])
+    if not sparkline:
         return None, []
-    vmin = min(values)
-    vmax = max(values)
-    if math.isclose(vmax, vmin, rel_tol=1e-9, abs_tol=1e-9):
-        idx = len(SPARKLINE_BLOCKS) // 2
-        idx = min(idx, len(SPARKLINE_BLOCKS) - 1)
-        sparkline = SPARKLINE_BLOCKS[idx] * len(values)
-    else:
-        span = vmax - vmin
-        scale = len(SPARKLINE_BLOCKS) - 1
-        spark_chars: list[str] = []
-        for pct in values:
-            norm = (pct - vmin) / span if span else 0.0
-            idx = int(round(norm * scale))
-            idx = max(0, min(scale, idx))
-            spark_chars.append(SPARKLINE_BLOCKS[idx])
-        sparkline = "".join(spark_chars)
+    return sparkline, tail
+
+
+def _build_daily_closed_pnl_chart(
+    daily_closed_map: Mapping[str, Any] | None,
+    history: Sequence[dict[str, Any]],
+    *,
+    days: int = 7,
+) -> tuple[str | None, list[tuple[datetime.date, float]]]:
+    if not isinstance(daily_closed_map, Mapping) or not daily_closed_map:
+        return None, []
+    tzinfo = _current_local_tz() or datetime.timezone.utc
+    equity_closes: dict[datetime.date, tuple[datetime.datetime, float]] = {}
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        ts_raw = entry.get("timestamp")
+        equity_val = safe_float(entry.get("equity"))
+        if not isinstance(ts_raw, str) or equity_val is None or not math.isfinite(equity_val):
+            continue
+        ts = ts_raw.replace("Z", "+00:00")
+        try:
+            dt = datetime.datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        local_dt = dt.astimezone(tzinfo)
+        day_key = local_dt.date()
+        prev = equity_closes.get(day_key)
+        if prev is None or local_dt >= prev[0]:
+            equity_closes[day_key] = (local_dt, equity_val)
+    if len(equity_closes) < 2:
+        return None, []
+    ordered_equity = sorted(equity_closes.items())
+    changes: list[tuple[datetime.date, float]] = []
+    for day_key_str, pnl_value in sorted(daily_closed_map.items()):
+        pnl_float = safe_float(pnl_value)
+        if pnl_float is None or not math.isfinite(pnl_float):
+            continue
+        try:
+            day = datetime.date.fromisoformat(day_key_str)
+        except ValueError:
+            continue
+        prev_equity: float | None = None
+        for eq_day, (_, eq_value) in ordered_equity:
+            if eq_day < day:
+                prev_equity = eq_value
+            else:
+                break
+        if prev_equity is None or abs(prev_equity) < 1e-8:
+            continue
+        pct = (pnl_float / prev_equity) * 100.0
+        changes.append((day, pct))
+    if not changes:
+        return None, []
+    tail = changes[-days:]
+    sparkline = _sparkline_from_values([pct for _, pct in tail])
+    if not sparkline:
+        return None, []
     return sparkline, tail
 
 
@@ -5335,6 +5462,111 @@ def _extract_closed_pnl_from_payload(payload: Any) -> float | None:
     return best_val
 
 
+def _collect_bybit_closed_pnl_v5(
+    exchange,
+    target_symbols: set[str],
+    start_ms: int,
+    end_ms: int | None,
+    limit_per_symbol: int,
+) -> tuple[float, int, list[str], list[dict[str, Any]]]:
+    method = getattr(exchange, "privateGetV5PositionClosedPnl", None)
+    if not callable(method):
+        return 0.0, 0, [], []
+    warnings: list[str] = []
+    total_pnl = 0.0
+    details: list[dict[str, Any]] = []
+    markets = getattr(exchange, "markets", {}) or {}
+    normalized_targets: set[str] = set()
+    for sym in target_symbols:
+        if not sym:
+            continue
+        sym_upper = sym.upper()
+        normalized_targets.add(sym_upper)
+        normalized_targets.add(sym_upper.replace(":USDT", ""))
+        normalized_targets.add(sym_upper.replace("/", ""))
+        normalized_targets.add(sym_upper.replace(":", ""))
+    target_symbols = normalized_targets
+    categories: set[str] = set()
+    for sym in target_symbols:
+        market = markets.get(sym)
+        category = _infer_market_category(sym, market)
+        if category:
+            categories.add(category)
+    if not categories:
+        categories.add("linear")
+    max_rows = max(limit_per_symbol * max(1, len(target_symbols) or 1), limit_per_symbol)
+    for category in categories:
+        cursor = None
+        fetched = 0
+        while fetched < max_rows:
+            params = {
+                "category": category,
+                "startTime": start_ms,
+                "limit": min(200, max_rows - fetched),
+            }
+            if end_ms is not None:
+                params["endTime"] = end_ms
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                response = method(params)
+            except Exception as exc:
+                warnings.append(f"[PnL] bybit closed-pnl ({category}) failed: {exc}")
+                break
+            result = response.get("result") if isinstance(response, dict) else None
+            rows = result.get("list") if isinstance(result, dict) else None
+            if not rows:
+                break
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                symbol_id = row.get("symbol")
+                symbol = None
+                if symbol_id:
+                    try:
+                        symbol = exchange.safe_symbol(symbol_id, None)
+                    except Exception:
+                        symbol = symbol_id
+                symbol_key = (symbol or symbol_id or "").upper()
+                symbol_compact = symbol_key.replace(":USDT", "").replace("/", "").replace(":", "")
+                if target_symbols and symbol_key not in target_symbols and symbol_compact not in target_symbols:
+                    continue
+                pnl_val = safe_float(row.get("closedPnl"))
+                if pnl_val is None:
+                    continue
+                ts_raw = row.get("updatedTime") or row.get("createdTime") or row.get("closedTime")
+                ts_iso = None
+                if ts_raw is not None:
+                    try:
+                        ts_int = int(ts_raw)
+                        ts_iso = datetime.datetime.fromtimestamp(ts_int / 1000, tz=datetime.timezone.utc).isoformat()
+                    except (TypeError, ValueError, OverflowError):
+                        ts_iso = None
+                amount_val = safe_float(row.get("closedSize") or row.get("qty") or row.get("size"))
+                price_val = safe_float(row.get("avgExitPrice") or row.get("avgPrice") or row.get("exitPrice"))
+                side = (row.get("side") or "").upper()
+                detail = {
+                    "id": str(row.get("execId") or row.get("orderId") or row.get("positionIdx") or f"{symbol_id}:{ts_raw}"),
+                    "symbol": symbol or symbol_id,
+                    "side": side,
+                    "amount": amount_val,
+                    "price": price_val,
+                    "pnl": float(pnl_val),
+                    "timestamp": ts_iso,
+                }
+                details.append(detail)
+                total_pnl += float(pnl_val)
+                fetched += 1
+                if fetched >= max_rows:
+                    break
+            cursor = result.get("nextPageCursor") if isinstance(result, dict) else None
+            if not cursor:
+                break
+    if details:
+        details.sort(key=lambda item: item.get("timestamp") or "")
+    return total_pnl, len(details), warnings, details
+
+
 def _collect_recent_closed_pnl(
     exchange,
     symbols: Sequence[str],
@@ -5366,6 +5598,18 @@ def _collect_recent_closed_pnl(
         if markets_available and sym not in markets_available:
             continue
         normalized_symbols.append(sym)
+    symbol_filter = {sym for sym in symbols if sym}
+    if exchange_id.lower() == "bybit":
+        bybit_total, bybit_count, bybit_warnings, bybit_details = _collect_bybit_closed_pnl_v5(
+            exchange,
+            symbol_filter,
+            since_ms,
+            until_ms,
+            limit_per_symbol,
+        )
+        warnings.extend(bybit_warnings)
+        if bybit_count:
+            return bybit_total, bybit_count, warnings, bybit_details
     # Prefer closed orders first
     for symbol in normalized_symbols:
         params = {}
@@ -10286,8 +10530,15 @@ def run_cycle():
         if orders_snapshot is None:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
         protective_orders = _extract_protection_orders(orders_snapshot)
-        has_stop = any(_has_stop_flag(order) or _has_trailing_flag(order) for order in protective_orders)
+        categorized = _categorize_protection_orders(protective_orders)
+        has_stop = bool(categorized["stop"]) or bool(categorized["trailing"])
+        has_take = bool(categorized["take_profit"])
+        needs_protection = False
         if not has_stop:
+            needs_protection = True
+        elif REQUIRE_TAKE_PROFIT and not has_take:
+            needs_protection = True
+        if needs_protection:
             unprotected_positions.append((sym_active, amount_val))
 
     unresolved_unprotected: list[str] = []
@@ -10576,12 +10827,25 @@ def run_cycle():
 
             latest_equity_point: tuple[datetime.datetime, float, float | None] | None = None
             if isinstance(equity_end, (int, float)) and math.isfinite(equity_end):
-                latest_equity_point = (now_utc, float(equity_end), float(realized_end) if isinstance(realized_end, (int, float)) and math.isfinite(realized_end) else None)
-            daily_chart, daily_points = _build_daily_pnl_percent_chart(
-                history_entries,
-                latest_point=latest_equity_point,
-                days=7,
-            )
+                latest_equity_point = (
+                    now_utc,
+                    float(equity_end),
+                    float(realized_end) if isinstance(realized_end, (int, float)) and math.isfinite(realized_end) else None,
+                )
+            daily_closed_map = results_state.get("daily_closed_pnl")
+            if not isinstance(daily_closed_map, dict):
+                daily_closed_map = {}
+            daily_chart = None
+            daily_points: list[tuple[datetime.date, float]] = []
+            chart_closed, points_closed = _build_daily_closed_pnl_chart(daily_closed_map, history_entries, days=7)
+            if chart_closed:
+                daily_chart, daily_points = chart_closed, points_closed
+            else:
+                daily_chart, daily_points = _build_daily_pnl_percent_chart(
+                    history_entries,
+                    latest_point=latest_equity_point,
+                    days=7,
+                )
             if daily_chart:
                 legend_tail = ", ".join(
                     f"{day.strftime('%m-%d')}: {pct:+.1f}%"
@@ -10604,8 +10868,17 @@ def run_cycle():
                 new_orders.append(detail)
                 new_keys.append(key)
             if new_orders:
-                total_new_pnl = sum(detail.get("pnl", 0.0) for detail in new_orders if isinstance(detail.get("pnl"), (int, float)))
+                total_new_pnl = sum(
+                    detail.get("pnl", 0.0) for detail in new_orders if isinstance(detail.get("pnl"), (int, float))
+                )
                 results_lines.append(f"Σ новых закрытий: {total_new_pnl:+.2f} USDT ({len(new_orders)} ордеров)")
+                for detail in new_orders[:RESULTS_CLOSED_ORDER_DISPLAY_LIMIT]:
+                    results_lines.append(_format_closed_order_line(detail))
+                if len(new_orders) > RESULTS_CLOSED_ORDER_DISPLAY_LIMIT:
+                    results_lines.append(f"… ещё {len(new_orders) - RESULTS_CLOSED_ORDER_DISPLAY_LIMIT} ордер(ов)")
+                if _update_daily_closed_pnl_map(daily_closed_map, new_orders):
+                    results_state["daily_closed_pnl"] = daily_closed_map
+                    results_state_dirty = True
             else:
                 results_lines.append("🧾 Новых закрытых ордеров за 6ч нет.")
             _send_results_notification("\n".join(results_lines))
