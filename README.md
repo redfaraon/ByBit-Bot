@@ -2,6 +2,9 @@
 
 1. Install dependencies:
    ```bash
+   sudo apt update
+   sudo apt install python3-pip -y
+   python3 -m pip --version
    python3 -m pip install --upgrade pip
    python3 -m pip install --user -U ccxt pandas requests colorama "openai>=1.0.0" python-dotenv pyyaml
    ```
@@ -13,6 +16,11 @@
    export TELEGRAM_BOT_TOKEN=your_tg_token
    export TELEGRAM_CHAT_ID=your_chat_id
    export OPENAI_API_KEY=your_openai_key
+   ```
+
+   Disable password request from github
+   ```
+   git config --global credential.helper store
    ```
 
    Optional Telegram controls:
@@ -75,3 +83,13 @@ python manage_update.py status
 - `--log-file` / `--no-log` configure log capture.
 - `--no-restart` stops and updates without starting the bot.
 - `--foreground` keeps the bot attached to the current terminal.
+
+## Bybit timing/nonce errors
+
+If you see InvalidNonce / retCode 10002 from Bybit complaining about timestamp/recv_window, set a larger receive window and let CCXT adjust for server time:
+
+```bash
+export BYBIT_RECV_WINDOW_MS=15000   # 1k..60k ms (15s is safe default)
+```
+
+Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, or ntpdate).

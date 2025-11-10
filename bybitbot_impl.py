@@ -3759,6 +3759,15 @@ def start_telegram_long_polling() -> None:
         return
     stop_event = threading.Event()
     _TELEGRAM_LONG_POLL_STOP = stop_event
+    # Ensure no webhook is active and clear pending updates to avoid 409 conflicts
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
     def _poll_updates() -> None:
         nonlocal stop_event
@@ -5226,6 +5235,61 @@ def init_exchange():
     })
     exchange.options["recvWindow"] = 5000
     return exchange
+
+# --- Patch: robust init_exchange with adjustable recvWindow and time sync ---
+def _init_exchange_enhanced() -> Any:
+    api_key = os.getenv("BYBIT_API_KEY")
+    api_secret = os.getenv("BYBIT_API_SECRET")
+    if not api_key or not api_secret:
+        stored_key, stored_secret = _load_bybit_credentials()
+        if stored_key and stored_secret:
+            api_key = api_key or stored_key
+            api_secret = api_secret or stored_secret
+    if not api_key or not api_secret:
+        raise RuntimeError(
+            "�ॡ���� 㪠���� BYBIT_API_KEY � BYBIT_API_SECRET. "
+            "�ᯮ���� /bybitkey <apiKey> <apiSecret> ��� ������� �� � users/<id>/secrets.env."
+        )
+
+    def _env_int(name: str, default: int) -> int:
+        try:
+            v = int(str(os.getenv(name, str(default))).strip())
+        except Exception:
+            v = default
+        return max(1000, min(60000, v))
+
+    recv_window_ms = _env_int("BYBIT_RECV_WINDOW_MS", 15000)
+
+    exchange = ccxt.bybit({
+        "apiKey": api_key,
+        "secret": api_secret,
+        "enableRateLimit": True,
+        "options": {
+            "defaultType": "swap",
+            "recvWindow": recv_window_ms,
+            "adjustForTimeDifference": True,
+            "hedgeMode": HEDGE_MODE,
+        },
+    })
+    try:
+        exchange.options["recvWindow"] = recv_window_ms
+        exchange.options["adjustForTimeDifference"] = True
+    except Exception:
+        pass
+    try:
+        if getattr(exchange, "has", {}).get("fetchTime"):
+            exchange.load_time_difference()
+    except Exception:
+        pass
+    return exchange
+
+# Replace default init_exchange with enhanced version
+try:
+    init_exchange = _init_exchange_enhanced  # type: ignore
+except Exception:
+    # Should not happen, but prefer not to crash at import time
+    pass
+
 
 
 def _load_equity_history() -> list[dict]:
