@@ -5029,8 +5029,18 @@ def get_higher_tf(exchange, symbol, tf="4h", limit=120):
 
 def get_funding_rate(exchange, symbol):
     try:
-        if hasattr(exchange,"fetchFundingRate"):
-            fr = exchange.fetchFundingRate(symbol)
+        # Use derivative symbol format for Bybit (e.g., BTC/USDT:USDT)
+        resolved_symbol = _resolve_symbol_alias(symbol) or symbol
+        params = {}
+        try:
+            market_info = exchange.market(resolved_symbol)
+        except Exception:
+            market_info = None
+        category = _infer_market_category(resolved_symbol, market_info)
+        if category:
+            params["category"] = category
+        if hasattr(exchange, "fetchFundingRate"):
+            fr = exchange.fetchFundingRate(resolved_symbol, params)
             funding_rate = fr.get("fundingRate")
             try:
                 funding_rate = float(funding_rate) if funding_rate is not None else None
@@ -5058,7 +5068,7 @@ def get_funding_rate(exchange, symbol):
                 "summary": ", ".join(summary_parts)
             }
         if hasattr(exchange, "fetchFundingRateHistory"):
-            history = exchange.fetchFundingRateHistory(symbol, limit=1)
+            history = exchange.fetchFundingRateHistory(resolved_symbol, limit=1, params=params)
             if history:
                 fr = history[-1]
                 rate = fr.get("fundingRate")
@@ -5087,8 +5097,17 @@ def get_funding_rate(exchange, symbol):
 
 def get_open_interest(exchange, symbol):
     try:
-        if hasattr(exchange,"fetchOpenInterestHistory"):
-            hist = exchange.fetchOpenInterestHistory(symbol, timeframe="1h", limit=72)
+        resolved_symbol = _resolve_symbol_alias(symbol) or symbol
+        params = {}
+        try:
+            market_info = exchange.market(resolved_symbol)
+        except Exception:
+            market_info = None
+        category = _infer_market_category(resolved_symbol, market_info)
+        if category:
+            params["category"] = category
+        if hasattr(exchange, "fetchOpenInterestHistory"):
+            hist = exchange.fetchOpenInterestHistory(resolved_symbol, timeframe="1h", limit=72, params=params)
             cleaned = []
             for row in (hist or [])[-24:]:
                 if isinstance(row, dict):
