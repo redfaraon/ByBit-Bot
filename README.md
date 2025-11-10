@@ -9,18 +9,18 @@
    python3 -m pip install --user -U ccxt pandas requests colorama "openai>=1.0.0" python-dotenv pyyaml
    ```
 
-2. Export environment variables (example):
+2. Disable password request from github
+   ```
+   git config --global credential.helper store
+   ```
+
+3. Export environment variables (example):
    ```bash
    export BYBIT_API_KEY=your_api_key
    export BYBIT_API_SECRET=your_api_secret
    export TELEGRAM_BOT_TOKEN=your_tg_token
    export TELEGRAM_CHAT_ID=your_chat_id
    export OPENAI_API_KEY=your_openai_key
-   ```
-
-   Disable password request from github
-   ```
-   git config --global credential.helper store
    ```
 
    Optional Telegram controls:
@@ -45,7 +45,7 @@
    export TRAILING_DYNAMIC_MIN_ATR=0.35       # floor ATR multiplier when tightening
    ```
 
-3. Run the bot:
+4. Run the bot:
    ```bash
    python bybitbot.py
    ```
