@@ -3463,6 +3463,9 @@ def _infer_market_category(symbol: str, market_info: dict | None) -> str | None:
     category = None
     if isinstance(market_info, dict):
         base_info = market_info.get("info") if isinstance(market_info.get("info"), dict) else {}
+        market_type = str(market_info.get("type") or base_info.get("category") or "").lower()
+        if market_type in {"spot"}:
+            return "spot"
         contract_type = str(
             market_info.get("contractType")
             or (base_info.get("contractType") if isinstance(base_info, dict) else "")
@@ -3472,7 +3475,6 @@ def _infer_market_category(symbol: str, market_info: dict | None) -> str | None:
         elif _is_truthy_flag(market_info.get("inverse")) or "inverse" in contract_type:
             category = "inverse"
         else:
-            market_type = str(market_info.get("type") or "").lower()
             if market_type in {"linear", "inverse"}:
                 category = market_type
             elif market_type in {"swap", "future"}:
@@ -3486,8 +3488,14 @@ def _infer_market_category(symbol: str, market_info: dict | None) -> str | None:
                     category = "linear" if settle_coin == quote_coin else "inverse"
                 else:
                     category = "linear" if market_type == "swap" else None
-    if not category and ":" in symbol:
-        category = "linear"
+    if not category:
+        sym = str(symbol or "")
+        if sym.upper().endswith(":SPOT") or sym.upper().endswith(":SP"):
+            return "spot"
+        if ":" in sym:
+            return "linear"
+        if "/" in sym:
+            return "spot"
     return category
 
 
@@ -5104,6 +5112,8 @@ def get_open_interest(exchange, symbol):
         except Exception:
             market_info = None
         category = _infer_market_category(resolved_symbol, market_info)
+        if category == "spot":
+            return []
         if category:
             params["category"] = category
         if hasattr(exchange, "fetchOpenInterestHistory"):
@@ -5124,6 +5134,63 @@ def get_open_interest(exchange, symbol):
     except Exception as e:
         log(f"⚠️ Open interest недоступен: {e}", Fore.YELLOW)
     return []
+
+
+# --- Helpers for mixed spot/derivatives trading ---
+def _sanitize_order_params_for_category(params: dict[str, Any] | None, category: str | None) -> dict[str, Any]:
+    p: dict[str, Any] = dict(params or {})
+    cat = (category or "").lower()
+    if cat == "spot":
+        for key in (
+            "reduceOnly",
+            "positionIdx",
+            "triggerPrice",
+            "triggerDirection",
+            "closeOnTrigger",
+            "stopLoss",
+            "takeProfit",
+            "tpSlMode",
+            "trailingStop",
+            "stopLossPrice",
+            "takeProfitPrice",
+        ):
+            p.pop(key, None)
+        p["category"] = "spot"
+    else:
+        p.setdefault("category", "linear")
+    return p
+
+
+def _spot_funds_sufficient(exchange, symbol: str, side: str, amount: float | None, price: float | None) -> tuple[bool, str | None]:
+    try:
+        balance = exchange.fetch_balance()
+    except Exception as exc:
+        return False, f"fetch_balance failed: {exc}"
+    side_lower = (side or "").lower()
+    base = str(symbol).split("/")[0].split(":")[0]
+    quote = str(symbol).split("/")[1].split(":")[0] if "/" in str(symbol) else "USDT"
+    if side_lower == "sell":
+        bucket = balance.get(base) or {}
+        free = bucket.get("free") if isinstance(bucket, dict) else None
+        try:
+            free_val = float(free)
+        except Exception:
+            free_val = None
+        if free_val is None or amount is None or free_val + 1e-12 < float(amount):
+            return False, f"spot sell {base}: insufficient free balance (have {free_val}, need {amount})"
+    elif side_lower == "buy":
+        if amount is None or price is None:
+            return False, "spot buy requires amount and price"
+        need = float(amount) * float(price) * 1.001
+        bucket = balance.get(quote) or {}
+        free = bucket.get("free") if isinstance(bucket, dict) else None
+        try:
+            free_val = float(free)
+        except Exception:
+            free_val = None
+        if free_val is None or free_val + 1e-8 < need:
+            return False, f"spot buy {base}: insufficient {quote} (have {free_val}, need ~{need:.2f})"
+    return True, None
 
 
 def get_news_from_rss(base_symbol: str, limit: int):
@@ -6572,6 +6639,11 @@ def _resolve_symbol_alias(symbol: str | None) -> str | None:
     if alias_target:
         sym = alias_target
     sym_upper = sym.upper()
+    # Explicit spot directive: e.g., BTC/USDT:SPOT -> BTC/USDT
+    if sym_upper.endswith(":SPOT") or sym_upper.endswith(":SP"):
+        base_part = sym_upper.split("/")[0]
+        quote_part = sym_upper.split("/")[1].split(":")[0] if "/" in sym_upper else "USDT"
+        return f"{base_part}/{quote_part}"
     if ":" in sym_upper:
         return sym_upper
     mapped = TICKER_TO_SYMBOL.get(sym_upper)
@@ -6583,6 +6655,7 @@ def _resolve_symbol_alias(symbol: str | None) -> str | None:
             return f"{base}/{quote}"
         quote = quote or "USDT"
         if quote == "USDT":
+            # Default to derivatives unless explicitly marked spot via :SPOT
             return f"{base}/USDT:USDT"
         return f"{base}/{quote}"
     if sym_upper.endswith("USDT"):
@@ -7704,6 +7777,12 @@ def execute_extra_orders(
     exchange_symbol = _resolve_symbol_alias(symbol) or symbol
     open_orders = open_orders or []
     position_side = ((current_position or {}).get("side") or "").lower()
+    # Determine market category (spot/linear/inverse)
+    try:
+        _market_info = exchange.market(exchange_symbol)
+    except Exception:
+        _market_info = None
+    category = _infer_market_category(exchange_symbol, _market_info) or "linear"
     reduce_only_map: dict[str, list[dict]] = {}
     existing_non_reduce_limits: dict[tuple[str, float], int] = {}
     for existing in open_orders:
@@ -7974,6 +8053,8 @@ def execute_extra_orders(
             )
             ccxt_type = fallback_type
         allowed_types = {"limit", "market", "trailingStop"}
+        if category == "spot" and "trailingStop" in allowed_types:
+            allowed_types.remove("trailingStop")
         if ccxt_type not in allowed_types:
             fallback_type = "limit" if price is not None else "market"
             log(
@@ -7988,6 +8069,20 @@ def execute_extra_orders(
             price = None
         if ccxt_type in {"limit", "market"}:
             params["orderType"] = ccxt_type.capitalize()
+        # Sanitize params for category and set category for CCXT/Bybit v5
+        params = _sanitize_order_params_for_category(params, category)
+        if category == "spot":
+            # Prevent spot short attempts and check balances
+            if side == "sell":
+                ok, err = _spot_funds_sufficient(exchange, exchange_symbol, side, amount, price)
+                if not ok:
+                    log(f"[WARN] Skipping spot SELL for {symbol}: {err}", Fore.YELLOW)
+                    continue
+            elif side == "buy" and price is not None:
+                ok, err = _spot_funds_sufficient(exchange, exchange_symbol, side, amount, price)
+                if not ok:
+                    log(f"[WARN] Skipping spot BUY for {symbol}: {err}", Fore.YELLOW)
+                    continue
         if (
             is_reduce_only
             and ccxt_type == "market"
@@ -10176,10 +10271,21 @@ def run_cycle():
                         send_tg(f"[WARN] {sym}: size {notional:.2f} USDT below exchange minimum {min_notional_required:.2f} USDT")
                         continue
                     try:
+                        # Determine category (spot/derivatives) and prepare base params
+                        try:
+                            _mi = ex.market(sym)
+                        except Exception:
+                            _mi = None
+                        category = _infer_market_category(sym, _mi) or "linear"
                         position_idx = get_position_idx(side)
                         base_params = {"takeProfit": tp, "stopLoss": sl, "tpSlMode": "Full", "reduceOnly": False}
-                        if position_idx is not None:
+                        if position_idx is not None and category != "spot":
                             base_params["positionIdx"] = position_idx
+                        # Sanitize for spot and set category for Bybit v5
+                        base_params = _sanitize_order_params_for_category(base_params, category)
+                        if category == "spot" and side.lower() == "sell":
+                            log(f"[WARN] Skipping spot OPEN SELL for {sym}: shorting is not supported on spot", Fore.YELLOW)
+                            continue
                         scheme = ENTRY_LADDER_SCHEME if ENTRY_LADDER_SCHEME else [(1.0, 0.0)]
                         normalized_entries: list[tuple[float, float]] = []
                         for share, offset in scheme:
@@ -10260,8 +10366,9 @@ def run_cycle():
                                 layer_notional = precise_qty * layer_price
                                 if layer_notional < min_notional_required:
                                     continue
-                            layer_params = dict(base_params)
-                            ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
+                                layer_params = dict(base_params)
+                                layer_params = _sanitize_order_params_for_category(layer_params, category)
+                                ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
                             open_executed = True
                             entry_created += 1
                             remaining_qty = max(0.0, remaining_qty - precise_qty)
@@ -10299,8 +10406,9 @@ def run_cycle():
                                 fallback_notional = precise_qty * fallback_price
                                 if fallback_notional < min_notional_required:
                                     raise RuntimeError("no entry orders placed")
-                            layer_params = dict(base_params)
-                            ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
+                                layer_params = dict(base_params)
+                                layer_params = _sanitize_order_params_for_category(layer_params, category)
+                                ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
                             open_executed = True
                             entry_created = 1
                             remaining_qty = max(0.0, qty - precise_qty)

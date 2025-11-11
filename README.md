@@ -93,3 +93,15 @@ export BYBIT_RECV_WINDOW_MS=15000   # 1k..60k ms (15s is safe default)
 ```
 
 Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, or ntpdate).
+
+## Spot + Futures on Bybit (Unified)
+
+- Mark spot pairs explicitly in `PAIR_LIST` with the `:SPOT` suffix, e.g. `BTC/USDT:SPOT, ETH/USDT:SPOT`.
+- Futures (USDT-perp) use `:USDT` settle suffix, e.g. `BTC/USDT:USDT`. If no suffix is provided, the bot defaults to derivatives.
+- Mixed mode is supported on a unified account:
+  - Funding/Open Interest are queried only for derivatives.
+  - Spot orders do not use reduceOnly/positionIdx/conditional fields.
+  - The bot skips “open” short on spot (`SELL` to open). Closing spot exposure is done by explicit `SELL` of held assets.
+- Ensure free balances exist for spot orders:
+  - `BUY`: free `USDT` must cover notional + fees.
+  - `SELL`: free base asset must cover the sell amount.
