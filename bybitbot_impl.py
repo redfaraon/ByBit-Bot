@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+﻿﻿# -*- coding: utf-8 -*-
 # Version: 11.7
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
@@ -1912,6 +1912,7 @@ def ai_plan_trades(
         '      "symbol": "PAIR",\n'
         '      "action": "open|close|manage|reduce|skip",\n'
         '      "side": "buy|sell",\n'
+        '      "market": "spot|linear|inverse|derivatives",\n'
         '      "notional_pct": float,\n'
         '      "reason": "short explanation",\n'
         '      "tp_atr": float,\n'
@@ -1926,7 +1927,8 @@ def ai_plan_trades(
         '  "next_run_time": "2025-01-01T10:30:00Z",\n'
         '  "notes": "optional"\n'
         "}\n"
-        "If additional context is required, populate 'needs' and leave 'decisions' empty."
+        "For each decision choose the execution market: 'spot' for cash trades, or 'linear'/'inverse'/'derivatives' for perpetuals. "
+        "If unsure, use 'derivatives'. If additional context is required, populate 'needs' and leave 'decisions' empty."
     )
     messages = [
         {"role": "system", "content": system_msg},
@@ -2008,6 +2010,14 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     sym = decision.get("symbol")
     if not sym:
         return 0, positions_map, open_orders_cache
+    # Apply market selection from AI (spot vs derivatives)
+    market_choice = _normalize_market_value(
+        decision.get("market") or decision.get("venue") or decision.get("category")
+    )
+    effective_sym = _apply_category_to_symbol(sym, market_choice) if market_choice else sym
+    if effective_sym != sym:
+        log(f"{sym}: market={market_choice or 'default'} -> using {effective_sym}", Fore.LIGHTBLACK_EX)
+        sym = effective_sym
     action_raw = (decision.get("action") or "skip").lower()
     action_aliases = {
         "replace_orders": "manage",
@@ -6666,6 +6676,49 @@ def _resolve_symbol_alias(symbol: str | None) -> str | None:
         return f"{base}/USDT:USDT"
     return f"{sym_upper}/USDT:USDT"
 
+
+
+def _normalize_market_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        s = str(value).strip().lower()
+    except Exception:
+        return None
+    if not s:
+        return None
+    if s in {"spot", "cash", "spot_market"}:
+        return "spot"
+    if s in {"derivatives", "futures", "perp", "perps", "contract", "contracts"}:
+        return "derivatives"
+    if s in {"linear", "inverse"}:
+        return s
+    return None
+
+
+def _apply_category_to_symbol(symbol: str, category: Optional[str]) -> str:
+    cat = (category or "").lower()
+    sym = str(symbol).strip()
+    if cat == "spot":
+        # Force plain spot symbol without settle suffix
+        if ":" in sym:
+            left, right = sym.split("/", 1) if "/" in sym else (sym, "USDT")
+            quote = right.split(":")[0]
+            return f"{left}/{quote}"
+        if "/" in sym:
+            return sym
+        return f"{sym}/USDT"
+    # For derivatives default to USDT settle if not specified
+    if ":" in sym:
+        return sym
+    if "/" in sym:
+        base, quote = sym.split("/", 1)
+        if ":" in quote:
+            return sym
+        if quote.upper() == "USDT":
+            return f"{base}/USDT:USDT"
+        return sym
+    return f"{sym}/USDT:USDT"
 
 def _canonical_decision_symbol(symbol: str | None) -> str | None:
     resolved = _resolve_symbol_alias(symbol)
