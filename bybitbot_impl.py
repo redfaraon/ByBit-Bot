@@ -1,4 +1,4 @@
-﻿﻿# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Version: 11.7
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
