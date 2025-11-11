@@ -1895,6 +1895,7 @@ def ai_plan_trades(
     positions_payload = _compact_positions_snapshot(positions_snapshot)
     pending_orders_payload = _compact_orders_snapshot(pending_orders)
     payload = {
+        "allocations": {"spot_pct": SPOT_ALLOCATION_PCT, "derivatives_pct": (1.0 - SPOT_ALLOCATION_PCT)},
         "stage": stage,
         "equity_usdt": equity,
         "available_margin_usdt": available_margin,
@@ -2290,6 +2291,7 @@ def refresh_settings():
     global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global AI_SECONDARY_BUDGET_START, AI_HARD_STOP_BUDGET
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
+    global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
@@ -2329,6 +2331,20 @@ def refresh_settings():
         MAX_DYNAMIC_RISK_PCT = base_max_default
     MIN_DYNAMIC_RISK_PCT = max(1e-5, min(MIN_DYNAMIC_RISK_PCT, RISK_PCT))
     MAX_DYNAMIC_RISK_PCT = max(RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT))
+    # Market allocation defaults (overridable by model via trade plan 'allocations')
+    try:
+        SPOT_ALLOCATION_PCT = float(os.getenv("SPOT_ALLOCATION_PCT", "0.0"))
+    except (TypeError, ValueError) {
+        SPOT_ALLOCATION_PCT = 0.0
+    }
+    SPOT_ALLOCATION_PCT = max(0.0, min(1.0, SPOT_ALLOCATION_PCT))
+    DERIV_ALLOCATION_PCT = max(0.0, min(1.0, 1.0 - SPOT_ALLOCATION_PCT))
+    CURRENT_MARKET_ALLOCATIONS = {
+        "spot": SPOT_ALLOCATION_PCT,
+        "derivatives": DERIV_ALLOCATION_PCT,
+        "linear": DERIV_ALLOCATION_PCT,
+        "inverse": DERIV_ALLOCATION_PCT,
+    }
     CURRENT_RISK_PCT = min(MAX_DYNAMIC_RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, CURRENT_RISK_PCT if CURRENT_RISK_PCT > 0 else RISK_PCT))
     try:
         BREAKEVEN_ENABLED = env_int("BREAKEVEN_ENABLED", env_int("MOVE_STOP_TO_BREAKEVEN", 1)) != 0
@@ -9586,6 +9602,35 @@ def run_cycle():
             stage="initial",
         )
         if trade_plan:
+            # Optional model-driven market allocations
+            alloc = trade_plan.get("allocations") if isinstance(trade_plan, dict) else None
+            if isinstance(alloc, dict):
+                spot_val = alloc.get("spot_pct") if isinstance(alloc.get("spot_pct"), (int, float)) else None
+                deriv_val = alloc.get("derivatives_pct") if isinstance(alloc.get("derivatives_pct"), (int, float)) else None
+                try:
+                    if spot_val is not None:
+                        spot_val = float(spot_val)
+                except Exception:
+                    spot_val = None
+                try:
+                    if deriv_val is not None:
+                        deriv_val = float(deriv_val)
+                except Exception:
+                    deriv_val = None
+                if spot_val is not None or deriv_val is not None:
+                    if spot_val is None and deriv_val is not None:
+                        spot_val = max(0.0, min(1.0, 1.0 - deriv_val))
+                    if deriv_val is None and spot_val is not None:
+                        deriv_val = max(0.0, min(1.0, 1.0 - spot_val))
+                    if spot_val is not None and deriv_val is not None:
+                        total = spot_val + deriv_val
+                        if total > 0:
+                            spot_val /= total
+                            deriv_val /= total
+                        CURRENT_MARKET_ALLOCATIONS["spot"] = spot_val
+                        for key in ("derivatives","linear","inverse"):
+                            CURRENT_MARKET_ALLOCATIONS[key] = deriv_val
+                        log(f"[AI] Market allocations: spot={spot_val:.2%}, derivatives={deriv_val:.2%}", Fore.LIGHTBLACK_EX)if trade_plan:
             trade_next_minutes = trade_plan.get("next_run_minutes")
             if trade_next_minutes is not None:
                 try:
@@ -9595,8 +9640,7 @@ def run_cycle():
             trade_next_time = trade_plan.get("next_run_time")
             if trade_next_time:
                 selection_next_time = trade_next_time
-        if trade_plan:
-            for decision in trade_plan.get("decisions") or []:
+        if trade_plan:\n            for decision in trade_plan.get("decisions") or []:
                 sym_raw = decision.get("symbol")
                 sym_dec = sym_raw.strip() if isinstance(sym_raw, str) else ""
                 canonical_key = _canonical_decision_symbol(sym_dec) or sym_dec
@@ -10272,8 +10316,17 @@ def run_cycle():
                             send_tg(f"⚠️ {sym}: не удалось оценить риск, сделка пропущена")
                             continue
                         risk_budget_base = max(0.0, min(equity, available_margin))
-                        risk_capital = risk_budget_base * CURRENT_RISK_PCT
+                        risk_budget_base = max(0.0, min(equity, available_margin))
                         if risk_capital <= 0:
+                        # Apply market allocations (spot vs derivatives)
+                        try:
+                            _mi = ex.market(sym)
+                        except Exception:
+                            _mi = None
+                        _cat = _infer_market_category(sym, _mi) or ("derivatives")
+                        alloc = CURRENT_MARKET_ALLOCATIONS.get(_cat, CURRENT_MARKET_ALLOCATIONS.get("derivatives", 1.0))
+                        alloc = max(0.0, min(1.0, alloc))
+                        risk_budget_base *= alloc
                             log(f"ℹ️ Недостаточно бюджета риска для {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
                             send_tg(f"ℹ️ {sym}: недостаточно свободного баланса ({available_margin:.2f} USDT)")
                             continue
