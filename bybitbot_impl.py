@@ -9627,9 +9627,12 @@ def run_cycle():
                             spot_val /= total
                             deriv_val /= total
                         CURRENT_MARKET_ALLOCATIONS["spot"] = spot_val
-                        for key in ("derivatives","linear","inverse"):
+                        for key in ("derivatives", "linear", "inverse"):
                             CURRENT_MARKET_ALLOCATIONS[key] = deriv_val
-                        log(f"[AI] Market allocations: spot={spot_val:.2%}, derivatives={deriv_val:.2%}", Fore.LIGHTBLACK_EX)if trade_plan:
+                        log(
+                            f"[AI] Market allocations: spot={spot_val:.2%}, derivatives={deriv_val:.2%}",
+                            Fore.LIGHTBLACK_EX,
+                        )
             trade_next_minutes = trade_plan.get("next_run_minutes")
             if trade_next_minutes is not None:
                 try:
@@ -9639,7 +9642,8 @@ def run_cycle():
             trade_next_time = trade_plan.get("next_run_time")
             if trade_next_time:
                 selection_next_time = trade_next_time
-        if trade_plan:\n            for decision in trade_plan.get("decisions") or []:
+        if trade_plan:
+            for decision in (trade_plan.get("decisions") or []):
                 sym_raw = decision.get("symbol")
                 sym_dec = sym_raw.strip() if isinstance(sym_raw, str) else ""
                 canonical_key = _canonical_decision_symbol(sym_dec) or sym_dec
