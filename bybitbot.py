@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import random
+import time
 import shutil
 import subprocess
 import sys
@@ -1143,9 +1144,35 @@ def main():
     if head_hash:
         head_status = history.setdefault("commits", {}).get(head_hash)
     if head_hash and head_status == "failed":
-        reason = f"HEAD {head_hash[:8]} previously failed"
-        if not _run_backups(reason):
-            raise RuntimeError("No viable fallback available")
+        retry_state = history.setdefault("failed_head_retry", {})
+        retry_interval = max(60, int(os.getenv("BYBITBOT_FAILED_HEAD_RETRY_INTERVAL", "900")))
+        now = time.time()
+        last_retry = retry_state.get(head_hash)
+        if last_retry and now - last_retry < retry_interval:
+            reason = f"HEAD {head_hash[:8]} previously failed"
+            if not _run_backups(reason):
+                raise RuntimeError("No viable fallback available")
+            return
+        print(f"[BOOT] Retrying failed HEAD {head_hash[:8]} before falling back.", file=sys.stderr)
+        retry_state[head_hash] = now
+        _save_fallback_history(history)
+        try:
+            _run_current()
+        except Exception as exc:
+            traceback.print_exc()
+            history.setdefault("commits", {})[head_hash] = "failed"
+            _save_fallback_history(history)
+            if not _run_backups(str(exc)):
+                raise
+        else:
+            history.setdefault("commits", {})[head_hash] = "success"
+            history["fallback_active"] = False
+            history["fallback_cycles"] = 0
+            history["fallback_last_head"] = None
+            history["fallback_source"] = None
+            history["fallback_target"] = None
+            history["fallback_branch_next"] = "stable"
+            _save_fallback_history(history)
         return
 
     try:
