@@ -7628,6 +7628,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             fallback_qty_precise = fallback_qty_target
         if min_amount and fallback_qty_precise + 1e-12 < min_amount:
             min_qty_violation = True
+        elif min_qty_step and fallback_qty_precise + 1e-12 < min_qty_step:
+            min_qty_violation = True
         else:
             fallback_params = dict(base_params)
             fallback_params["takeProfit"] = fallback_take_price
@@ -10388,8 +10390,8 @@ def run_cycle():
                     else:
                         risk_distance = abs(price - sl)
                         if risk_distance <= 0 or not math.isfinite(risk_distance):
-                            log(f"?? ?????????? ??????? ?? ??? {sym}", Fore.YELLOW)
-                            send_tg(f"?? {sym}: ?? ????? ????? ??, ???? ?????")
+                            log(f"?? ���������� ������� �� ��� {sym}", Fore.YELLOW)
+                            send_tg(f"?? {sym}: �� 㤠���� �業��� ��, ᤥ��� �ய�饭�")
                             continue
                         risk_budget_base = max(0.0, min(equity, available_margin))
                         try:
@@ -10405,8 +10407,8 @@ def run_cycle():
                         risk_budget_base *= alloc
                         risk_capital = risk_budget_base * CURRENT_RISK_PCT
                         if risk_capital <= 0:
-                            log(f"?? ???????? ???? ?? ??? {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
-                            send_tg(f"?? {sym}: ???????? ???????? ?????? ({available_margin:.2f} USDT)")
+                            log(f"?? �������筮 ��� �᪠ ��� {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
+                            send_tg(f"?? {sym}: �������筮 ᢮������� ������ ({available_margin:.2f} USDT)")
                             continue
                         qty = risk_capital / risk_distance
                         if min_qty_rule and qty < min_qty_rule:
