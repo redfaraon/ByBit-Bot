@@ -291,6 +291,7 @@ def _load_fallback_history() -> dict:
     data.setdefault("fallback_last_head", None)
     data.setdefault("fallback_source", None)
     data.setdefault("fallback_target", None)
+    data.setdefault("fallback_failed_head", None)
     return data
 
 
@@ -334,11 +335,22 @@ def _load_cycle_state() -> dict:
 
 
 
-def _record_fallback(history: dict, *, head_hash: str | None, source_label: str, target_label: str) -> None:
+def _record_fallback(
+    history: dict,
+    *,
+    head_hash: str | None,
+    source_label: str,
+    target_label: str,
+    origin_head: str | None = None,
+) -> None:
     history["fallback_active"] = True
     history["fallback_cycles"] = 0
     if head_hash:
         history["fallback_last_head"] = head_hash
+    if origin_head:
+        history["fallback_failed_head"] = origin_head
+    else:
+        history.setdefault("fallback_failed_head", head_hash)
     history["fallback_source"] = source_label
     history["fallback_target"] = target_label
     history.setdefault("fallback_probe_interval", FALLBACK_PROBE_INTERVAL)
@@ -596,7 +608,15 @@ def _build_backup_candidates(
             context = f"{head_short} -> branch:{name}"
             candidate_reason = reason
 
-        def on_result(success: bool, branch=name, label=mode_label, source=base_source_label, version=version_label) -> None:
+        def on_result(
+            success: bool,
+            branch=name,
+            label=mode_label,
+            source=base_source_label,
+            version=version_label,
+            fallback_commit=commit_hash,
+            failing_head=head_hash,
+        ) -> None:
             branch_history[branch] = "success" if success else "failed"
             if success:
                 if label == "stable":
@@ -607,7 +627,13 @@ def _build_backup_candidates(
                 history.pop("stable_backup", None)
                 history["fallback_branch_next"] = "legacy" if label == "stable" else "stable"
                 if record_fallback:
-                    _record_fallback(history, head_hash=head_hash, source_label=source, target_label=version)
+                    _record_fallback(
+                        history,
+                        head_hash=fallback_commit,
+                        source_label=source,
+                        target_label=version,
+                        origin_head=failing_head,
+                    )
                 else:
                     _save_fallback_history(history)
             else:
@@ -650,13 +676,26 @@ def _build_backup_candidates(
             context = f"{head_short} -> tag:{name}"
             candidate_reason = reason
 
-        def on_result(success: bool, tag=name, commit=commit_hash, version=version_label, source=source_label) -> None:
+        def on_result(
+            success: bool,
+            tag=name,
+            commit=commit_hash,
+            version=version_label,
+            source=source_label,
+            failing_head=head_hash,
+        ) -> None:
             tag_history[tag] = "success" if success else "failed"
             if success:
                 history["stable_commit"] = commit
                 history.pop("stable_backup", None)
                 if record_fallback:
-                    _record_fallback(history, head_hash=head_hash, source_label=source, target_label=version)
+                    _record_fallback(
+                        history,
+                        head_hash=commit,
+                        source_label=source,
+                        target_label=version,
+                        origin_head=failing_head,
+                    )
                 else:
                     _save_fallback_history(history)
             else:
@@ -708,13 +747,25 @@ def _build_backup_candidates(
             context = f"{head_short} -> {selected_commit[:8]}"
             candidate_reason = reason
 
-        def on_result(success: bool, commit=selected_commit, version=version_label, source=source_label) -> None:
+        def on_result(
+            success: bool,
+            commit=selected_commit,
+            version=version_label,
+            source=source_label,
+            failing_head=head_hash,
+        ) -> None:
             commit_history[commit] = "success" if success else "failed"
             if success:
                 history["stable_commit"] = commit
                 history.pop("stable_backup", None)
                 if record_fallback:
-                    _record_fallback(history, head_hash=head_hash, source_label=source, target_label=version)
+                    _record_fallback(
+                        history,
+                        head_hash=commit,
+                        source_label=source,
+                        target_label=version,
+                        origin_head=failing_head,
+                    )
                 else:
                     _save_fallback_history(history)
             else:
@@ -1049,13 +1100,15 @@ def main():
 
     if history.get("fallback_active"):
         fallback_head = history.get("fallback_last_head")
+        failed_head = history.get("fallback_failed_head")
         current_head = _current_head()
-        if current_head and fallback_head and current_head != fallback_head:
+        if current_head and failed_head and current_head != failed_head:
             history["fallback_active"] = False
             history["fallback_cycles"] = 0
             history["fallback_last_head"] = None
             history["fallback_source"] = None
             history["fallback_target"] = None
+            history["fallback_failed_head"] = None
             _save_fallback_history(history)
             print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", file=sys.stderr)
             _run_current()
@@ -1117,6 +1170,7 @@ def main():
                     history["fallback_last_head"] = None
                     history["fallback_source"] = None
                     history["fallback_target"] = None
+                    history["fallback_failed_head"] = None
                     _save_fallback_history(history)
                     return
                 _save_fallback_history(history)
@@ -1171,6 +1225,7 @@ def main():
             history["fallback_last_head"] = None
             history["fallback_source"] = None
             history["fallback_target"] = None
+            history["fallback_failed_head"] = None
             history["fallback_branch_next"] = "stable"
             _save_fallback_history(history)
         return
@@ -1194,6 +1249,7 @@ def main():
             history["fallback_last_head"] = None
             history["fallback_source"] = None
             history["fallback_target"] = None
+            history["fallback_failed_head"] = None
             history["fallback_branch_next"] = "stable"
             _save_fallback_history(history)
 
