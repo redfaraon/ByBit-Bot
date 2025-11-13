@@ -4057,6 +4057,43 @@ def _sanitize_sandbox_secrets(root: Path, allowed_bot_ids: set[str], allow_root_
             pass
 
 
+def _ensure_sandbox_user_config(root: Path, bot_id: str) -> None:
+    users_dir = root / "users"
+    try:
+        users_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+    users_json = users_dir / "users.json"
+    if users_json.exists():
+        try:
+            if users_json.stat().st_size > 0:
+                return
+        except Exception:
+            return
+    sample_json = users_dir / "users.example.json"
+    if sample_json.exists():
+        try:
+            shutil.copy2(sample_json, users_json)
+            return
+        except Exception:
+            pass
+    bot_label = bot_id or "default"
+    payload = {
+        "users": [
+            {
+                "id": bot_label,
+                "label": bot_label,
+                "enabled": True,
+                "state_dir": f"runtime/{bot_label}",
+            }
+        ]
+    }
+    try:
+        users_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _prepare_support_sandbox(
     request_text: str,
     *,
@@ -4099,6 +4136,7 @@ def _prepare_support_sandbox(
         )
     except Exception as exc:
         log(f"[WARN] Support sandbox note write failed: {exc}", Fore.YELLOW)
+    _ensure_sandbox_user_config(sandbox_dir, bot_id)
     sim_output = ""
     simulation_log = sandbox_dir / "simulation.log"
     try:
@@ -5787,6 +5825,7 @@ def _collect_recent_closed_pnl(
         if bybit_count:
             return bybit_total, bybit_count, warnings, bybit_details
     # Prefer closed orders first
+    spot_trade_pool: dict[str, list[dict[str, Any]]] = {}
     for symbol in normalized_symbols:
         params = {}
         if exchange_id.lower() == "bybit":
@@ -5912,6 +5951,14 @@ def _collect_recent_closed_pnl(
             pnl_val = _extract_closed_pnl_from_payload(trade)
             if pnl_val is None:
                 pnl_val = _extract_closed_pnl_from_payload(trade.get("info"))
+            amount_val = safe_float(
+                trade.get("amount")
+                or trade.get("amountFilled")
+                or trade.get("filled")
+                or trade.get("contracts")
+                or trade.get("qty")
+            )
+            price_val = safe_float(trade.get("price") or trade.get("average") or trade.get("cost"))
             fee_cost = None
             fee_currency = None
             fee = trade.get("fee")
@@ -5919,7 +5966,26 @@ def _collect_recent_closed_pnl(
                 fee_cost = safe_float(fee.get("cost"))
                 fee_currency = str(fee.get("currency") or "").upper()
             if pnl_val is None:
-                # Without explicit PnL we cannot infer from fills accurately; skip.
+                category = params.get("category") if isinstance(params, dict) else None
+                if not category:
+                    market_info = None
+                    try:
+                        market_info = exchange.market(symbol)
+                    except Exception:
+                        market_info = None
+                    category = _infer_market_category(symbol, market_info)
+                if category == "spot" and amount_val is not None and price_val is not None:
+                    spot_trade_pool.setdefault(symbol, []).append(
+                        {
+                            "id": trade_id or "",
+                            "timestamp": trade_ts,
+                            "side": trade.get("side"),
+                            "amount": amount_val,
+                            "price": price_val,
+                            "fee_cost": fee_cost,
+                            "fee_currency": fee_currency,
+                        }
+                    )
                 continue
             if trade_id:
                 seen_trade_ids.add(trade_id)
@@ -5931,8 +5997,8 @@ def _collect_recent_closed_pnl(
                 "id": trade_id or "",
                 "symbol": symbol,
                 "side": str(trade.get("side") or "").upper() or "?",
-                "amount": safe_float(trade.get("amount") or trade.get("qty") or trade.get("contracts")),
-                "price": safe_float(trade.get("price")),
+                "amount": amount_val,
+                "price": price_val,
                 "pnl": float(pnl_val),
                 "timestamp": (
                     datetime.datetime.fromtimestamp(trade_ts / 1000, tz=datetime.timezone.utc).isoformat()
@@ -5941,6 +6007,12 @@ def _collect_recent_closed_pnl(
                 ),
             }
             order_details.append(detail)
+    for symbol, trades in spot_trade_pool.items():
+        pnl_spot, count_spot, details_spot = _compute_spot_realized_pnl(symbol, trades)
+        if count_spot:
+            total_pnl += pnl_spot
+            fill_count += count_spot
+            order_details.extend(details_spot)
     if fill_count > 0:
         return total_pnl, fill_count, warnings, order_details
     return None, 0, warnings, order_details
