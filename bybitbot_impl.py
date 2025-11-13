@@ -10388,23 +10388,25 @@ def run_cycle():
                     else:
                         risk_distance = abs(price - sl)
                         if risk_distance <= 0 or not math.isfinite(risk_distance):
-                            log(f"ℹ️ Невозможно рассчитать риск для {sym}", Fore.YELLOW)
-                            send_tg(f"⚠️ {sym}: не удалось оценить риск, сделка пропущена")
+                            log(f"?? ?????????? ??????? ?? ??? {sym}", Fore.YELLOW)
+                            send_tg(f"?? {sym}: ?? ????? ????? ??, ???? ?????")
                             continue
                         risk_budget_base = max(0.0, min(equity, available_margin))
-                        risk_budget_base = max(0.0, min(equity, available_margin))
-                        if risk_capital <= 0:
-                        # Apply market allocations (spot vs derivatives)
                         try:
-                            _mi = ex.market(sym)
+                            market_snapshot = ex.market(sym)
                         except Exception:
-                            _mi = None
-                        _cat = _infer_market_category(sym, _mi) or ("derivatives")
-                        alloc = CURRENT_MARKET_ALLOCATIONS.get(_cat, CURRENT_MARKET_ALLOCATIONS.get("derivatives", 1.0))
+                            market_snapshot = None
+                        category = _infer_market_category(sym, market_snapshot) or "derivatives"
+                        alloc = CURRENT_MARKET_ALLOCATIONS.get(
+                            category,
+                            CURRENT_MARKET_ALLOCATIONS.get("derivatives", 1.0),
+                        )
                         alloc = max(0.0, min(1.0, alloc))
                         risk_budget_base *= alloc
-                            log(f"ℹ️ Недостаточно бюджета риска для {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
-                            send_tg(f"ℹ️ {sym}: недостаточно свободного баланса ({available_margin:.2f} USDT)")
+                        risk_capital = risk_budget_base * CURRENT_RISK_PCT
+                        if risk_capital <= 0:
+                            log(f"?? ???????? ???? ?? ??? {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
+                            send_tg(f"?? {sym}: ???????? ???????? ?????? ({available_margin:.2f} USDT)")
                             continue
                         qty = risk_capital / risk_distance
                         if min_qty_rule and qty < min_qty_rule:

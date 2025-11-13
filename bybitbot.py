@@ -839,7 +839,8 @@ def _env_truthy(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _update_current_branch() -> None:
+def _update_current_branch() -> tuple[str | None, bool]:
+    before_head = _current_head()
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -849,10 +850,10 @@ def _update_current_branch() -> None:
             cwd=REPO_ROOT,
         )
     except Exception:
-        return
+        return None, False
     branch = result.stdout.strip()
     if not branch or branch == "HEAD":
-        return
+        return None, False
     try:
         subprocess.run(
             ["git", "fetch", "--quiet", "origin", branch],
@@ -862,7 +863,7 @@ def _update_current_branch() -> None:
             stderr=subprocess.DEVNULL,
         )
     except Exception:
-        return
+        return branch, False
     try:
         subprocess.run(
             ["git", "merge", "--ff-only", f"origin/{branch}"],
@@ -875,8 +876,8 @@ def _update_current_branch() -> None:
         print(f"[BOOT] Failed to fast-forward branch {branch}; continuing with local HEAD.", file=sys.stderr)
     except Exception:
         pass
-
-    return None
+    after_head = _current_head()
+    return branch, bool(before_head and after_head and before_head != after_head)
 
 
 def _run_script_candidate(
@@ -1082,7 +1083,11 @@ def main():
     else:
         _refresh_state_paths()
 
-    _update_current_branch()
+    branch_name, head_updated = _update_current_branch()
+    if head_updated:
+        new_head = _current_head()
+        if new_head:
+            print(f"[BOOT] Pulled latest {branch_name or 'HEAD'} -> {new_head[:8]}", file=sys.stderr)
     history = _load_fallback_history()
     history.setdefault("branches", {})
     cycle_state = _load_cycle_state()
