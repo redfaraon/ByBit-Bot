@@ -5665,10 +5665,11 @@ def _collect_bybit_closed_pnl_v5(
     for sym in target_symbols:
         market = markets.get(sym)
         category = _infer_market_category(sym, market)
-        if category:
+        if category and category != "spot":
             categories.add(category)
     if not categories:
-        categories.add("linear")
+        warnings.append("[PnL] bybit closed-pnl skipped: only spot symbols provided")
+        return 0.0, 0, warnings, details
     max_rows = max(limit_per_symbol * max(1, len(target_symbols) or 1), limit_per_symbol)
     for category in categories:
         cursor = None
