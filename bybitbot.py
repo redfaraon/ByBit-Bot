@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import traceback
@@ -404,6 +405,7 @@ def _materialize_commit_script(commit_hash: str) -> Path | None:
         script_path.write_text(content, encoding="utf-8")
     except Exception:
         return None
+    _sync_backup_resources(backups_dir)
     return script_path
 
 
@@ -435,6 +437,7 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
             script_path.write_text(content, encoding="utf-8")
         except Exception:
             return None
+        _sync_backup_resources(backups_dir)
         return script_path
 
     candidate_refs: list[str] = []
@@ -739,6 +742,26 @@ def _build_backup_candidates(
 
     # ensure cycle modes are present
     return [candidate for candidate in candidates if candidate.script_path]
+
+
+def _sync_backup_resources(target_dir: Path) -> None:
+    shared_files = [".env", ".env.local"]
+    for name in shared_files:
+        src = REPO_ROOT / name
+        if not src.exists():
+            continue
+        dest = target_dir / name
+        try:
+            shutil.copy2(src, dest)
+        except Exception:
+            pass
+    users_src = REPO_ROOT / "users"
+    users_dest = target_dir / "users"
+    if users_src.exists():
+        try:
+            shutil.copytree(users_src, users_dest, dirs_exist_ok=True)
+        except Exception:
+            pass
 
 
 def _run_routine_backup(history: dict, routine_counter: int) -> bool:
