@@ -2334,9 +2334,8 @@ def refresh_settings():
     # Market allocation defaults (overridable by model via trade plan 'allocations')
     try:
         SPOT_ALLOCATION_PCT = float(os.getenv("SPOT_ALLOCATION_PCT", "0.0"))
-    except (TypeError, ValueError) {
+    except (TypeError, ValueError):
         SPOT_ALLOCATION_PCT = 0.0
-    }
     SPOT_ALLOCATION_PCT = max(0.0, min(1.0, SPOT_ALLOCATION_PCT))
     DERIV_ALLOCATION_PCT = max(0.0, min(1.0, 1.0 - SPOT_ALLOCATION_PCT))
     CURRENT_MARKET_ALLOCATIONS = {
