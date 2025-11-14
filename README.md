@@ -37,6 +37,10 @@
    export TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,-1005678901234
    export TELEGRAM_COMMANDS="status:Текущий статус;help:Справка"  # slash-command overrides
    ```
+### Telegram diagnostics
+
+- `/ai payload [context]` � dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
+
 
    Dynamic trailing-stop tuning:
    ```bash

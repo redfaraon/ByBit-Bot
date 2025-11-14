@@ -132,6 +132,7 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("config", "Настройки бота и окружения"),
     ("sandbox", "Управление песочницами"),
     ("version", "Текущая версия и changelog"),
+    ("ai", "Диагностика AI payload"),
 ]
 TELEGRAM_RELEASE_THREAD_ID: int | None = None
 TELEGRAM_COMMAND_THREAD_ID: int | None = None
@@ -144,6 +145,7 @@ TELEGRAM_MESSAGE_PREFIX: str = ""
 USER_ID: str = "default"
 USER_LABEL: str = "redfaraon"
 AI_SUPPORT_MODEL: str = ""
+AI_LAST_EXCHANGE: dict[str, Any] = {}
 SUPPORT_MAX_CONTEXT_BYTES: int = 4096
 INPROGRESS_WIP_ENABLED: bool = False
 _LAST_INPROGRESS_MESSAGE: str | None = None
@@ -1591,9 +1593,11 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     if per_cap and token_estimate > per_cap:
         log(f"[AI] universe update: unable to compress request below {per_cap} tokens", Fore.YELLOW)
         return None
-    if not _ensure_token_budget(token_estimate, AI_MODEL, "universe update"):
+    context_label = "universe update"
+    context_key = "universe_update"
+    if not _ensure_token_budget(token_estimate, AI_MODEL, context_label):
         return None
-    _log_ai_request(AI_MODEL, token_estimate, "universe update")
+    _log_ai_request(AI_MODEL, token_estimate, context_label)
     try:
         res = client.chat.completions.create(
             model=AI_MODEL,
@@ -1603,16 +1607,45 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         )
     except Exception as exc:
         log(f"[ERROR] OpenAI universe update: {exc}", Fore.RED)
+        _record_ai_exchange(
+            context_key,
+            label=context_label,
+            model=AI_MODEL,
+            request=messages,
+            error=exc,
+            token_estimate=token_estimate,
+        )
         return None
-    _register_ai_usage(AI_MODEL, getattr(res, "usage", None), "universe update")
+    usage = getattr(res, "usage", None)
+    _register_ai_usage(AI_MODEL, usage, context_label)
     try:
         payload = res.choices[0].message.content
     except Exception:
+        _record_ai_exchange(
+            context_key,
+            label=context_label,
+            model=AI_MODEL,
+            request=messages,
+            response=None,
+            error="empty response",
+            usage=usage,
+            token_estimate=token_estimate,
+        )
         return None
     try:
         result = json.loads(payload)
     except json.JSONDecodeError as exc:
         log(f"[WARN] JSON decode (universe update): {exc}", Fore.YELLOW)
+        _record_ai_exchange(
+            context_key,
+            label=context_label,
+            model=AI_MODEL,
+            request=messages,
+            response=payload,
+            error=f"JSON decode: {exc}",
+            usage=usage,
+            token_estimate=token_estimate,
+        )
         return None
     # Normalize the response into a simple dict
     universe_payload = {}
@@ -1733,6 +1766,19 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         universe_state["trade_horizon"] = str(trade_horizon).strip()
     if max_positions_value:
         universe_state["max_positions"] = max_positions_value
+    _record_ai_exchange(
+        context_key,
+        label=context_label,
+        model=AI_MODEL,
+        request=messages,
+        response={"raw": payload, "parsed": result},
+        usage=usage,
+        token_estimate=token_estimate,
+        extra={
+            "pairs": len(universe_payload.get("pairs") or []),
+            "news_requests": len(news_requests or []),
+        },
+    )
     return selection_result, universe_state, news_requests
 
 
@@ -1888,6 +1934,8 @@ def ai_plan_trades(
     pending_orders=None,
     stage="initial",
 ):
+    context_label = f"trade plan ({stage})"
+    context_key = f"trade_plan_{stage}".strip().lower() if stage else "trade_plan"
     if not AI_KEY:
         log("ℹ️ OPENAI_API_KEY (stage plan)", Fore.RED)
         return None
@@ -1961,9 +2009,9 @@ def ai_plan_trades(
             Fore.YELLOW,
         )
         return None
-    if not _ensure_token_budget(token_estimate, AI_MODEL, f"trade plan ({stage})"):
+    if not _ensure_token_budget(token_estimate, AI_MODEL, context_label):
         return None
-    _log_ai_request(AI_MODEL, token_estimate, f"trade plan ({stage})")
+    _log_ai_request(AI_MODEL, token_estimate, context_label)
     attempt_count = 0
     max_attempts = max(1, TRADE_PLAN_MAX_ATTEMPTS)
     base_backoff = max(1.0, float(TRADE_PLAN_BACKOFF_SECONDS))
@@ -1984,11 +2032,21 @@ def ai_plan_trades(
                 break
             delay = base_backoff * (attempt_count ** 2)
             time.sleep(delay + random.uniform(0, base_backoff))
+            _record_ai_exchange(
+                context_key,
+                label=context_label,
+                model=AI_MODEL,
+                request=messages,
+                error=f"attempt {attempt_count}: {exc}",
+                token_estimate=token_estimate,
+                extra={"stage": stage, "attempt": attempt_count},
+            )
             continue
-        _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"trade plan ({stage})")
+        usage_obj = getattr(res, "usage", None)
+        _register_ai_usage(AI_MODEL, usage_obj, context_label)
         content = res.choices[0].message.content
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
         except json.JSONDecodeError as exc:
             log(f"[WARN] JSON decode (trade plan): {exc}", Fore.YELLOW)
             last_error = exc
@@ -1996,11 +2054,42 @@ def ai_plan_trades(
                 break
             delay = base_backoff * (attempt_count ** 2)
             time.sleep(delay + random.uniform(0, base_backoff))
+            _record_ai_exchange(
+                context_key,
+                label=context_label,
+                model=AI_MODEL,
+                request=messages,
+                response=content,
+                error=f"JSON decode: {exc}",
+                usage=usage_obj,
+                token_estimate=token_estimate,
+                extra={"stage": stage, "attempt": attempt_count},
+            )
             continue
+        _record_ai_exchange(
+            context_key,
+            label=context_label,
+            model=AI_MODEL,
+            request=messages,
+            response={"raw": content, "parsed": parsed},
+            usage=usage_obj,
+            token_estimate=token_estimate,
+            extra={"stage": stage, "attempt": attempt_count},
+        )
+        return parsed
     if last_error:
         log(
             f"[ERROR] OpenAI trade plan failed after {attempt_count} attempts: {last_error}",
             Fore.RED,
+        )
+        _record_ai_exchange(
+            context_key,
+            label=context_label,
+            model=AI_MODEL,
+            request=messages,
+            error=f"failed after {attempt_count} attempts: {last_error}",
+            token_estimate=token_estimate,
+            extra={"stage": stage, "attempts": attempt_count},
         )
     return None
 
@@ -4589,6 +4678,15 @@ def _handle_schedule_command(args: list[str]) -> str:
     )
 
 
+def _handle_ai_command(args: list[str]) -> str:
+    if not args:
+        return "?? ��������� подкоманду. Пример: /ai payload [universe|trade]"
+    sub = args[0].lower()
+    if sub == "payload":
+        context_hint = args[1] if len(args) > 1 else None
+        return _format_ai_payload(context_hint)
+    return "?? Неизвестная подкоманда /ai. Доступно: payload"
+
 
 
 def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int] = None, user_id: Optional[int] = None) -> None:
@@ -4650,6 +4748,8 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
             return
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
+    elif command == "ai":
+        reply = _handle_ai_command(args)
     else:
         reply = "Неизвестная команда. Используйте /help."
     send_tg(
@@ -6686,6 +6786,141 @@ def _register_ai_usage(model: str, usage: Any, context: str) -> None:
             Fore.YELLOW,
         )
     _maybe_switch_model_after_usage()
+
+
+def _json_excerpt(value: Any, limit: int = 1800) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            text = repr(value)
+        text = text.strip()
+    if len(text) <= limit:
+        return text
+    truncated = text[: limit - 3].rstrip()
+    leftover = len(text) - len(truncated)
+    return f"{truncated}... (+{leftover} chars)"
+
+
+def _record_ai_exchange(
+    context: str,
+    *,
+    model: str,
+    request: Any = None,
+    response: Any = None,
+    error: Any = None,
+    usage: Any = None,
+    token_estimate: Optional[int] = None,
+    label: Optional[str] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    key = (context or "default").strip().lower() or "default"
+    entry: dict[str, Any] = {
+        "key": key,
+        "label": label or context or "default",
+        "model": model,
+        "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    if token_estimate is not None:
+        entry["token_estimate"] = token_estimate
+    if request is not None:
+        entry["request_excerpt"] = _json_excerpt(request)
+    if response is not None:
+        entry["response_excerpt"] = _json_excerpt(response)
+    if error is not None:
+        entry["error"] = str(error)
+    usage_dict: dict[str, Any] | None = None
+    if usage:
+        if isinstance(usage, dict):
+            usage_dict = {
+                "prompt": usage.get("prompt_tokens") or usage.get("prompt"),
+                "completion": usage.get("completion_tokens") or usage.get("completion"),
+                "total": usage.get("total_tokens") or usage.get("total"),
+            }
+        else:
+            usage_dict = {
+                "prompt": getattr(usage, "prompt_tokens", None),
+                "completion": getattr(usage, "completion_tokens", None),
+                "total": getattr(usage, "total_tokens", None),
+            }
+    if usage_dict:
+        entry["usage"] = usage_dict
+    if extra:
+        entry["meta"] = extra
+    AI_LAST_EXCHANGE[key] = entry
+
+
+def _select_ai_exchange(context_hint: Optional[str]) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    if not AI_LAST_EXCHANGE:
+        return None, None
+    hint = (context_hint or "").strip().lower()
+    if hint:
+        if hint in AI_LAST_EXCHANGE:
+            return hint, AI_LAST_EXCHANGE[hint]
+        for key, entry in AI_LAST_EXCHANGE.items():
+            label = (entry.get("label") or "").lower()
+            if hint in key or (label and hint in label):
+                return key, entry
+        return None, None
+    latest_key = max(
+        AI_LAST_EXCHANGE.keys(),
+        key=lambda key: AI_LAST_EXCHANGE[key].get("captured_at") or "",
+    )
+    return latest_key, AI_LAST_EXCHANGE[latest_key]
+
+
+def _format_ai_payload(context_hint: Optional[str] = None) -> str:
+    key, entry = _select_ai_exchange(context_hint)
+    if not entry:
+        if AI_LAST_EXCHANGE:
+            options = ", ".join(
+                entry.get("label") or ctx
+                for ctx, entry in sorted(AI_LAST_EXCHANGE.items())
+            )
+            return f"?? ������ AI payload '{context_hint}'. Доступно: {options}"
+        return "?? Пока нет сохранённых AI-запросов — дождитесь следующего вызова модели."
+    label = entry.get("label") or key or "payload"
+    lines = [
+        f"[AI] Последний запрос ({label})",
+        f"- Время: {entry.get('captured_at') or 'n/a'}",
+        f"- Модель: {entry.get('model') or 'n/a'}",
+    ]
+    if entry.get("token_estimate") is not None:
+        lines.append(f"- Оценка токенов: {entry['token_estimate']}")
+    usage = entry.get("usage")
+    if usage:
+        prompt = usage.get("prompt")
+        completion = usage.get("completion")
+        total = usage.get("total")
+        usage_parts = []
+        if prompt is not None:
+            usage_parts.append(f"prompt {prompt}")
+        if completion is not None:
+            usage_parts.append(f"completion {completion}")
+        if total is not None:
+            usage_parts.append(f"total {total}")
+        if usage_parts:
+            lines.append(f"- Факт токенов: {', '.join(usage_parts)}")
+    if entry.get("error"):
+        lines.append(f"- Ошибка: {entry['error']}")
+    if entry.get("meta"):
+        for key_name, value in entry["meta"].items():
+            lines.append(f"- {key_name}: {value}")
+    request_excerpt = entry.get("request_excerpt")
+    if request_excerpt:
+        lines.append("")
+        lines.append("---- Запрос ----")
+        lines.append(request_excerpt)
+    response_excerpt = entry.get("response_excerpt")
+    if response_excerpt:
+        lines.append("")
+        lines.append("---- Ответ ----")
+        lines.append(response_excerpt)
+    return "\n".join(lines)
 
 
 def _is_truthy_flag(value: Any) -> bool:
