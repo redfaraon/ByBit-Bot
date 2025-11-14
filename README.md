@@ -26,8 +26,10 @@
    Optional Telegram controls:
    ```bash
    export TELEGRAM_FORWARD_LOGS=1              # enable buffered log forwarding
-   export TELEGRAM_LOG_BATCH_SIZE=12          # messages per Telegram batch
+   export TELEGRAM_LOG_BATCH_SIZE=12          # max log lines grouped into one TG message
    export TELEGRAM_LOG_FLUSH_INTERVAL=5       # seconds before flushing a smaller batch
+   export TELEGRAM_LOG_RATE_LIMIT=15         # max log messages per rate window (default 18)
+   export TELEGRAM_LOG_RATE_WINDOW=60        # seconds tracked by the log rate limiter
    export TELEGRAM_LOG_THREAD_ID=12345        # topic/thread for log batches
    export TELEGRAM_WEBHOOK_URL=https://...    # set webhook endpoint (leave empty to disable)
    export TELEGRAM_WEBHOOK_HOST=0.0.0.0       # local webhook bind host
@@ -40,6 +42,10 @@
 ### Telegram diagnostics
 
 - `/ai payload [context]` — dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
+
+### Telegram log mirroring
+
+Set `TELEGRAM_FORWARD_LOGS=1` to mirror console logs into Telegram. The bot batches entries (`TELEGRAM_LOG_BATCH_SIZE` / `TELEGRAM_LOG_FLUSH_INTERVAL`) and respects a rate window (`TELEGRAM_LOG_RATE_LIMIT` / `TELEGRAM_LOG_RATE_WINDOW`) so Telegram never returns 429 during bursts.
 
 
    Dynamic trailing-stop tuning:

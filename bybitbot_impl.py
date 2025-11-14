@@ -6,6 +6,7 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 """
 
 import os
+import atexit
 import shutil
 import stat
 import subprocess
@@ -44,9 +45,9 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.06.1"
+BOT_VERSION = "2025.11.14.0"
 BOT_CHANGELOG = (
-    "Changelog is now sourced from the latest git commits."
+    "Telegram log mirroring batches console output, enforces a rate limiter to dodge 429, and exposes /ai payload diagnostics."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
@@ -110,6 +111,8 @@ TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
 TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
+TELEGRAM_LOG_RATE_LIMIT_WINDOW: float = 60.0
+TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW: int = 18
 TELEGRAM_LOG_THREAD_ID: int | None = None
 TELEGRAM_WEBHOOK_URL: str = ""
 TELEGRAM_WEBHOOK_HOST: str = "127.0.0.1"
@@ -646,9 +649,9 @@ def ensure_version_backup() -> None:
 
     try:
         shutil.copy2(script_path, backup_path)
-        print(f"[INFO] Created backup {backup_path.name}")
+        log(f"[INFO] Created backup {backup_path.name}", Fore.LIGHTBLACK_EX)
     except Exception as exc:
-        print(f"[WARN] Failed to create backup '{backup_path.name}': {exc}")
+        log(f"[WARN] Failed to create backup '{backup_path.name}': {exc}", Fore.YELLOW)
 
 
 def safe_float(val):
@@ -2388,7 +2391,7 @@ def refresh_settings():
     global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
     global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
-    global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_THREAD_ID
+    global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_RATE_LIMIT_WINDOW, TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
@@ -2474,6 +2477,15 @@ def refresh_settings():
     except (TypeError, ValueError):
         TELEGRAM_LOG_FLUSH_INTERVAL = 5.0
     TELEGRAM_LOG_FLUSH_INTERVAL = max(1.0, TELEGRAM_LOG_FLUSH_INTERVAL)
+    try:
+        TELEGRAM_LOG_RATE_LIMIT_WINDOW = float(os.getenv("TELEGRAM_LOG_RATE_WINDOW", str(TELEGRAM_LOG_RATE_LIMIT_WINDOW)))
+    except (TypeError, ValueError):
+        TELEGRAM_LOG_RATE_LIMIT_WINDOW = 60.0
+    TELEGRAM_LOG_RATE_LIMIT_WINDOW = max(5.0, TELEGRAM_LOG_RATE_LIMIT_WINDOW)
+    TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW = max(
+        1,
+        env_int("TELEGRAM_LOG_RATE_LIMIT", TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW),
+    )
     TELEGRAM_LOG_THREAD_ID = safe_int(os.getenv("TELEGRAM_LOG_THREAD_ID"))
     TELEGRAM_WEBHOOK_URL = (os.getenv("TELEGRAM_WEBHOOK_URL") or "").strip()
     TELEGRAM_WEBHOOK_HOST = (os.getenv("TELEGRAM_WEBHOOK_HOST") or "0.0.0.0").strip()
@@ -2782,7 +2794,7 @@ def refresh_settings():
     parsed_tz = resolve_timezone(LOG_TIMEZONE)
     if LOG_TIMEZONE and parsed_tz is None:
         if not _LOG_TZ_WARNING_EMITTED:
-            print(f"[WARN] LOG_TIMEZONE '{LOG_TIMEZONE}' не распознан, используется системное время.")
+            log(f"[WARN] LOG_TIMEZONE '{LOG_TIMEZONE}' не распознан, используется системное время.", Fore.YELLOW)
             _LOG_TZ_WARNING_EMITTED = True
         LOG_TZINFO = None
     else:
@@ -3011,6 +3023,7 @@ _TG_LAST_MESSAGE: str | None = None
 _TG_LAST_MESSAGE_TS = 0.0
 _TG_LOG_BUFFER: deque[str] = deque()
 _TG_LOG_LAST_FLUSH = 0.0
+_TG_LOG_RATE_WINDOW: deque[float] = deque()
 _TG_IN_SEND = 0
 _TG_LOCK = threading.RLock()
 _TELEGRAM_CONFIGURED = False
@@ -3089,6 +3102,44 @@ def _split_message(text: str, chunk_limit: int = 3800) -> list[str]:
     return chunks or [text[:chunk_limit]]
 
 
+def _wait_for_log_slot() -> None:
+    if TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW <= 0:
+        return
+    while True:
+        now = time.time()
+        with _TG_LOCK:
+            window = TELEGRAM_LOG_RATE_LIMIT_WINDOW
+            while _TG_LOG_RATE_WINDOW and now - _TG_LOG_RATE_WINDOW[0] > window:
+                _TG_LOG_RATE_WINDOW.popleft()
+            if len(_TG_LOG_RATE_WINDOW) < TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW:
+                return
+            oldest = _TG_LOG_RATE_WINDOW[0]
+        sleep_for = max(TG_MIN_INTERVAL, (oldest + TELEGRAM_LOG_RATE_LIMIT_WINDOW) - now + 0.05)
+        time.sleep(sleep_for)
+
+
+def _record_log_slot() -> None:
+    if TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW <= 0:
+        return
+    with _TG_LOCK:
+        _TG_LOG_RATE_WINDOW.append(time.time())
+
+
+def _format_tg_log_batch(batch: Sequence[str]) -> str:
+    if not batch:
+        return ""
+    first_ts = (batch[0].split("]", 1)[0] if batch[0].startswith("[") else "").lstrip("[")
+    last_ts = (batch[-1].split("]", 1)[0] if batch[-1].startswith("[") else "").lstrip("[")
+    if first_ts and last_ts and first_ts != last_ts:
+        header = f"🪵 Logs x{len(batch)} ({first_ts} → {last_ts})"
+    elif first_ts:
+        header = f"🪵 Logs x{len(batch)} ({first_ts})"
+    else:
+        header = f"🪵 Logs x{len(batch)}"
+    body = "\n".join(batch)
+    return f"{header}\n```\n{body}\n```"
+
+
 def _enqueue_tg_log(record: str) -> None:
     if not TELEGRAM_FORWARD_LOGS:
         return
@@ -3148,9 +3199,10 @@ def _flush_tg_log_buffer(force: bool = False) -> None:
     if chunk:
         pending_batches.append(chunk)
     for batch in pending_batches:
-        payload = "\n".join(batch)
+        payload = _format_tg_log_batch(batch)
         if not payload:
             continue
+        _wait_for_log_slot()
         message_id = send_tg(
             payload,
             thread_id=TELEGRAM_LOG_THREAD_ID,
@@ -3161,6 +3213,8 @@ def _flush_tg_log_buffer(force: bool = False) -> None:
                 for entry in reversed(batch):
                     _TG_LOG_BUFFER.appendleft(entry)
             break
+        _record_log_slot()
+atexit.register(_flush_tg_log_buffer, True)
 
 
 def send_tg(msg: str | Sequence[str], **extra):

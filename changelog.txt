@@ -1,3 +1,7 @@
+2025.11.14.0
+- Telegram log mirroring replicates console output to Telegram with batching and rate limiting to avoid 429 errors.
+- /ai payload diagnostics make it easy to inspect the latest OpenAI request/response.
+
 Changelog (newest first)
 
 11.7
