@@ -7493,6 +7493,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     position_category = _infer_market_category(exchange_symbol, market_info)
     min_amount = None
     min_notional = None
+    min_qty_step = None
     if isinstance(market_info, dict):
         limits = market_info.get("limits")
         if isinstance(limits, dict):
@@ -7502,6 +7503,13 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             notional_limits = limits.get("cost")
             if isinstance(notional_limits, dict):
                 min_notional = safe_float(notional_limits.get("min"))
+        info_payload = market_info.get("info") if isinstance(market_info.get("info"), dict) else None
+        lot_filter = info_payload.get("lotSizeFilter") if isinstance(info_payload, dict) else None
+        if isinstance(lot_filter, dict):
+            min_qty_step = safe_float(lot_filter.get("qtyStep")) or min_qty_step
+            min_order_qty = safe_float(lot_filter.get("minOrderQty"))
+            if min_order_qty is not None:
+                min_amount = max(min_amount or 0.0, min_order_qty)
 
     created_log_parts: list[str] = []
     try:
