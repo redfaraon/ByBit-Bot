@@ -37,7 +37,8 @@
    export TELEGRAM_WEBHOOK_PATH=/telegram     # webhook path prefix
    export TELEGRAM_WEBHOOK_SECRET=secret123   # optional Telegram secret token
    export TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,-1005678901234
-   export TELEGRAM_COMMANDS="status:РўРµРєСѓС‰РёР№ СЃС‚Р°С‚СѓСЃ;help:РЎРїСЂР°РІРєР°"  # slash-command overrides
+   export TELEGRAM_COMMANDS="status:Текущий статус;help:Справка"  # slash-command overrides
+   export NEWS_PROVIDER=hybrid                   # news sources: hybrid (default), cryptocompare, rss
    ```
 ### Telegram diagnostics
 

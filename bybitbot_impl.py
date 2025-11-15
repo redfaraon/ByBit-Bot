@@ -394,6 +394,8 @@ BASE_PAIR_CANDIDATES = [
     # "HBAR/USDT:USDT",
 ]
 
+BASE_INDICATOR_MIN_COUNT = 6
+BASE_INDICATOR_MAX_COUNT = 8
 BASE_INDICATOR_CANDIDATES = [
     "ema20",
     "ema50",
@@ -1564,7 +1566,7 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         " Respond strictly in JSON with keys:\n"
         '  "pairs": list of up to 8 symbols to analyze this cycle (mix bullish/bearish narratives based on news),\n'
         '  "timeframes": list of exactly two short timeframes (e.g., "30m","4h"),\n'
-        '  "indicators": list containing exactly six items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one additional momentum/volatility indicator),\n'
+        '  "indicators": list containing six to eight items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one or two additional momentum/volatility indicators),\n'
         '  "initial_timeframes": list of up to two primary timeframes to inspect first (e.g., ["30m","4h"]),\n'
         '  "aggression": risk posture label (e.g., conservative, balanced, optimal, aggressive),\n'
         '  "trade_horizon": trading horizon label (e.g., scalping, intraday, swing, midterm),\n'
@@ -1669,12 +1671,26 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         normalized_indicators = [
             {"indicator": "ema", "length": 20},
             {"indicator": "ema", "length": 50},
+            {"indicator": "ema", "length": 100},
             "volume",
             "rsi14",
             "macd",
             "atr14",
+            "stoch14",
+            "supertrend",
         ]
-    universe_payload["indicators"] = normalized_indicators[:6]
+    indicator_cap = max(
+        BASE_INDICATOR_MIN_COUNT,
+        min(BASE_INDICATOR_MAX_COUNT, len(normalized_indicators)),
+    )
+    selected_indicators = list(normalized_indicators[:indicator_cap])
+    if len(selected_indicators) < BASE_INDICATOR_MIN_COUNT:
+        for candidate in BASE_INDICATOR_CANDIDATES:
+            if len(selected_indicators) >= BASE_INDICATOR_MIN_COUNT:
+                break
+            if candidate not in selected_indicators:
+                selected_indicators.append(candidate)
+    universe_payload["indicators"] = selected_indicators[:BASE_INDICATOR_MAX_COUNT]
     universe_payload["next_run_minutes"] = result.get("next_run_minutes")
     universe_payload["notes"] = result.get("notes")
     raw_initial_timeframes = (
@@ -1800,7 +1816,8 @@ def build_portfolio_bundle(exchange, selection_result, positions_map, news_cache
         base_timeframes = list(global_timeframes)
         timeframes = list(dict.fromkeys(base_timeframes + (target.get("timeframes") or [])))
         baseline_source = list(global_indicators) if global_indicators else list(BASE_INDICATOR_CANDIDATES)
-        baseline_indicators = baseline_source[:3]
+        baseline_cap = max(BASE_INDICATOR_MIN_COUNT, min(BASE_INDICATOR_MAX_COUNT, len(baseline_source)))
+        baseline_indicators = baseline_source[:baseline_cap]
         indicator_candidates = list(target.get("indicators") or [])
         indicators = _dedupe_preserve_order(baseline_indicators + indicator_candidates + global_indicators)
         dataset = prepare_symbol_dataset(exchange, symbol, timeframes, indicators, news_cache=news_cache)
@@ -2753,7 +2770,8 @@ def refresh_settings():
         NEW_IDEAS_LIMIT = 6
     NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
 
-    NEWS_PROVIDER = (os.getenv("CRYPTO_NEWS_PROVIDER") or "cryptocompare").strip().lower()
+    news_provider_env = os.getenv("CRYPTO_NEWS_PROVIDER") or os.getenv("NEWS_PROVIDER") or "hybrid"
+    NEWS_PROVIDER = news_provider_env.strip().lower() or "hybrid"
     NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
     POSITION_MODE = (os.getenv("BYBIT_POSITION_MODE") or "oneway").strip().lower()
@@ -2809,7 +2827,11 @@ RSS_FEEDS = [
     "https://u.today/rss",
 ]
 
-NEWS_PROVIDER = "cryptocompare"
+NEWS_PROVIDER_ALIAS_CC = {"cryptocompare", "cc", "crypto"}
+NEWS_PROVIDER_ALIAS_RSS = {"rss", "feed", "feeds"}
+NEWS_PROVIDER_ALIAS_HYBRID = {"hybrid", "mixed", "multi", "combined", "all", "default"}
+
+NEWS_PROVIDER = "hybrid"
 NEWS_API_TOKEN = ""
 NEWS_ITEMS_LIMIT = 5
 
@@ -5500,17 +5522,72 @@ def get_news_from_cryptocompare(base_symbol: str, limit: int):
     )
     return {"summary": summary, "items": selected, "asset": base_upper, "source": "cryptocompare"}
 
+
+def _merge_news_payloads(base_symbol: str, payloads: Sequence[dict[str, Any]], limit: int) -> dict[str, Any]:
+    base_upper = (base_symbol or "").upper()
+    combined: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for payload in payloads:
+        items = payload.get("items") or []
+        source_name = (payload.get("source") or "news").lower()
+        for item in items:
+            title = (item.get("title") or "").strip()
+            url = item.get("url") or item.get("link")
+            key = f"{title}|{url}"
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(
+                {
+                    "title": title,
+                    "body": item.get("body") or item.get("summary") or "",
+                    "url": url,
+                    "source": item.get("source") or source_name,
+                    "published_at": item.get("published_at") or to_iso_utc(item.get("published_at_raw") or item.get("published_on")),
+                }
+            )
+    combined.sort(key=lambda entry: entry.get("published_at") or "", reverse=True)
+    summary_parts = [
+        f"{(payload.get('source') or 'news')}:{len(payload.get('items') or [])}"
+        for payload in payloads
+    ]
+    summary_suffix = f" ({', '.join(summary_parts)})" if summary_parts else ""
+    summary = f"Mixed news{summary_suffix}".strip()
+    return {
+        "summary": summary or "Mixed news",
+        "items": combined[:limit],
+        "asset": base_upper,
+        "source": "hybrid",
+    }
+
 def get_news(symbol):
     base = symbol.split("/")[0].split(":")[0].upper()
     limit = max(1, NEWS_ITEMS_LIMIT)
-    provider_payload = None
-    if NEWS_PROVIDER in ("cryptocompare", "cc", "crypto"):
-        provider_payload = get_news_from_cryptocompare(base, limit)
-        if provider_payload.get("items"):
-            return provider_payload
-    if NEWS_PROVIDER and NEWS_PROVIDER not in ("cryptocompare", "cc", "crypto"):
-        log(f"[WARN] Unknown NEWS_PROVIDER '{NEWS_PROVIDER}', falling back to RSS.", Fore.YELLOW)
-    return get_news_from_rss(base, limit)
+    normalized_provider = (NEWS_PROVIDER or "hybrid").strip().lower()
+    payloads: list[dict[str, Any]] = []
+    def _fetch_cc():
+        return get_news_from_cryptocompare(base, limit)
+    def _fetch_rss():
+        return get_news_from_rss(base, limit)
+
+    if normalized_provider in NEWS_PROVIDER_ALIAS_HYBRID:
+        payloads.extend([_fetch_cc(), _fetch_rss()])
+    elif normalized_provider in NEWS_PROVIDER_ALIAS_CC:
+        cc_payload = _fetch_cc()
+        payloads.append(cc_payload)
+        if not cc_payload.get("items"):
+            payloads.append(_fetch_rss())
+    elif normalized_provider in NEWS_PROVIDER_ALIAS_RSS:
+        payloads.append(_fetch_rss())
+    else:
+        log(f"[WARN] Unknown NEWS_PROVIDER '{NEWS_PROVIDER}', using hybrid feeds.", Fore.YELLOW)
+        payloads.extend([_fetch_cc(), _fetch_rss()])
+    payloads = [payload for payload in payloads if payload]
+    if not payloads:
+        return {"summary": "News unavailable", "items": [], "asset": base, "source": normalized_provider or "hybrid"}
+    if len(payloads) == 1:
+        return payloads[0]
+    return _merge_news_payloads(base, payloads, limit)
 
 # --- Подключение к бирже ---
 def init_exchange():
@@ -8702,7 +8779,13 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         return context
 
     def build_prompt(extra=None, bias=False):
-        news_desc = "CryptoCompare API (fallback: RSS feeds)" if NEWS_PROVIDER in ("cryptocompare", "cc", "crypto") else "RSS headlines for the asset"
+        provider_mode = (NEWS_PROVIDER or "hybrid").strip().lower()
+        if provider_mode in NEWS_PROVIDER_ALIAS_CC:
+            news_desc = "CryptoCompare API (fallback: RSS feeds)"
+        elif provider_mode in NEWS_PROVIDER_ALIAS_RSS:
+            news_desc = "RSS headlines for the asset"
+        else:
+            news_desc = "CryptoCompare + RSS headlines"
         prompt = {
             "символ": symbol,
             "финансы": {
