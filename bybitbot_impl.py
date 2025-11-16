@@ -19,7 +19,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
-import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, textwrap
+import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, textwrap, types
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Optional, Tuple, Any, Sequence, Mapping
@@ -4487,9 +4487,24 @@ def _format_risk_message() -> str:
 
 def _format_log_history_message(lines: int = 12) -> str:
     if not _LOG_HISTORY:
-        return "История логов пуста."
+        return "Логов пока нет."
+    lines = max(1, min(200, int(lines)))
     tail = list(_LOG_HISTORY)[-lines:]
-    return "Последние события:\n" + "\n".join(tail)
+    header = f"Последние {len(tail)} записей лога:"
+    body = "\n".join(tail)
+    return f"{header}\n```\n{body}\n```"
+
+
+def _handle_logs_command(args: list[str]) -> str:
+    if not _LOG_HISTORY:
+        return "Логов пока нет."
+    requested = 20
+    if args:
+        value = safe_int(args[0])
+        if value and value > 0:
+            requested = value
+    requested = max(5, min(200, requested))
+    return _format_log_history_message(lines=requested)
 
 
 def _read_runtime_status() -> dict[str, Any]:
@@ -4796,8 +4811,8 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _format_positions_message(live=True)
     elif command == "risk":
         reply = _format_risk_message()
-    elif command == "logs":
-        reply = _format_log_history_message()
+    elif command in {"logs", "logtail", "log"}:
+        reply = _handle_logs_command(args)
     elif command in {"schedule", "next"}:
         reply = _handle_schedule_command(args)
     elif command in {"tokens", "token"}:
@@ -5661,6 +5676,10 @@ def _init_exchange_enhanced() -> Any:
             exchange.load_time_difference()
     except Exception:
         pass
+    try:
+        _enable_exchange_logging(exchange)
+    except Exception as exc:
+        log(f"[WARN] Не удалось включить расширенное логирование ордеров: {exc}", Fore.YELLOW)
     return exchange
 
 # Replace default init_exchange with enhanced version
@@ -6983,6 +7002,61 @@ def _record_ai_exchange(
     if extra:
         entry["meta"] = extra
     AI_LAST_EXCHANGE[key] = entry
+
+
+def _format_exchange_params_blob(payload: Any) -> str:
+    if not payload:
+        return "-"
+    if isinstance(payload, (dict, list, tuple)):
+        return _json_excerpt(payload, limit=320)
+    return str(payload)
+
+
+def _enable_exchange_logging(exchange: Any) -> Any:
+    if not exchange or getattr(exchange, "_bybitbot_exchange_logging", False):
+        return exchange
+    try:
+        original_create_order = exchange.create_order
+    except AttributeError:
+        original_create_order = None
+    if callable(original_create_order):
+        def logged_create_order(self, symbol, order_type, side, amount, price=None, params=None):
+            param_text = _format_exchange_params_blob(params)
+            log(f"[EX] create {symbol} {side}/{order_type} qty={amount} price={price or 'market'} params={param_text}", Fore.LIGHTBLACK_EX)
+            start = time.time()
+            try:
+                result = original_create_order(symbol, order_type, side, amount, price, params)
+                info = result if isinstance(result, dict) else {}
+                order_id = info.get("id") or info.get("orderId") or info.get("clientOrderId")
+                status = info.get("status") or info.get("state")
+                filled = info.get("filled") or info.get("amount") or info.get("cumExecQty")
+                duration = time.time() - start
+                log(
+                    f"[EX] done {symbol} id={order_id or '?'} status={status or '?'} filled={filled} ({duration:.2f}s)",
+                    Fore.LIGHTBLACK_EX,
+                )
+                return result
+            except Exception as exc:
+                log(f"[EX] fail {symbol} {side}/{order_type}: {exc}", Fore.YELLOW)
+                raise
+        exchange.create_order = types.MethodType(logged_create_order, exchange)
+    original_cancel_order = getattr(exchange, "cancel_order", None)
+    if callable(original_cancel_order):
+        def logged_cancel_order(self, order_id, symbol=None, params=None):
+            param_text = _format_exchange_params_blob(params)
+            log(f"[EX] cancel {symbol or '?'} #{order_id} params={param_text}", Fore.LIGHTBLACK_EX)
+            start = time.time()
+            try:
+                result = original_cancel_order(order_id, symbol, params)
+                duration = time.time() - start
+                log(f"[EX] cancel ok {symbol or '?'} #{order_id} ({duration:.2f}s)", Fore.LIGHTBLACK_EX)
+                return result
+            except Exception as exc:
+                log(f"[EX] cancel fail {symbol or '?'} #{order_id}: {exc}", Fore.YELLOW)
+                raise
+        exchange.cancel_order = types.MethodType(logged_cancel_order, exchange)
+    setattr(exchange, "_bybitbot_exchange_logging", True)
+    return exchange
 
 
 def _select_ai_exchange(context_hint: Optional[str]) -> tuple[Optional[str], Optional[dict[str, Any]]]:

@@ -43,6 +43,7 @@
 ### Telegram diagnostics
 
 - `/ai payload [context]` — dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
+- `/logs [count]` — prints the latest console log lines (default 20, max 200) directly in Telegram.
 
 ### Telegram log mirroring
 
