@@ -40,6 +40,14 @@
    export TELEGRAM_COMMANDS="status:“ÂÍÛ˘ËÈ ÒÚ‡ÚÛÒ;help:—Ô‡‚Í‡"  # slash-command overrides
    export NEWS_PROVIDER=hybrid                   # news sources: hybrid (default), cryptocompare, rss
    ```
+## AI model configuration
+
+- Set `OPENAI_API_KEY` to your API key (shared across all traders unless overridden per user).
+- `OPENAI_MODEL_PRIMARY` ó default `gpt-4.1-mini` (used for heavy planning).
+- `OPENAI_MODEL_CHEAP` ó default `gpt-4o-mini` (used once `/tokens` shows usage above `OPENAI_MODEL_CHEAP_THRESHOLD`, default 5 symbols).
+- `AI_SUPPORT_MODEL` ó optional override for `/support` replies (falls back to the primary trading model).
+- `/tokens` displays current budget, model switches, and can be used to verify limits.
+
 ### Telegram diagnostics
 
 - `/ai payload [context]` ó dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
@@ -120,9 +128,9 @@ Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, 
 
 ## Adding a new trader without sharing Bybit keys
 
-1. **Collect the Telegram user id** of the new trader (they can forward any of their messages to @userinfobot). Decide on a unique bot id (e.g. lice).
-2. **Create a profile**: either run /adduser alice <telegram_id> in the Commands topic or append to users/users.json. Keep the entry minimalóid, optional label, owner_id, and per-user overrides such as:
-   `json
+1. **Collect the Telegram user id** of the new trader (they can forward any of their messages to `@userinfobot`). Decide on a unique bot id, e.g. `alice`.
+2. **Create a profile**: either run `/adduser alice <telegram_id>` in the Commands topic or append to `users/users.json`. Keep the entry minimaló`id`, optional `label`, `owner_id`, and per-user overrides such as:
+   ```json
    {
      "id": "alice",
      "label": "Alice",
@@ -132,18 +140,18 @@ Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, 
        "TELEGRAM_MESSAGE_PREFIX": "Alice"
      }
    }
-   `
-3. **Spin up the traderís process**: run python bybitbot.py --user alice (or schedule it via manage_update.py --user alice). The process reads only users/alice/*.env plus the global .env.
+   ```
+3. **Spin up the trader's process**: run `python bybitbot.py --user alice` (or schedule it via `manage_update.py --user alice`). The process reads only `users/alice/*.env` plus the global `.env`.
 4. **Have the trader set their own keys**:
-   - They can DM the bot /bybitkey <apiKey> <apiSecret> while the --user alice process is online. The bot writes the credentials into users/alice/secrets.env (git-ignored), so you never see the raw keys.
-   - Alternatively provide SSH access so they edit users/alice/secrets.env directly. The format is:
-     `
+   - They can DM the bot `/bybitkey <apiKey> <apiSecret>` while the `--user alice` process is online. The bot writes the credentials into `users/alice/secrets.env` (git-ignored), so you never see the raw keys.
+   - Alternatively they can edit `users/alice/secrets.env` directly via SSH:
+     ```env
      BYBIT_API_KEY=xxx
      BYBIT_API_SECRET=yyy
-     `
-5. **Share optional overrides**: users/alice/public.env can hold non-secret tweaks (pair list, leverage, Telegram topics). The trader edits only their own directory.
-6. **Operate the session**: the trader interacts with the bot via the shared Telegram group (their process has its own prefix) and can rotate keys any time by re-running /bybitkey.
+     ```
+5. **Share optional overrides**: `users/alice/public.env` can hold non-secret tweaks (pair list, leverage, Telegram topics). The trader edits only their directory.
+6. **Operate the session**: the trader interacts with the shared Telegram group (their process has its own prefix) and can rotate keys any time by rerunning `/bybitkey`.
 
-This flow keeps Bybit credentials in the traderís hands while letting you manage the shared infrastructure.
+This flow keeps Bybit credentials in the trader's hands while letting you manage the shared infrastructure.
 
 

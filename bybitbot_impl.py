@@ -4094,29 +4094,74 @@ def _build_start_keyboard() -> dict[str, Any]:
     }
 
 
-def _load_support_context_snippet() -> str:
+def _extract_support_keywords(question: str | None) -> list[str]:
+    if not question:
+        return []
+    tokens = re.findall(r"[A-Za-zА-Яа-я0-9_/]{3,}", question.lower())
+    aliases = {
+        "песочниц": "sandbox",
+        "песочницa": "sandbox",
+        "sandbox": "sandbox",
+        "model": "model",
+        "modely": "model",
+        "модель": "model",
+        "модели": "model",
+        "ai": "ai",
+        "gpt": "gpt",
+    }
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        base = aliases.get(token, token)
+        if len(base) < 3:
+            continue
+        if base in seen:
+            continue
+        seen.add(base)
+        keywords.append(base)
+    return keywords
+
+
+def _load_support_context_snippet(question: str | None = None) -> str:
     if SUPPORT_MAX_CONTEXT_BYTES <= 0:
         return ""
+    keywords = _extract_support_keywords(question)
     targets = [
         SCRIPT_DIR / "README.md",
         SCRIPT_DIR / "bybitbot_impl.py",
         SCRIPT_DIR / "bybitbot.py",
     ]
-    remaining = SUPPORT_MAX_CONTEXT_BYTES
-    chunks: list[str] = []
+    per_file_budget = max(512, SUPPORT_MAX_CONTEXT_BYTES // len(targets))
+    snippets: list[str] = []
     for path in targets:
-        if remaining <= 0:
-            break
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
         if not raw:
             continue
-        snippet = raw[:remaining]
-        remaining -= len(snippet)
-        chunks.append(f"### {path.name}\n{snippet}")
-    return "\n\n".join(chunks)
+        lower = raw.lower()
+        collected: list[str] = []
+        if keywords:
+            for kw in keywords:
+                idx = lower.find(kw)
+                attempts = 0
+                while idx != -1 and attempts < 5:
+                    start = max(0, idx - 400)
+                    end = min(len(raw), idx + 400)
+                    chunk = raw[start:end].strip()
+                    if chunk:
+                        collected.append(chunk)
+                    if len(collected) * 200 >= per_file_budget:
+                        break
+                    idx = lower.find(kw, idx + len(kw))
+                    attempts += 1
+        if not collected:
+            collected = [raw[:per_file_budget].strip()]
+        snippet_text = "\n---\n".join(collected)[:per_file_budget]
+        snippets.append(f"### {path.name}\n{snippet_text}")
+    combined = "\n\n".join(snippets)
+    return combined[:SUPPORT_MAX_CONTEXT_BYTES]
 
 
 def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: Optional[int]) -> None:
@@ -4131,7 +4176,7 @@ def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: O
         )
         return
     support_model = AI_SUPPORT_MODEL or AI_MODEL
-    context_blob = _load_support_context_snippet()
+    context_blob = _load_support_context_snippet(question)
     messages = [
         {
             "role": "system",
