@@ -43,7 +43,7 @@
 ### Telegram diagnostics
 
 - `/ai payload [context]` — dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
-- `/logs [count]` — prints the latest console log lines (default 20, max 200) directly in Telegram.
+- `/logs [count|SYMBOL window]` - show logs; e.g. `/logs 30` or `/logs BTC 60` for the last hour.
 
 ### Telegram log mirroring
 
@@ -117,3 +117,33 @@ Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, 
 - Ensure free balances exist for spot orders:
   - `BUY`: free `USDT` must cover notional + fees.
   - `SELL`: free base asset must cover the sell amount.
+
+## Adding a new trader without sharing Bybit keys
+
+1. **Collect the Telegram user id** of the new trader (they can forward any of their messages to @userinfobot). Decide on a unique bot id (e.g. lice).
+2. **Create a profile**: either run /adduser alice <telegram_id> in the Commands topic or append to users/users.json. Keep the entry minimal—id, optional label, owner_id, and per-user overrides such as:
+   `json
+   {
+     "id": "alice",
+     "label": "Alice",
+     "owner_id": 123456789,
+     "env": {
+       "PAIR_LIST": "BTC/USDT:USDT,ETH/USDT:USDT",
+       "TELEGRAM_MESSAGE_PREFIX": "Alice"
+     }
+   }
+   `
+3. **Spin up the trader’s process**: run python bybitbot.py --user alice (or schedule it via manage_update.py --user alice). The process reads only users/alice/*.env plus the global .env.
+4. **Have the trader set their own keys**:
+   - They can DM the bot /bybitkey <apiKey> <apiSecret> while the --user alice process is online. The bot writes the credentials into users/alice/secrets.env (git-ignored), so you never see the raw keys.
+   - Alternatively provide SSH access so they edit users/alice/secrets.env directly. The format is:
+     `
+     BYBIT_API_KEY=xxx
+     BYBIT_API_SECRET=yyy
+     `
+5. **Share optional overrides**: users/alice/public.env can hold non-secret tweaks (pair list, leverage, Telegram topics). The trader edits only their own directory.
+6. **Operate the session**: the trader interacts with the bot via the shared Telegram group (their process has its own prefix) and can rotate keys any time by re-running /bybitkey.
+
+This flow keeps Bybit credentials in the trader’s hands while letting you manage the shared infrastructure.
+
+

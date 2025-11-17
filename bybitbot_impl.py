@@ -45,9 +45,9 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.14.0"
+BOT_VERSION = "2025.11.17.0"
 BOT_CHANGELOG = (
-    "Telegram log mirroring batches console output, enforces a rate limiter to dodge 429, and exposes /ai payload diagnostics."
+    "Pinned Telegram help, ticker-scoped /logs output, richer onboarding docs, and verbose exchange order tracing."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
@@ -63,6 +63,7 @@ def _configure_state_paths() -> None:
     global BYBIT_CREDENTIALS_FILE
     global SUPPORT_SANDBOX_ROOT
     global SUPPORT_SANDBOX_STATE_FILE
+    global COMMANDS_HELP_STATE_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
         STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else SCRIPT_DIR)
@@ -80,6 +81,7 @@ def _configure_state_paths() -> None:
     BYBIT_CREDENTIALS_FILE = STATE_DIR / "bybit_credentials.json"
     SUPPORT_SANDBOX_ROOT = STATE_DIR / "support_sandboxes"
     SUPPORT_SANDBOX_STATE_FILE = STATE_DIR / "support_sandboxes.json"
+    COMMANDS_HELP_STATE_FILE = STATE_DIR / "commands_help_state.json"
     try:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -136,6 +138,38 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("sandbox", "Управление песочницами"),
     ("version", "Текущая версия и changelog"),
     ("ai", "Диагностика AI payload"),
+]
+COMMANDS_HELP_SECTIONS = [
+    {
+        "key": "core",
+        "title": "Основные команды",
+        "lines": [
+            "/status — текущий статус цикла, equity и расписания",
+            "/positions — активные позиции и защитные ордера",
+            "/risk — действующие параметры риска и плеча",
+            "/logs [N|symbol minutes] — последние логи или фильтр по тикеру (пример: /logs BTC 60)",
+        ],
+    },
+    {
+        "key": "ops",
+        "title": "Торговля и диагностика",
+        "lines": [
+            "/schedule <in|at> — задать вручную следующий запуск",
+            "/tokens — бюджет токенов OpenAI и текущий расход",
+            "/ai payload [universe|trade] — показать последний запрос/ответ модели",
+            "/sandbox — управление песочницами",
+        ],
+    },
+    {
+        "key": "admin",
+        "title": "Администрирование",
+        "lines": [
+            "/bybitkey <key> <secret> — заменить API ключи (сохраняются в secrets.env)",
+            "/adduser <id> <telegram_id> — добавить нового трейдера",
+            "/config — вывести активные переменные окружения",
+            "/version — показать changelog текущей версии",
+        ],
+    },
 ]
 TELEGRAM_RELEASE_THREAD_ID: int | None = None
 TELEGRAM_COMMAND_THREAD_ID: int | None = None
@@ -3048,6 +3082,8 @@ _TG_LOG_LAST_FLUSH = 0.0
 _TG_LOG_RATE_WINDOW: deque[float] = deque()
 _TG_IN_SEND = 0
 _TG_LOCK = threading.RLock()
+_LOG_TS_PATTERN = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_LOG_TZ_PATTERN = re.compile(r"UTC([+-])(\d{2}):(\d{2})")
 _TELEGRAM_CONFIGURED = False
 _TELEGRAM_WEBHOOK_THREAD: threading.Thread | None = None
 _TELEGRAM_WEBHOOK_SERVER: ThreadingHTTPServer | None = None
@@ -3362,6 +3398,27 @@ def _delete_tg_message(chat_id: int, message_id: int) -> bool:
     except Exception as exc:
         log(f"[WARN] Failed to delete Telegram message {message_id} in {chat_id}: {exc}", Fore.YELLOW)
     return False
+
+
+def _pin_tg_message(chat_id: int, message_id: int) -> None:
+    if not TG_TOKEN or not chat_id or not message_id:
+        return
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "disable_notification": True,
+    }
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/pinChatMessage",
+            json=payload,
+            timeout=5,
+        )
+        data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        if not (isinstance(data, dict) and data.get("ok")):
+            log(f"[WARN] pinChatMessage failed: {data}", Fore.YELLOW)
+    except Exception as exc:
+        log(f"[WARN] Не удалось закрепить сообщение {message_id}: {exc}", Fore.YELLOW)
 def _load_changelog_state() -> dict:
     try:
         raw = CHANGELOG_STATE_FILE.read_text(encoding="utf-8")
@@ -4010,7 +4067,7 @@ def start_telegram_long_polling() -> None:
 
 def _build_help_message() -> str:
     commands = TELEGRAM_COMMANDS_LIST or _default_command_payload()
-    lines = ["Доступные команды:"]
+    lines = ["Команды закреплены в разделе Commands. Краткий список:"]
     for entry in commands:
         lines.append(f"/{entry['command']} — {entry['description']}")
     return "\n".join(lines)
@@ -4486,25 +4543,126 @@ def _format_risk_message() -> str:
 
 
 def _format_log_history_message(lines: int = 12) -> str:
-    if not _LOG_HISTORY:
+    return _render_log_block(list(_LOG_HISTORY)[-max(1, min(200, int(lines))):])
+
+
+def _render_log_block(records: Sequence[str], header: str | None = None) -> str:
+    if not records:
         return "Логов пока нет."
-    lines = max(1, min(200, int(lines)))
-    tail = list(_LOG_HISTORY)[-lines:]
-    header = f"Последние {len(tail)} записей лога:"
-    body = "\n".join(tail)
-    return f"{header}\n```\n{body}\n```"
+    title = header or f"Последние {len(records)} записей лога:"
+    body = "\n".join(records)
+    return f"{title}\n```\n{body}\n```"
+
+
+def _parse_log_timestamp(line: str) -> datetime.datetime | None:
+    match = _LOG_TS_PATTERN.search(line)
+    if not match:
+        return None
+    dt_str = match.group(1)
+    try:
+        base_dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    tz_match = _LOG_TZ_PATTERN.search(line)
+    if tz_match:
+        sign = 1 if tz_match.group(1) == "+" else -1
+        hours = int(tz_match.group(2))
+        minutes = int(tz_match.group(3))
+        offset = datetime.timedelta(hours=hours, minutes=minutes)
+        tzinfo = datetime.timezone(sign * offset)
+    else:
+        tzinfo = datetime.timezone.utc
+    return base_dt.replace(tzinfo=tzinfo)
+
+
+def _filter_log_history(*, symbol: str | None = None, minutes: int | None = None, limit: int = 50) -> list[str]:
+    if not _LOG_HISTORY:
+        return []
+    limit = max(1, min(200, int(limit)))
+    symbol_norm = symbol.upper() if symbol else None
+    threshold: datetime.datetime | None = None
+    if minutes and minutes > 0:
+        threshold = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)
+    matched: list[str] = []
+    for line in reversed(_LOG_HISTORY):
+        if symbol_norm and symbol_norm not in line.upper():
+            continue
+        ts = _parse_log_timestamp(line)
+        if threshold and ts:
+            ts_utc = ts.astimezone(datetime.timezone.utc)
+            if ts_utc < threshold:
+                if symbol_norm:
+                    break
+                if len(matched) >= limit:
+                    break
+                continue
+        matched.append(line)
+        if len(matched) >= limit:
+            break
+    matched.reverse()
+    return matched
 
 
 def _handle_logs_command(args: list[str]) -> str:
     if not _LOG_HISTORY:
         return "Логов пока нет."
-    requested = 20
-    if args:
-        value = safe_int(args[0])
-        if value and value > 0:
-            requested = value
-    requested = max(5, min(200, requested))
-    return _format_log_history_message(lines=requested)
+    symbol = None
+    minutes: int | None = None
+    count = 20
+    for raw in args:
+        token = raw.strip()
+        if not token:
+            continue
+        lower = token.lower()
+        if "=" in token:
+            key, value = token.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key in {"symbol", "pair"} and value:
+                symbol = value
+                continue
+            if key in {"minutes", "window"}:
+                val = safe_int(value)
+                if val and val > 0:
+                    minutes = val
+                continue
+            if key in {"count", "lines"}:
+                val = safe_int(value)
+                if val and val > 0:
+                    count = val
+                continue
+            continue
+        if token.isdigit():
+            count = int(token)
+            continue
+        if lower.endswith("m") and lower[:-1].isdigit():
+            minutes = int(lower[:-1])
+            continue
+        if lower.endswith("h") and lower[:-1].isdigit():
+            minutes = int(lower[:-1]) * 60
+            continue
+        if symbol is None:
+            symbol = token
+        elif minutes is None:
+            extra = safe_int(token)
+            if extra and extra > 0:
+                minutes = extra
+    if symbol and minutes is None:
+        minutes = 60
+    count = max(5, min(200, count))
+    filtered = _filter_log_history(symbol=symbol, minutes=minutes, limit=count)
+    if not filtered:
+        detail = f" по {symbol}" if symbol else ""
+        return f"Нет логов за указанный интервал{detail}."
+    if symbol and minutes:
+        header = f"Логи для {symbol.upper()} за последние {minutes} мин ({len(filtered)} записей)"
+    elif symbol:
+        header = f"Логи для {symbol.upper()} ({len(filtered)} записей)"
+    elif minutes:
+        header = f"Логи за последние {minutes} мин ({len(filtered)} записей)"
+    else:
+        header = None
+    return _render_log_block(filtered, header)
 
 
 def _read_runtime_status() -> dict[str, Any]:
@@ -4804,6 +4962,7 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         )
         return
     if command == "help":
+        _ensure_commands_help_messages()
         reply = _build_help_message()
     elif command == "status":
         reply = _format_status_message(live=True)
@@ -4888,6 +5047,81 @@ def ensure_changelog_announcement() -> dict:
     }
     _save_changelog_state(new_state)
     return new_state
+
+
+def _load_commands_help_state() -> dict[str, Any]:
+    if not COMMANDS_HELP_STATE_FILE:
+        return {}
+    try:
+        raw = COMMANDS_HELP_STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_commands_help_state(state: dict[str, Any]) -> None:
+    if not COMMANDS_HELP_STATE_FILE:
+        return
+    try:
+        COMMANDS_HELP_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _build_command_help_sections() -> list[dict[str, str]]:
+    sections: list[dict[str, str]] = []
+    for entry in COMMANDS_HELP_SECTIONS:
+        title = entry.get("title") or ""
+        lines = entry.get("lines") or []
+        body = "\n".join(f"- {line}" for line in lines)
+        text = f"{title}\n{body}"
+        sections.append({"key": entry.get("key") or title.lower(), "text": text})
+    return sections
+
+
+def _ensure_commands_help_messages() -> None:
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    thread_id = TELEGRAM_COMMAND_THREAD_ID if TELEGRAM_COMMAND_THREAD_ID is not None else TG_TOPIC_ID
+    if thread_id is None:
+        return
+    sections = _build_command_help_sections()
+    if not sections:
+        return
+    state = _load_commands_help_state()
+    stored = state.get("messages") or {}
+    updated: dict[str, dict[str, Any]] = {}
+    for section in sections:
+        key = str(section["key"])
+        text = section["text"]
+        signature = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        entry = stored.get(key) if isinstance(stored, dict) else None
+        reuse = entry and entry.get("signature") == signature
+        message_id = entry.get("message_id") if reuse else None
+        if not message_id:
+            message_id = send_tg(
+                text,
+                thread_id=thread_id,
+                no_log_forward=True,
+                disable_notification=True,
+            )
+        if message_id:
+            _pin_tg_message(TG_CHAT, message_id)
+            updated[key] = {"message_id": message_id, "signature": signature}
+    if updated:
+        payload = {
+            "messages": updated,
+            "chat_id": TG_CHAT,
+            "thread_id": thread_id,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        _save_commands_help_state(payload)
 
 
 def _restart_with_latest_code(reason: str) -> None:
