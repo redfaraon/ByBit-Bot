@@ -5083,8 +5083,9 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
     elif command in {"tokens", "token"}:
         reply = _handle_tokens_command(args)
     elif command in {"bybitkey", "bybit"}:
-        if not is_bot_owner(user_id, USER_ID):
-            reply = "🚫 Команда /bybitkey доступна только владельцу бота."
+        dm_context = user_id is not None and chat_id == user_id
+        if not (is_bot_owner(user_id, USER_ID) or dm_context):
+            reply = "🚫 Команда /bybitkey доступна только владельцу процесса или в личном чате после /adduser."
         else:
             reply = _handle_bybit_key_command(args)
     elif command == "adduser":
