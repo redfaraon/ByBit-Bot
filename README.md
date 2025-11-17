@@ -152,6 +152,8 @@ Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, 
 5. **Share optional overrides**: `users/alice/public.env` can hold non-secret tweaks (pair list, leverage, Telegram topics). The trader edits only their directory.
 6. **Operate the session**: the trader interacts with the shared Telegram group (their process has its own prefix) and can rotate keys any time by rerunning `/bybitkey`.
 
+Each trader runs on their own Bybit account and equity: the per-user API keys determine balances, so deposits are isolated.
+
 This flow keeps Bybit credentials in the trader's hands while letting you manage the shared infrastructure.
 
 

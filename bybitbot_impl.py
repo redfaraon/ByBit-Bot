@@ -5027,10 +5027,7 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         else:
             reply = _handle_bybit_key_command(args)
     elif command == "adduser":
-        if not is_main_owner(user_id):
-            reply = "🚫 Команда /adduser доступна только владельцу главного бота."
-        else:
-            reply = _handle_add_user_command(args, user_id=user_id, origin_chat=chat_id, origin_thread=response_thread)
+        reply = _handle_add_user_command(args, user_id=user_id, origin_chat=chat_id, origin_thread=response_thread)
         if reply is None:
             return
     elif command == "config":
