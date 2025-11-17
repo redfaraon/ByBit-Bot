@@ -1,4 +1,8 @@
-﻿2025.11.17.0
+﻿2025.11.17.1
+- Support answers now search the entire repo (sans secrets) with multilingual keywords, so /support can explain trading logic, sandboxes, etc.
+- README documents AI model env vars and clarifies that each trader runs on their own Bybit balance.
+
+2025.11.17.0
 - Telegram help messages are now pinned in the Commands topic with structured sections.
 - /logs supports symbol/time filters (e.g. /logs BTC 60) and the bot can pull ticker-specific logs for the last hour.
 - Added a detailed workflow for onboarding new traders without sharing API keys and enabled verbose exchange order logging.
@@ -292,4 +296,5 @@ Changelog (newest first)
 2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
+
 

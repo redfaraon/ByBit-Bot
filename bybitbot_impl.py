@@ -45,9 +45,9 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.17.0"
+BOT_VERSION = "2025.11.17.1"
 BOT_CHANGELOG = (
-    "Pinned Telegram help, ticker-scoped /logs output, richer onboarding docs, and verbose exchange order tracing."
+    "Support replies now search the full codebase with smarter keywords, /logs docs mention ticker filters, and onboarding docs highlight per-user balances."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR
@@ -184,6 +184,16 @@ USER_LABEL: str = "redfaraon"
 AI_SUPPORT_MODEL: str = ""
 AI_LAST_EXCHANGE: dict[str, Any] = {}
 SUPPORT_MAX_CONTEXT_BYTES: int = 4096
+SUPPORT_CONTEXT_PATTERNS: tuple[str, ...] = ("*.py", "*.md", "*.txt", "*.yaml", "*.yml")
+SUPPORT_CONTEXT_SKIP_DIRS: set[str] = {
+    ".git",
+    "__pycache__",
+    "backups",
+    "support_sandboxes",
+    "users",
+    ".idea",
+    ".venv",
+}
 INPROGRESS_WIP_ENABLED: bool = False
 _LAST_INPROGRESS_MESSAGE: str | None = None
 USERS_DIR = REPO_ROOT / "users"
@@ -4094,6 +4104,40 @@ def _build_start_keyboard() -> dict[str, Any]:
     }
 
 
+def _support_context_targets() -> list[Path]:
+    base_targets = [
+        SCRIPT_DIR / "README.md",
+        SCRIPT_DIR / "CHANGELOG.txt",
+        SCRIPT_DIR / "bybitbot_impl.py",
+        SCRIPT_DIR / "bybitbot.py",
+        SCRIPT_DIR / "manage_update.py",
+        REPO_ROOT / "users" / "README.md",
+    ]
+    seen: set[str] = set()
+    targets: list[Path] = []
+
+    def add(path: Path) -> None:
+        if not path.exists() or not path.is_file():
+            return
+        key = str(path.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append(path)
+
+    for item in base_targets:
+        add(item)
+    try:
+        for pattern in SUPPORT_CONTEXT_PATTERNS:
+            for path in REPO_ROOT.rglob(pattern):
+                if any(part in SUPPORT_CONTEXT_SKIP_DIRS for part in path.parts):
+                    continue
+                add(path)
+    except Exception:
+        pass
+    return targets
+
+
 def _extract_support_keywords(question: str | None) -> list[str]:
     if not question:
         return []
@@ -4102,12 +4146,31 @@ def _extract_support_keywords(question: str | None) -> list[str]:
         "песочниц": "sandbox",
         "песочницa": "sandbox",
         "sandbox": "sandbox",
+        "sandboxe": "sandbox",
         "model": "model",
         "modely": "model",
         "модель": "model",
         "модели": "model",
+        "моделях": "model",
         "ai": "ai",
         "gpt": "gpt",
+        "логика": "logic",
+        "логике": "logic",
+        "logika": "logic",
+        "logic": "logic",
+        "strategy": "strategy",
+        "стратегия": "strategy",
+        "стратегии": "strategy",
+        "торговля": "trade",
+        "торговли": "trade",
+        "торговый": "trade",
+        "торговые": "trade",
+        "решения": "decision",
+        "решение": "decision",
+        "decision": "decision",
+        "order": "order",
+        "ордер": "order",
+        "ордера": "order",
     }
     keywords: list[str] = []
     seen: set[str] = set()
@@ -4119,6 +4182,8 @@ def _extract_support_keywords(question: str | None) -> list[str]:
             continue
         seen.add(base)
         keywords.append(base)
+    if not keywords:
+        keywords = ["trade", "run_cycle", "decision"]
     return keywords
 
 
@@ -4126,11 +4191,7 @@ def _load_support_context_snippet(question: str | None = None) -> str:
     if SUPPORT_MAX_CONTEXT_BYTES <= 0:
         return ""
     keywords = _extract_support_keywords(question)
-    targets = [
-        SCRIPT_DIR / "README.md",
-        SCRIPT_DIR / "bybitbot_impl.py",
-        SCRIPT_DIR / "bybitbot.py",
-    ]
+    targets = _support_context_targets()
     per_file_budget = max(512, SUPPORT_MAX_CONTEXT_BYTES // len(targets))
     snippets: list[str] = []
     for path in targets:
