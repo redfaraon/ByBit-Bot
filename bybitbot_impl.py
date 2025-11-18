@@ -11229,13 +11229,13 @@ def run_cycle():
                         continue
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
-                        log(f'?? {sym}: требуемая маржа {margin_required:.2f} USDT превышает доступную {effective_margin:.2f} USDT, ордер пропущен', Fore.YELLOW)
-                        send_tg(f'?? {sym}: требуемая маржа {margin_required:.2f} USDT больше доступной {effective_margin:.2f} USDT, ордер пропущен')
+                        log(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT превышает доступную {effective_margin:.2f} USDT (всего {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), ордер пропущен', Fore.YELLOW)
+                        send_tg(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT больше доступной {effective_margin:.2f} USDT, ордер пропущен')
                         continue
                     if notional > max_notional:
                         qty = max_notional / price
                         notional = max_notional
-                        log(f'?? Объём {sym} уменьшен до {qty:.4f} (~{notional:.2f} USDT) из-за лимита маржи', Fore.LIGHTBLACK_EX)
+                        log(f'⚠️ Объём {sym} уменьшен до {qty:.4f} (~{notional:.2f} USDT) из-за лимита маржи (max_notional={max_notional:.2f}, effective_margin={effective_margin:.2f}, leverage={symbol_leverage})', Fore.YELLOW)
                     try:
                         qty = float(ex.amount_to_precision(sym, qty))
                     except Exception:
@@ -11280,7 +11280,7 @@ def run_cycle():
                             min_total_layers = min_qty_rule * len(normalized_entries)
                             if qty < min_total_layers:
                                 normalized_entries = [(1.0, 0.0)]
-                        ratio_total = sum(item[0] for item in normalized_entries) or 1.0
+                        log(f"[DEBUG] {sym} {side.upper()} - qty={qty:.4f}, notional={notional:.2f}, margin_required={notional/symbol_leverage if symbol_leverage else notional:.2f}, effective_margin={effective_margin:.2f}, sl={sl:.2f}, tp={tp:.2f}", Fore.LIGHTBLACK_EX)
                         remaining_qty = qty
                         entry_summaries: list[str] = []
                         entry_created = 0
@@ -11346,7 +11346,8 @@ def run_cycle():
                                     continue
                                 layer_params = dict(base_params)
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
-                                ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
+                                order_result = ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
+                                log(f"[DEBUG] create_order результат: {order_result}", Fore.LIGHTBLACK_EX)
                             open_executed = True
                             entry_created += 1
                             remaining_qty = max(0.0, remaining_qty - precise_qty)
@@ -11386,7 +11387,8 @@ def run_cycle():
                                     raise RuntimeError("no entry orders placed")
                                 layer_params = dict(base_params)
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
-                                ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
+                                order_result = ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
+                                log(f"[DEBUG] create_order fallback результат: {order_result}", Fore.LIGHTBLACK_EX)
                             open_executed = True
                             entry_created = 1
                             remaining_qty = max(0.0, qty - precise_qty)
@@ -11589,6 +11591,7 @@ def run_cycle():
     if not final_positions_available:
         final_positions_map = dict(positions_map)
 
+    log(f"[DEBUG] Собираем positions_summary из final_positions_map: {list((final_positions_map or {}).keys())}", Fore.LIGHTBLACK_EX)
     positions_summary: list[dict[str, Any]] = []
     for sym_active, payload in (final_positions_map or {}).items():
         if not isinstance(payload, dict):
@@ -11617,6 +11620,7 @@ def run_cycle():
     LATEST_STATUS["positions"] = positions_summary
     try:
         if positions_summary:
+            log(f"[DEBUG] positions_summary: {positions_summary}", Fore.LIGHTBLACK_EX)
             status_lines = ["📈 Открытые позиции:"]
             total_unrealized = 0.0
             for pos in positions_summary[:20]:
