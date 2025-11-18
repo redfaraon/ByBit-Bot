@@ -2470,7 +2470,7 @@ def refresh_settings():
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
-    RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.015)))
+    RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.05)))
     DYNAMIC_RISK_ENABLED = env_int("RISK_DYNAMIC_ENABLED", 1) != 0
     base_min_default = max(0.0005, RISK_PCT * 0.5)
     base_max_default = max(RISK_PCT, RISK_PCT * 1.8)
@@ -2588,7 +2588,7 @@ def refresh_settings():
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
-    MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 0)
+    MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 15)
     MAX_POSITIONS_PER_BASE = max(0, env_int("MAX_POSITIONS_PER_BASE", MAX_POSITIONS_PER_BASE))
     env_default_next = os.getenv("DEFAULT_NEXT_RUN_MINUTES")
     if env_default_next:
