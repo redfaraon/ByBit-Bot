@@ -138,6 +138,24 @@ LIMIT_ORDER_FALLBACK_SECONDS = float(os.getenv("LIMIT_ORDER_FALLBACK_SECONDS", "
 LIMIT_ORDER_PENDING: dict[tuple[str, str], dict[str, Any]] = {}
 
 
+
+def record_pending_entry(symbol: str, qty_value: float, side_value: str, user_id: str | None = None) -> None:
+    try:
+        if not (qty_value and float(qty_value) > 0):
+            return
+    except Exception:
+        return
+    key = _pending_entry_key(symbol, user_id)
+    LIMIT_ORDER_PENDING[key] = {
+        "ts": time.time(),
+        "qty": float(qty_value),
+        "side": (side_value or "buy").lower(),
+    }
+
+def clear_pending_entry(symbol: str, user_id: str | None = None) -> None:
+    LIMIT_ORDER_PENDING.pop(_pending_entry_key(symbol, user_id), None)
+
+
 def _pending_entry_key(symbol: str, user_id: str | None = None) -> tuple[str, str]:
     user_key = user_id or os.getenv("BYBITBOT_USER_ID") or "default"
     return (user_key, symbol)
@@ -11160,7 +11178,7 @@ def run_cycle():
                 initial_position_amount = 0.0
             has_position = abs(initial_position_amount) > 0
             if has_position:
-                _clear_pending_entry(sym)
+                clear_pending_entry(sym, active_user_id)
             open_orders_symbol = open_orders_prefetch.get(sym)
             sym_confidence_text: str | None = None
             sym_confidence_value: float | None = None
@@ -11944,7 +11962,7 @@ def run_cycle():
                         current_position = positions_map.get(sym)
                         base_exposure_counts = _build_base_exposure_map(positions_map)
                         if open_executed and qty and qty > 0 and side:
-                            _record_pending_entry(sym, qty, side)
+                            record_pending_entry(sym, qty, side, active_user_id)
 
                     except Exception as e:
                         err_text = str(e)
