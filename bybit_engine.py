@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Standalone engine runner that reuses EngineCore without importing the main bot.
 """
@@ -24,7 +24,28 @@ from engine_core import EngineCore, EngineSettings
 
 REPO_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
+RUNTIME_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
+MAIN_LOG_MIRROR = Path(os.getenv("BYBIT_MAIN_LOG", REPO_ROOT / "bybit.log"))
 
+class EngineWithMirror(EngineCore):
+    """EngineCore that mirrors its log output into the main bybit.log as well."""
+
+    def __init__(self, *args, mirror_path: Path | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._mirror_path = mirror_path
+
+    def _log(self, message: str) -> None:  # override
+        try:
+            print(message)
+        except Exception:
+            pass
+        if self._mirror_path:
+            try:
+                self._mirror_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._mirror_path.open("a", encoding="utf-8") as fp:
+                    fp.write(message.rstrip() + "`n")
+            except Exception:
+                pass
 
 def _load_dotenv() -> None:
     env_path = REPO_ROOT / ".env"
@@ -134,7 +155,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     pairs = parse_symbol_override(args.pairs)
     exchange = create_public_exchange()
     settings = EngineSettings()
-    engine = EngineCore(exchange, settings=settings, runtime_dir=RUNTIME_DIR)
+    engine = EngineWithMirror(exchange, settings=settings, runtime_dir=RUNTIME_DIR)
     if args.loop:
         run_loop(
             engine,
