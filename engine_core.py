@@ -351,6 +351,8 @@ class EngineCore:
         self.universe_cache = serialized
 
     def _build_news_digest(self, symbols: Sequence[str]) -> dict[str, Any]:
+        ext_symbols = list(symbols[:NEWS_SYMBOL_LIMIT])
+        self._log(f"[Engine] Gathering news for {len(ext_symbols)} symbols: {', '.join(ext_symbols)}")
         digest: dict[str, Any] = {}
         for symbol in symbols[:NEWS_SYMBOL_LIMIT]:
             payload = self._fetch_news(symbol)
@@ -428,6 +430,9 @@ class EngineCore:
             'timeframes=[{tf, depth, indicators}], trade_model). '
             "Timeframe depth must be <= 400 bars. Indicators must come from supported list."
         )
+        self._log(
+            f"[Engine] Sending universe request to {self.settings.universe_model} with {len(payload['candidate_symbols'])} symbols"
+        )
         messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -437,6 +442,7 @@ class EngineCore:
             raise RuntimeError(f"Universe payload exceeds {self.settings.max_universe_tokens} token heuristic")
         result = self._call_openai_json(self.settings.universe_model, messages, context_label="universe")
         universe = self._normalize_universe(result)
+        self._log(f"[Engine] Universe parsed: pairs={len(universe.get('pairs', []))}, timeframes={len(universe.get('global_timeframes', []))}")
         self._save_universe_cache(universe)
         return universe
 

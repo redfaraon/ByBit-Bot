@@ -73,6 +73,10 @@ def run_cycle(engine: EngineCore, pairs: list[str] | None, quiet: bool) -> dict:
             f"{len(selection.get('pairs') or [])} pairs; volatility={selection.get('volatility')};",
             f"next_run≈{selection.get('next_run_minutes')} min",
         )
+        news_items = snapshot.get("news") or {}
+        trade_plan_payload = snapshot.get("trade_plan") or {}
+        decisions = (trade_plan_payload.get("trade_plan") or trade_plan_payload.get("decisions")) or []
+        print(f"[ENGINE] news items: {len(news_items)}; trade plan decisions: {len(decisions)}")
     return snapshot
 
 

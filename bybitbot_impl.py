@@ -11606,6 +11606,7 @@ def run_cycle():
                     trade_rules = _get_symbol_trade_rules(ex, sym)
                     min_qty_rule = trade_rules.get("min_qty") or 0.0
                     exchange_min_notional = trade_rules.get("min_notional") or 0.0
+                    min_notional_rule = trade_rules.get("min_notional") or 0.0
                     env_min_notional = float(MIN_NOTIONAL_USDT or 0.0)
                     effective_min_notional = max(exchange_min_notional, env_min_notional)
                     min_notional_required = max(effective_min_notional, min_notional_rule or 0.0)
