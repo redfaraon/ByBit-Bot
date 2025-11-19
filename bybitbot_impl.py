@@ -11539,6 +11539,12 @@ def run_cycle():
                             category,
                             CURRENT_MARKET_ALLOCATIONS.get("derivatives", 1.0),
                         )
+                        try:
+                            alloc = float(alloc)
+                        except (TypeError, ValueError):
+                            alloc = 1.0
+                        if not math.isfinite(alloc) or alloc <= 0:
+                            alloc = 1.0
                         alloc = max(0.0, min(1.0, alloc))
                         risk_budget_base *= alloc
                         # Пер-позиционный риск считаем от базового RISK_PCT,
