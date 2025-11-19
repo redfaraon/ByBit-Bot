@@ -88,39 +88,53 @@ def _configure_state_paths() -> None:
     except Exception:
         pass
 
-LIMIT_ORDER_FALLBACK_SECONDS = float(os.getenv("LIMIT_ORDER_FALLBACK_SECONDS", "30"))
-CYCLE_FALLBACK_INTERVAL = 5
-PNL_LOOKBACK_HOURS = 6
-SPARKLINE_BLOCKS = "???"  # trimmed
-RESULTS_CLOSED_ORDER_DISPLAY_LIMIT = 10
-REQUIRE_TAKE_PROFIT = True
-DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
-DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
-PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
-ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
-_LAST_COMMIT_HASH: Optional[str] = None
-SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
-DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
-CURRENT_RISK_PCT: float = 0.0
-DYNAMIC_RISK_ENABLED: bool = True
-MIN_DYNAMIC_RISK_PCT: float = 0.0
-MAX_DYNAMIC_RISK_PCT: float = 0.0
-BREAKEVEN_ENABLED: bool = True
-BREAKEVEN_ATR_MULT: float = 0.6
-BREAKEVEN_BUFFER_ATR: float = 0.15
-TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
-TRAILING_DYNAMIC_FACTOR: float = 0.65
-TRAILING_DYNAMIC_MIN_ATR: float = 0.35
-TELEGRAM_FORWARD_LOGS: bool = False
-TELEGRAM_LOG_BATCH_SIZE: int = 12
-TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
-TELEGRAM_LOG_RATE_LIMIT_WINDOW: float = 60.0
-TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW: int = 18
-TELEGRAM_LOG_THREAD_ID: int | None = None
-TELEGRAM_WEBHOOK_URL: str = ""
-TELEGRAM_WEBHOOK_HOST: str = "127.0.0.1"
-TELEGRAM_WEBHOOK_PORT: int = 0
+_LOG_HISTORY: deque[str] = deque(maxlen=200)
 
+def _format_tz_suffix(dt: datetime.datetime) -> str:
+    if not LOG_TZINFO:
+        return ""
+    tz = dt.tzinfo
+    if tz is None:
+        return ""
+    offset = tz.utcoffset(dt)
+    if offset is None:
+        return ""
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+def _current_log_time() -> datetime.datetime:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if LOG_TZINFO is not None:
+        return now.astimezone(LOG_TZINFO)
+    return now
+
+def log(msg: str, color=Fore.WHITE):
+    now = _current_log_time()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    tz_suffix = _format_tz_suffix(now)
+    if tz_suffix:
+        stamp = f"{stamp} {tz_suffix}"
+    record = f"[{stamp}] {msg}"
+    _LOG_HISTORY.append(record)
+    print(color + record + Style.RESET_ALL)
+    if TELEGRAM_FORWARD_LOGS:
+        _enqueue_tg_log(record)
+
+def _append_user_bybit_log(user_id: str | None, text: str) -> None:
+    if not user_id:
+        return
+    try:
+        p = Path("runtime") / str(user_id) / "bybit.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fp:
+            fp.write(text + "\n")
+    except Exception:
+        pass
+
+LIMIT_ORDER_FALLBACK_SECONDS = float(os.getenv("LIMIT_ORDER_FALLBACK_SECONDS", "30"))
 LIMIT_ORDER_PENDING: dict[tuple[str, str], dict[str, Any]] = {}
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
@@ -2511,6 +2525,7 @@ def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
 
 
 def refresh_settings():
+    _configure_state_paths()
     load_environment()
     stored_api_key, stored_api_secret = _load_bybit_credentials()
     if stored_api_key and not os.getenv("BYBIT_API_KEY"):
