@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 EngineCore: standalone orchestration of the research → universe → trade plan flow.
 
@@ -664,10 +664,24 @@ class EngineCore:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
         try:
-            return self._call_openai_json(pair_entry.get("trade_model") or self.settings.trade_model, messages, context_label=symbol)
+            return self._call_openai_json(self._normalize_trade_model(pair_entry.get("trade_model")), messages, context_label=symbol)
         except Exception as exc:
             self._log(f"[Engine] Trade idea request failed for {symbol}: {exc}")
             return None
+
+
+    def _normalize_trade_model(self, requested: str | None) -> str:
+        default_model = self.settings.trade_model
+        if not requested:
+            return default_model
+        rid = str(requested).strip()
+        if not rid:
+            return default_model
+        rid_lower = rid.lower()
+        allowed_prefixes = ("gpt","o3","deepseek","llama","claude")
+        if any(rid_lower.startswith(pfx) for pfx in allowed_prefixes):
+            return rid
+        return default_model
 
     def _ideas_to_decisions(self, symbol: str, ideas: Iterable[Mapping[str, Any]], default_weight: float | None) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
