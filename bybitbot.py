@@ -41,6 +41,9 @@ USERS_DIR = REPO_ROOT / "users"
 USERS_CONFIG_FILE = USERS_DIR / "users.json"
 USERS_DEFAULT_SECRET = "secrets.env"
 
+_ENGINE_AUTOSTART_PROCESS = None
+_ENGINE_AUTOSTART_LOG = None
+
 
 def _resolve_commit_limit(raw_value: str | None) -> int:
     try:
@@ -171,6 +174,86 @@ def _apply_user_profile(profile: UserProfile) -> None:
                 continue
             os.environ[key] = value
     _refresh_state_paths()
+
+
+def _engine_autostart_enabled() -> bool:
+    raw_value = str(os.getenv("BYBITBOT_AUTOSTART_ENGINE", "1")).strip().lower()
+    return raw_value not in {"0", "false", "no", "off"}
+
+
+def _start_background_engine() -> None:
+    """Launch bybit_engine.py --loop --quiet in the background when requested."""
+    global _ENGINE_AUTOSTART_PROCESS, _ENGINE_AUTOSTART_LOG
+    if not _engine_autostart_enabled():
+        return
+    if _ENGINE_AUTOSTART_PROCESS and _ENGINE_AUTOSTART_PROCESS.poll() is None:
+        return
+    script_path = REPO_ROOT / "bybit_engine.py"
+    if not script_path.exists():
+        return
+    runtime_root = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
+    log_dir = runtime_root / "engine"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    log_path = log_dir / "engine-autostart.log"
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        log_file = log_path.open("a", encoding="utf-8")
+    except Exception as exc:
+        print(f"[ENGINE] Failed to open {log_path}: {exc}", file=sys.stderr)
+        log_file = None
+    else:
+        log_file.write(f"\n=== Engine autostart @ {timestamp} ===\n")
+        log_file.flush()
+    env = os.environ.copy()
+    env.setdefault("BYBIT_ENGINE_AUTOSTART", "1")
+    cmd = [sys.executable, str(script_path), "--loop", "--quiet"]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file if log_file else None,
+            stderr=log_file if log_file else None,
+            env=env,
+        )
+    except Exception as exc:
+        if log_file:
+            log_file.write(f"[ENGINE] Failed to start: {exc}\n")
+            log_file.flush()
+            log_file.close()
+        print(f"[ENGINE] Autostart failed: {exc}", file=sys.stderr)
+        return
+    _ENGINE_AUTOSTART_PROCESS = proc
+    _ENGINE_AUTOSTART_LOG = log_file
+
+
+def _stop_background_engine() -> None:
+    global _ENGINE_AUTOSTART_PROCESS, _ENGINE_AUTOSTART_LOG
+    proc = _ENGINE_AUTOSTART_PROCESS
+    if proc:
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except Exception:
+            pass
+    if _ENGINE_AUTOSTART_LOG:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            _ENGINE_AUTOSTART_LOG.write(f"=== Engine autostop @ {timestamp} ===\n")
+            _ENGINE_AUTOSTART_LOG.flush()
+        except Exception:
+            pass
+        try:
+            _ENGINE_AUTOSTART_LOG.close()
+        except Exception:
+            pass
+    _ENGINE_AUTOSTART_PROCESS = None
+    _ENGINE_AUTOSTART_LOG = None
 
 
 def _parse_args():
@@ -986,20 +1069,24 @@ def _run_current():
     if "BYBITBOT_CYCLE_COUNTER" not in os.environ:
         os.environ["BYBITBOT_CYCLE_COUNTER"] = "0"
     os.environ.pop("BYBITBOT_FALLBACK_CONTEXT", None)
-    module = importlib.import_module("bybitbot_impl")
-    module_path = Path(getattr(module, "__file__", "<unknown>")).resolve() if hasattr(module, "__file__") else Path("bybitbot_impl.py").resolve()
-    print(f"[BOOT] Using implementation from {module_path}", file=sys.stderr)
-    if hasattr(module, "apply_metadata"):
-        module.apply_metadata(BOT_VERSION, CURRENT_CHANGELOG, LATEST_VERSION)
-    else:
-        if hasattr(module, "BOT_VERSION"):
-            module.BOT_VERSION = BOT_VERSION
-        if hasattr(module, "CHANGELOG_TEXT"):
-            module.CHANGELOG_TEXT = CURRENT_CHANGELOG
-    if hasattr(module, "main"):
-        module.main()
-    else:
-        raise AttributeError("bybitbot_impl.main not found")
+    _start_background_engine()
+    try:
+        module = importlib.import_module("bybitbot_impl")
+        module_path = Path(getattr(module, "__file__", "<unknown>")).resolve() if hasattr(module, "__file__") else Path("bybitbot_impl.py").resolve()
+        print(f"[BOOT] Using implementation from {module_path}", file=sys.stderr)
+        if hasattr(module, "apply_metadata"):
+            module.apply_metadata(BOT_VERSION, CURRENT_CHANGELOG, LATEST_VERSION)
+        else:
+            if hasattr(module, "BOT_VERSION"):
+                module.BOT_VERSION = BOT_VERSION
+            if hasattr(module, "CHANGELOG_TEXT"):
+                module.CHANGELOG_TEXT = CURRENT_CHANGELOG
+        if hasattr(module, "main"):
+            module.main()
+        else:
+            raise AttributeError("bybitbot_impl.main not found")
+    finally:
+        _stop_background_engine()
 
 
 def _run_backups(reason: str) -> bool:

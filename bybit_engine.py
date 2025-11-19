@@ -1,139 +1,149 @@
 #!/usr/bin/env python3
 """
-Engine-only runner: builds universe via OpenAI and persists selection + trade plan
-into `runtime/engine/selection.json` and `runtime/engine/trade_plan.json` for userbots to consume.
-
-Run on Linux as a scheduled service or cron.
+Standalone engine runner that reuses EngineCore without importing the main bot.
 """
-import json
-import datetime
-from pathlib import Path
+from __future__ import annotations
+
+import argparse
+import os
 import sys
+import time
+from pathlib import Path
+from typing import Iterable
+
 from dotenv import dotenv_values
 
 try:
     import ccxt
-    import bybitbot_impl as impl
 except Exception as exc:
-    print(f"Engine import failed: {exc}", file=sys.stderr)
+    print(f"[ENGINE] ccxt import failed: {exc}", file=sys.stderr)
     raise
 
-RUNTIME = Path("runtime")
-ENGINE_DIR = RUNTIME / "engine"
-ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-SNAPSHOT_SELECTION = ENGINE_DIR / "selection.json"
-SNAPSHOT_TRADE_PLAN = ENGINE_DIR / "trade_plan.json"
+from engine_core import EngineCore, EngineSettings
 
 
-def public_exchange():
-    # Public-bybit client (no API keys) — sufficient for market data
-    ex = ccxt.bybit({
+REPO_ROOT = Path(__file__).resolve().parent
+RUNTIME_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
+
+
+def _load_dotenv() -> None:
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    try:
+        values = dotenv_values(env_path)
+    except Exception:
+        return
+    for key, value in values.items():
+        if value is None or key in os.environ:
+            continue
+        os.environ[key] = value
+
+
+def create_public_exchange():
+    params = {
         "enableRateLimit": True,
         "options": {"defaultType": "swap"},
-    })
-    try:
-        impl._enable_exchange_logging(ex)
-    except Exception:
-        pass
+    }
+    ex = ccxt.bybit(params)
+    ex.aiohttp_proxy = os.getenv("BYBITBOT_PROXY")
+    verbose = os.getenv("BYBITBOT_CCXT_VERBOSE")
+    if verbose and verbose.lower() in {"1", "true", "yes"}:
+        ex.verbose = True
     return ex
 
 
-def run_once(pairs=None, quiet=False):
-    ex = public_exchange()
-    # positions_map empty: engine doesn't know per-user exposure
-    positions_map = {}
-    equity = 0.0
-    available_margin = 0.0
-    universe_cache = impl.load_universe_cache()
-    symbol_candidates = list(set((impl.PAIR_LIST or []) + (impl.BASE_PAIR_CANDIDATES or [])))
-    if pairs:
-        symbol_candidates = [p for p in pairs if p]
-    symbol_candidates = sorted(symbol_candidates)
-    news_digest = impl._build_news_digest(symbol_candidates)
-    res = impl.ai_update_universe(
-        exchange=ex,
-        symbols=symbol_candidates,
-        positions_map=positions_map,
-        equity=equity,
-        available_margin=available_margin,
-        universe_cache=universe_cache,
-        news_digest=news_digest,
-    )
-    if not res:
-        raise RuntimeError("Engine: ai_update_universe returned no result")
-    selection_result, universe_state, news_requests = res
-    # persist universe cache (used by main bot as well)
-    universe_state = universe_state or {}
-    universe_state["engine_generated_at"] = datetime.datetime.datetime.now(datetime.timezone.utc).isoformat()
-    impl.save_universe_cache(universe_state)
-    # Build portfolio bundle and trade plan (model-driven allocations)
-    bundle, open_orders_cache = impl.build_portfolio_bundle(ex, selection_result or {}, {}, news_cache=None)
-    trade_plan = impl.ai_plan_trades(
-        ex,
-        bundle,
-        equity,
-        available_margin,
-        positions_snapshot={},
-        pending_orders=open_orders_cache,
-        stage="initial",
-    )
-    # write snapshots
-    snapshot = {
-        "selection": selection_result,
-        "universe": universe_state,
-        "news_requests": news_requests,
-        "bundle": bundle,
-        "trade_plan": trade_plan,
-    }
-    try:
-        SNAPSHOT_SELECTION.write_text(json.dumps({"selection": selection_result, "universe": universe_state}, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    try:
-        SNAPSHOT_TRADE_PLAN.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+def parse_symbol_override(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    result = []
+    for token in raw.split(","):
+        token = token.strip()
+        if token:
+            result.append(token)
+    return result or None
+
+
+def run_cycle(engine: EngineCore, pairs: list[str] | None, quiet: bool) -> dict:
+    snapshot = engine.build_trade_plan(symbol_candidates=pairs)
     if not quiet:
-        print("Engine: wrote selection ->", SNAPSHOT_SELECTION)
-        print("Engine: wrote trade_plan ->", SNAPSHOT_TRADE_PLAN)
+        selection = snapshot.get("selection") or {}
+        print(
+            "[ENGINE] snapshot generated:",
+            f"{len(selection.get('pairs') or [])} pairs; volatility={selection.get('volatility')};",
+            f"next_run≈{selection.get('next_run_minutes')} min",
+        )
     return snapshot
 
 
-def _load_user_registry(users_config_file: Path, users_dir: Path) -> dict[str, dict]:
-    """Load user profiles from a JSON configuration file."""
-    if not users_config_file.exists():
-        return {}
+def run_loop(
+    engine: EngineCore,
+    pairs: list[str] | None,
+    quiet: bool,
+    *,
+    default_interval: float,
+    min_interval: float,
+    max_interval: float,
+) -> None:
+    delay_minutes = default_interval
+    consecutive_errors = 0
+    while True:
+        cycle_start = time.perf_counter()
+        try:
+            snapshot = run_cycle(engine, pairs, quiet)
+            consecutive_errors = 0
+            delay_minutes = _resolve_next_delay(snapshot, default_interval, min_interval, max_interval)
+        except Exception as exc:
+            consecutive_errors += 1
+            wait = min(max_interval, min_interval * (2 ** min(consecutive_errors, 5)))
+            delay_minutes = wait
+            print(f"[ENGINE] Cycle failed: {exc}")
+        elapsed = time.perf_counter() - cycle_start
+        sleep_minutes = max(min_interval, min(delay_minutes, max_interval))
+        sleep_seconds = max(5.0, sleep_minutes * 60 - elapsed)
+        if not quiet:
+            print(f"[ENGINE] Sleeping for {sleep_seconds/60:.2f} minutes")
+        time.sleep(sleep_seconds)
+
+
+def _resolve_next_delay(snapshot: dict, default_interval: float, min_interval: float, max_interval: float) -> float:
+    selection = snapshot.get("selection") or {}
+    raw_next = selection.get("next_run_minutes") or (snapshot.get("universe") or {}).get("next_run_minutes")
     try:
-        payload = json.loads(users_config_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        print(f"[USERS] Failed to parse {users_config_file}: {exc}", file=sys.stderr)
-        return {}
-    if not isinstance(payload, dict):
-        print(f"[USERS] Invalid registry format in {users_config_file}", file=sys.stderr)
-        return {}
-    registry = {}
-    for entry in payload.get("users", []):
-        if not isinstance(entry, dict):
-            continue
-        user_id = str(entry.get("id") or "").strip()
-        if not user_id:
-            continue
-        registry[user_id] = {
-            "enabled": entry.get("enabled", True),
-            "label": entry.get("label", user_id),
-            "env_overrides": entry.get("env", {}),
-            "state_dir": users_dir / user_id
-        }
-    return registry
+        next_minutes = float(raw_next)
+    except Exception:
+        next_minutes = default_interval
+    next_minutes = max(min_interval, min(max_interval, next_minutes or default_interval))
+    return next_minutes
 
 
-if __name__ == '__main__':
-    import argparse
-    p = argparse.ArgumentParser(description="Run engine-only universe selection + trade planning")
-    p.add_argument("--pairs", help="Comma-separated list of symbols to consider", default=None)
-    p.add_argument("--quiet", action="store_true")
-    args = p.parse_args()
-    pairs = None
-    if args.pairs:
-        pairs = [s.strip() for s in args.pairs.split(",") if s.strip()]
-    run_once(pairs=pairs, quiet=args.quiet)
+def main(argv: Iterable[str] | None = None) -> int:
+    _load_dotenv()
+    parser = argparse.ArgumentParser(description="Autonomous Bybit engine runner")
+    parser.add_argument("--pairs", help="Comma-separated list of symbols to consider", default=None)
+    parser.add_argument("--quiet", action="store_true", help="Reduce console output")
+    parser.add_argument("--loop", action="store_true", help="Run continuously instead of a single pass")
+    parser.add_argument("--interval", type=float, default=float(os.getenv("ENGINE_DEFAULT_INTERVAL", "15")), help="Default interval between cycles (minutes)")
+    parser.add_argument("--min-interval", type=float, default=float(os.getenv("ENGINE_MIN_INTERVAL", "5")), help="Minimum interval between cycles (minutes)")
+    parser.add_argument("--max-interval", type=float, default=float(os.getenv("ENGINE_MAX_INTERVAL", "30")), help="Maximum interval between cycles (minutes)")
+    args = parser.parse_args(argv)
+    pairs = parse_symbol_override(args.pairs)
+    exchange = create_public_exchange()
+    settings = EngineSettings()
+    engine = EngineCore(exchange, settings=settings, runtime_dir=RUNTIME_DIR)
+    if args.loop:
+        run_loop(
+            engine,
+            pairs,
+            args.quiet,
+            default_interval=args.interval,
+            min_interval=args.min_interval,
+            max_interval=args.max_interval,
+        )
+    else:
+        run_cycle(engine, pairs, args.quiet)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
