@@ -9,6 +9,7 @@ import json
 import datetime
 from pathlib import Path
 import sys
+from dotenv import dotenv_values
 
 try:
     import ccxt
@@ -96,6 +97,34 @@ def run_once(pairs=None, quiet=False):
         print("Engine: wrote selection ->", SNAPSHOT_SELECTION)
         print("Engine: wrote trade_plan ->", SNAPSHOT_TRADE_PLAN)
     return snapshot
+
+
+def _load_user_registry(users_config_file: Path, users_dir: Path) -> dict[str, dict]:
+    """Load user profiles from a JSON configuration file."""
+    if not users_config_file.exists():
+        return {}
+    try:
+        payload = json.loads(users_config_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"[USERS] Failed to parse {users_config_file}: {exc}", file=sys.stderr)
+        return {}
+    if not isinstance(payload, dict):
+        print(f"[USERS] Invalid registry format in {users_config_file}", file=sys.stderr)
+        return {}
+    registry = {}
+    for entry in payload.get("users", []):
+        if not isinstance(entry, dict):
+            continue
+        user_id = str(entry.get("id") or "").strip()
+        if not user_id:
+            continue
+        registry[user_id] = {
+            "enabled": entry.get("enabled", True),
+            "label": entry.get("label", user_id),
+            "env_overrides": entry.get("env", {}),
+            "state_dir": users_dir / user_id
+        }
+    return registry
 
 
 if __name__ == '__main__':
