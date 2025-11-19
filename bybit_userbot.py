@@ -13,6 +13,7 @@ import json
 import time
 from pathlib import Path
 import argparse
+from dotenv import dotenv_values
 
 try:
     import ccxt
@@ -200,7 +201,25 @@ def execute_trade_plan_for_user(user_id: str, dry_run: bool = False):
             impl._append_user_bybit_log(user_id, f"Decision processing error: {exc_outer}")
 
 
-if __name__ == '__main__':
+def execute_trade_plan(user_id: str, trade_plan_file: Path):
+    """Execute a trade plan for a specific user."""
+    if not trade_plan_file.exists():
+        print(f"[USERBOT] Trade plan file not found: {trade_plan_file}")
+        return
+
+    try:
+        with trade_plan_file.open("r", encoding="utf-8") as f:
+            trade_plan = json.load(f)
+    except json.JSONDecodeError as exc:
+        print(f"[USERBOT] Failed to parse trade plan for user {user_id}: {exc}")
+        return
+
+    print(f"[USERBOT] Executing trade plan for user {user_id}: {trade_plan}")
+    # Here you would add logic to execute the trades in the plan.
+
+
+# Example usage in the userbot
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a per-user bot that consumes engine trade plan")
     parser.add_argument("--user", required=True, help="User id to run for (must match users/users.json or users/<id>/secrets.env)")
     parser.add_argument("--dry-run", action="store_true", help="Do not send orders; just log intended actions")
@@ -211,3 +230,6 @@ if __name__ == '__main__':
     except Exception as exc:
         print(f"Userbot run failed: {exc}")
         raise
+    USER_ID = "example_user"
+    TRADE_PLAN_FILE = Path(f"runtime/{USER_ID}/trade_plan.json")
+    execute_trade_plan(USER_ID, TRADE_PLAN_FILE)
