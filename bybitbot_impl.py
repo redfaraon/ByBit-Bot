@@ -45,7 +45,7 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.17.1"
+BOT_VERSION = "2025.11.19.1"
 BOT_CHANGELOG = (
     "Support replies now search the full codebase with smarter keywords, /logs docs mention ticker filters, and onboarding docs highlight per-user balances."
 )
@@ -1096,6 +1096,15 @@ def _extract_decision_position_size(decision, symbol_meta=None):
             if notional and notional > 0:
                 return None, notional
     return None, None
+
+
+def _select_risk_budget_base(equity: float, available_margin: float) -> float:
+    """Pick a sane risk budget base even if one of the inputs is zero or missing."""
+    eq = float(equity) if equity and math.isfinite(equity) else 0.0
+    margin = float(available_margin) if available_margin and math.isfinite(available_margin) else 0.0
+    if eq > 0 and margin > 0:
+        return min(eq, margin)
+    return margin if margin > 0 else eq
 
 def detect_unprotected_positions(exchange, positions_map) -> list[tuple[str, str]]:
     missing: list[tuple[str, str]] = []
@@ -2593,6 +2602,8 @@ def refresh_settings():
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    global NOTIONAL_EPSILON
+    NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
     MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 15)
     MAX_POSITIONS_PER_BASE = max(0, env_int("MAX_POSITIONS_PER_BASE", MAX_POSITIONS_PER_BASE))
@@ -2908,6 +2919,8 @@ AI_REQUESTS_LOG = "ai_requests.log"
 if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
+if "NOTIONAL_EPSILON" not in globals():
+    NOTIONAL_EPSILON = 1e-6
 if "MAX_NON_REDUCE_LIMITS_PER_SIDE" not in globals():
     MAX_NON_REDUCE_LIMITS_PER_SIDE = 2
 if "NON_REDUCE_PRICE_DECIMALS" not in globals():
@@ -9914,7 +9927,199 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
     return decision
 
 # --- Основная логика ---
+def build_trade_plan_snapshot(
+    exchange,
+    *,
+    symbol_candidates: Sequence[str] | None = None,
+    positions_map: Mapping[str, dict] | None = None,
+    equity: float = 0.0,
+    available_margin: float = 0.0,
+    news_digest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    symbols = sorted({sym for sym in (symbol_candidates or []) if sym})
+    positions_map = dict(positions_map or {})
+    universe_cache = load_universe_cache()
+    news_payload = news_digest if news_digest is not None else _build_news_digest(symbols)
+    updated = ai_update_universe(
+        exchange=exchange,
+        symbols=symbols,
+        positions_map=positions_map,
+        equity=equity,
+        available_margin=available_margin,
+        universe_cache=universe_cache,
+        news_digest=news_payload,
+    )
+    if not updated:
+        raise RuntimeError("Engine: ai_update_universe returned no result")
+    selection_result, universe_state, news_requests = updated
+    universe_state = universe_state or {}
+    universe_state["engine_generated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_universe_cache(universe_state)
+    bundle, open_orders_cache = build_portfolio_bundle(
+        exchange,
+        selection_result or {},
+        positions_map,
+        news_cache=None,
+    )
+    trade_plan = ai_plan_trades(
+        exchange,
+        bundle,
+        equity,
+        available_margin,
+        positions_snapshot=positions_map,
+        pending_orders=open_orders_cache,
+        stage="initial",
+    )
+    return {
+        "selection": selection_result,
+        "universe": universe_state,
+        "news_requests": news_requests,
+        "bundle": bundle,
+        "trade_plan": trade_plan,
+        "meta": {
+            "symbol_candidates": symbols,
+            "has_news_digest": bool(news_payload),
+        },
+    }
+
+
+def apply_trade_plan_snapshot(
+    exchange,
+    snapshot,
+    *,
+    user_id: str | None = None,
+    dry_run: bool = False,
+):
+    trade_plan_payload = (
+        snapshot.get("trade_plan")
+        or snapshot.get("selection")
+        or snapshot
+    )
+    if not trade_plan_payload:
+        raise RuntimeError("No trade_plan payload in snapshot")
+    decisions = (
+        (trade_plan_payload or {}).get("trade_plan")
+        or trade_plan_payload.get("decisions")
+    )
+    if not decisions and isinstance(snapshot.get("trade_plan"), dict):
+        decisions = (
+            snapshot["trade_plan"].get("trade_plan")
+            or snapshot["trade_plan"].get("decisions")
+        )
+    if not decisions:
+        decisions = []
+
+    equity, available_margin, _ = fetch_usdt_equity(exchange)
+
+    def log_user(msg: str) -> None:
+        if user_id:
+            _append_user_bybit_log(user_id, msg)
+
+    log_user(f"USERBOT starting run: equity={equity} available={available_margin}")
+
+    for dec in decisions:
+        try:
+            symbol_raw = dec.get("symbol") or dec.get("pair") or dec.get("ticker")
+            if not symbol_raw:
+                continue
+            symbol = str(symbol_raw).strip()
+            if not symbol:
+                continue
+            action = (
+                dec.get("action")
+                or dec.get("side")
+                or dec.get("direction")
+                or "buy"
+            )
+            action = str(action).lower()
+            order_type = (
+                dec.get("type")
+                or dec.get("order_type")
+                or "market"
+            )
+            order_type = str(order_type).lower()
+            notional = None
+            for key in ("notional_usdt", "notional", "notionalUsd", "quote", "size_usdt"):
+                val = dec.get(key)
+                if val is None:
+                    continue
+                try:
+                    notional = float(val)
+                    break
+                except Exception:
+                    notional = None
+            if notional is None:
+                pct = dec.get("notional_pct") or dec.get("allocation_pct") or dec.get("pct")
+                try:
+                    pct_v = float(pct)
+                except Exception:
+                    pct_v = None
+                if pct_v is not None and equity and equity > 0:
+                    if pct_v > 1:
+                        pct_v = pct_v / 100.0
+                    notional = max(0.0, float(equity) * float(pct_v))
+            if notional is None:
+                notional = min(50.0, float(equity) * 0.01 if equity and equity > 0 else 50.0)
+
+            price = None
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                price = ticker.get("last") or ticker.get("close") or ticker.get("info", {}).get("lastPrice")
+            except Exception:
+                price = None
+            if not price:
+                try:
+                    mkt = exchange.market(symbol)
+                except Exception:
+                    mkt = None
+                price = (mkt or {}).get("info", {}).get("lastPrice") if mkt else None
+            if not price:
+                log_user(f"SKIP {symbol}: cannot determine price for decision {dec}")
+                continue
+
+            qty = float(notional) / float(price) if price and float(price) > 0 else 0.0
+            try:
+                rules = _get_symbol_trade_rules(exchange, symbol)
+                step = rules.get("qty_step") or rules.get("min_qty") or None
+                if step and step > 0:
+                    qty = max(step, (int(qty / step) * step))
+            except Exception:
+                pass
+            qty = max(0.0, float(qty))
+            if qty <= 0:
+                log_user(f"SKIP {symbol}: computed qty 0 for notional {notional}")
+                continue
+            if dry_run:
+                log_user(
+                    f"DRY RUN {symbol} {action} {order_type} "
+                    f"qty={qty:.6f} price={price} notional={notional}"
+                )
+                continue
+            params = dict(dec.get("params") or {})
+            price_for_order = dec.get("price") or dec.get("limit") or price
+            try:
+                if order_type == "market":
+                    res = exchange.create_order(symbol, "market", action, qty, None, params)
+                    order_price_text = "market"
+                else:
+                    res = exchange.create_order(symbol, "limit", action, qty, float(price_for_order), params)
+                    order_price_text = price_for_order or price
+                log_user(
+                    f"ORDER {symbol} {action} {order_type} qty={qty:.6f} "
+                    f"price={order_price_text} -> {res}"
+                )
+            except Exception as exc:
+                log_user(f"ORDER FAIL {symbol}: {exc}")
+        except Exception as exc_outer:
+            log_user(f"Decision processing error: {exc_outer}")
+
+    return decisions
+
+
+# --- �᭮���� ������ ---
 def run_cycle():
+
+
     global DYNAMIC_SYMBOL_ALIASES
     global SYMBOL_RULES_CACHE
     global CURRENT_RISK_PCT
@@ -10947,6 +11152,7 @@ def run_cycle():
                     if "trade plan unavailable" in reason_lower:
                         skipped_plan_unavailable_symbols += 1
                         flat_unavailable_symbols.append(sym)
+            counted_action = action
             counts[action] = counts.get(action,0)+1
             decisions_total += 1
             side_text = side.lower()
@@ -11293,26 +11499,26 @@ def run_cycle():
                                 break
                     if duplicate_order:
                         dup_price = duplicate_order.get("price")
-                        log(f"⛔ Пропуск лимитного ордера {sym}: уже выставлен {side.upper()} @ {dup_price}", Fore.LIGHTBLACK_EX)
-                        send_tg(f"⛔ {sym}: лимит {side.upper()} @ {dup_price} уже активен, новый ордер не размещён")
+                        log(f"[INFO] Skipping entry for {sym}: existing {side.upper()} @ {dup_price} still active", Fore.LIGHTBLACK_EX)
+                        send_tg(f"[INFO] {sym}: existing {side.upper()} @ {dup_price} still active, new order skipped")
                         continue
                     explicit_qty, explicit_notional = _extract_decision_position_size(dec, symbol_meta)
                     qty = None
                     notional = None
                     if explicit_qty is not None or explicit_notional is not None:
                         if price is None or not math.isfinite(price) or price <= 0:
-                            log(f"ℹ️ Невозможно применить объём для {sym}: недопустимая цена", Fore.YELLOW)
-                            send_tg(f"ℹ️ {sym}: модель прислала объём, но цена недоступна — пропускаем сделку.")
+                            log(f"[WARN] Unable to use provided size for {sym}: price is invalid", Fore.YELLOW)
+                            send_tg(f"[WARN] {sym}: model sent explicit size but no usable price — skipping trade")
                             continue
                         qty = explicit_qty if explicit_qty is not None else explicit_notional / price
                         notional = qty * price
                     else:
                         risk_distance = abs(price - sl)
                         if risk_distance <= 0 or not math.isfinite(risk_distance):
-                            log(f"?? ���������� ������� �� ��� {sym}", Fore.YELLOW)
-                            send_tg(f"?? {sym}: �� 㤠���� �業��� ��, ᤥ��� �ய�饭�")
+                            log(f"[WARN] Unable to compute risk distance for {sym}", Fore.YELLOW)
+                            send_tg(f"[WARN] {sym}: failed to compute stop-based risk, skipping")
                             continue
-                        risk_budget_base = max(0.0, min(equity, available_margin))
+                        risk_budget_base = _select_risk_budget_base(equity, available_margin)
                         try:
                             market_snapshot = ex.market(sym)
                         except Exception:
@@ -11324,22 +11530,28 @@ def run_cycle():
                         )
                         alloc = max(0.0, min(1.0, alloc))
                         risk_budget_base *= alloc
-                        risk_capital = risk_budget_base * CURRENT_RISK_PCT
+                        # Пер-позиционный риск считаем от базового RISK_PCT,
+                        # чтобы каждая сделка могла использовать свою долю риска,
+                        # а не глобальный динамический CURRENT_RISK_PCT.
+                        position_risk_pct = RISK_PCT if RISK_PCT and math.isfinite(RISK_PCT) else CURRENT_RISK_PCT
+                        if position_risk_pct <= 0 or not math.isfinite(position_risk_pct):
+                            position_risk_pct = 0.0
+                        risk_capital = risk_budget_base * position_risk_pct
                         if risk_capital <= 0:
-                            log(f"?? �������筮 ��� �᪠ ��� {sym} ({available_margin:.2f} USDT)", Fore.YELLOW)
-                            send_tg(f"?? {sym}: �������筮 ᢮������� ������ ({available_margin:.2f} USDT)")
+                            log(f"[WARN] {sym}: risk budget is zero (available margin {available_margin:.2f} USDT)", Fore.YELLOW)
+                            send_tg(f"[WARN] {sym}: insufficient free margin ({available_margin:.2f} USDT)")
                             continue
                         qty = risk_capital / risk_distance
                         if min_qty_rule and qty < min_qty_rule:
                             qty = min_qty_rule
                         if not math.isfinite(qty) or qty <= 0:
-                            log(f"ℹ️ {sym}", Fore.YELLOW)
+                            log(f"[WARN] {sym}: computed quantity is invalid", Fore.YELLOW)
                             continue
                         notional = qty * price
                         if not math.isfinite(notional) or notional <= 0:
-                            log(f"ℹ️ {sym}", Fore.YELLOW)
+                            log(f"[WARN] {sym}: computed notional is invalid", Fore.YELLOW)
                             continue
-                    if notional < min_notional_required:
+                    if notional + NOTIONAL_EPSILON < min_notional_required:
                         min_qty_from_notional = min_notional_required / price if price > 0 else min_notional_required
                         target_qty = max(min_qty_rule, min_qty_from_notional) if min_qty_rule else min_qty_from_notional
                         qty = target_qty
@@ -11347,22 +11559,22 @@ def run_cycle():
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
                     max_notional = effective_margin * max(1, symbol_leverage)
                     if max_notional <= 0:
-                        log(f"ℹ️ Доступная маржа для {sym} исчерпана", Fore.YELLOW)
-                        send_tg(f"ℹ️ {sym}: доступная маржа исчерпана")
+                        log(f"[WARN] {sym}: usable margin exhausted", Fore.YELLOW)
+                        send_tg(f"[WARN] {sym}: usable margin exhausted")
                         continue
-                    if max_notional < min_notional_required:
-                        log(f"ℹ️ Недостаточно маржи для минимального ордера {sym} (доступно {available_margin:.2f} USDT)", Fore.YELLOW)
-                        send_tg(f"ℹ️ {sym}: маржа меньше минимального объёма (доступно {available_margin:.2f} USDT)")
+                    if max_notional + NOTIONAL_EPSILON < min_notional_required:
+                        log(f"[WARN] {sym}: margin {available_margin:.2f} USDT below exchange minimum order size", Fore.YELLOW)
+                        send_tg(f"[WARN] {sym}: margin {available_margin:.2f} USDT below minimum order size")
                         continue
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
-                        log(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT превышает доступную {effective_margin:.2f} USDT (всего {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), ордер пропущен', Fore.YELLOW)
-                        send_tg(f'⚠️ {sym}: требуемая маржа {margin_required:.2f} USDT больше доступной {effective_margin:.2f} USDT, ордер пропущен')
+                        log(f'[WARN] {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT (total {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), skipping order', Fore.YELLOW)
+                        send_tg(f'[WARN] {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT, skipping')
                         continue
                     if notional > max_notional:
                         qty = max_notional / price
                         notional = max_notional
-                        log(f'⚠️ Объём {sym} уменьшен до {qty:.4f} (~{notional:.2f} USDT) из-за лимита маржи (max_notional={max_notional:.2f}, effective_margin={effective_margin:.2f}, leverage={symbol_leverage})', Fore.YELLOW)
+                        log(f'[WARN] {sym}: trimmed size to {qty:.4f} (~{notional:.2f} USDT) due to margin cap (max_notional={max_notional:.2f}, effective_margin={effective_margin:.2f}, leverage={symbol_leverage})', Fore.YELLOW)
                     try:
                         qty = float(ex.amount_to_precision(sym, qty))
                     except Exception:
@@ -11371,7 +11583,7 @@ def run_cycle():
                         log(f"ℹ️ После округления объём стал ? 0 для {sym}", Fore.YELLOW)
                         continue
                     notional = qty * price
-                    if notional < min_notional_required:
+                    if notional + NOTIONAL_EPSILON < min_notional_required:
                         log(f"[WARN] {sym}: notional {notional:.2f} USDT below minimum {min_notional_required:.2f} USDT, skipping", Fore.YELLOW)
                         send_tg(f"[WARN] {sym}: size {notional:.2f} USDT below exchange minimum {min_notional_required:.2f} USDT")
                         continue
@@ -11454,7 +11666,7 @@ def run_cycle():
                                 if precise_qty < min_qty_rule:
                                     continue
                             layer_notional = precise_qty * layer_price
-                            if layer_notional < min_notional_required:
+                            if layer_notional + NOTIONAL_EPSILON < min_notional_required:
                                 min_qty_needed = min_notional_required / layer_price if layer_price > 0 else min_notional_required
                                 min_qty_target = max(min_qty_rule, min_qty_needed) if min_qty_rule else min_qty_needed
                                 if idx < total_layers - 1 and min_qty_target > remaining_qty:
@@ -11476,7 +11688,7 @@ def run_cycle():
                                     except Exception:
                                         precise_qty = float(round(min_qty_rule, 8))
                                 layer_notional = precise_qty * layer_price
-                                if layer_notional < min_notional_required:
+                                if layer_notional + NOTIONAL_EPSILON < min_notional_required:
                                     continue
                                 layer_params = dict(base_params)
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
@@ -11501,7 +11713,7 @@ def run_cycle():
                             if precise_qty <= 0:
                                 raise RuntimeError("no entry orders placed")
                             fallback_notional = precise_qty * fallback_price
-                            if fallback_notional < min_notional_required:
+                            if fallback_notional + NOTIONAL_EPSILON < min_notional_required:
                                 min_qty_needed = min_notional_required / fallback_price if fallback_price > 0 else min_notional_required
                                 min_qty_target = max(min_qty_rule, min_qty_needed) if min_qty_rule else min_qty_needed
                                 min_qty_target = min(min_qty_target, qty)
@@ -11521,7 +11733,7 @@ def run_cycle():
                                     except Exception:
                                         precise_qty = float(round(min_qty_rule, 8))
                                 fallback_notional = precise_qty * fallback_price
-                                if fallback_notional < min_notional_required:
+                                if fallback_notional + NOTIONAL_EPSILON < min_notional_required:
                                     raise RuntimeError("no entry orders placed")
                                 layer_params = dict(base_params)
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
@@ -11608,37 +11820,49 @@ def run_cycle():
             if protection_changed:
                 orders_activity = True
 
+            open_success = (
+                action == "open"
+                and not open_error
+                and (position_changed or (final_position_amount is not None and abs(final_position_amount) > 0))
+            )
+            open_pending = action == "open" and open_executed and not open_success and not open_error
+
             if detail_entry is None:
                 if action == "open":
                     if open_error:
                         detail_entry = f"[{sym}] - failed to open position (error: {open_error})"
-                    else:
+                    elif open_success:
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                         detail_entry = f"[{sym}] - opened {direction or 'position'} (lev x{symbol_leverage})"
+                    elif open_pending:
+                        direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
+                        detail_entry = f"[{sym}] - entry orders placed (waiting fill) {direction or ''} (lev x{symbol_leverage})"
+                    else:
+                        detail_entry = f"[{sym}] - open request skipped"
                 elif action == "close":
-                    direction = "лонг" if side_text in ("buy", "long") else "шорт" if side_text in ("sell", "short") else ""
-                    detail_entry = f"[{sym}] - закрыт {direction or 'позиция'} (плечо x{symbol_leverage})"
+                    direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
+                    detail_entry = f"[{sym}] - closed {direction or 'position'} (lev x{symbol_leverage})"
                 elif action == "manage":
-                    detail_entry = f"[{sym}] - держим позицию ({'меняли ордера' if orders_activity else 'ордера без изменений'})"
+                    detail_entry = f"[{sym}] - managing position ({'orders updated' if orders_activity else 'orders unchanged'})"
                 elif action in ("hold", "none"):
                     change_parts: list[str] = []
                     if position_changed:
                         if final_position_amount > initial_position_amount:
-                            change_parts.append("объём увеличен")
+                            change_parts.append("size increased")
                         elif final_position_amount < initial_position_amount:
-                            change_parts.append("объём уменьшен")
+                            change_parts.append("size reduced")
                     protection_changes = _describe_protection_changes(
                         initial_protection_orders,
                         final_protection_orders,
                     )
                     change_parts.extend(protection_changes)
                     if not change_parts:
-                        change_parts.append("без изменений")
-                    detail_entry = f"[{sym}] - держим позицию ({', '.join(change_parts)})"
+                        change_parts.append("no changes")
+                    detail_entry = f"[{sym}] - holding position ({', '.join(change_parts)})"
                 elif action == "skip":
-                    detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
+                    detail_entry = f"[{sym}] - skip" + (f" — {reason}" if reason else "")
                 else:
-                    detail_entry = f"[{sym}] - пропуск" + (f" — {reason}" if reason else "")
+                    detail_entry = f"[{sym}] - skip" + (f" — {reason}" if reason else "")
             if detail_entry and sym_confidence_text:
                 tag_suffix = f" {sym_confidence_tag}" if sym_confidence_tag else ""
                 detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
@@ -11648,6 +11872,24 @@ def run_cycle():
                     _append_user_bybit_log(USER_ID, detail_entry)
                 except Exception:
                     pass
+
+            summary_action = action
+            summary_outcome = "skip"
+            if summary_action == "open":
+                summary_outcome = "open" if open_success else "skip"
+            elif summary_action == "close":
+                summary_outcome = "close"
+            elif summary_action == "skip":
+                summary_outcome = "skip"
+            summary_keys = {"open", "close", "skip"}
+            if counted_action in summary_keys and summary_outcome in summary_keys:
+                if summary_outcome != counted_action:
+                    counts[counted_action] = max(0, counts.get(counted_action, 0) - 1)
+                    counts[summary_outcome] = counts.get(summary_outcome, 0) + 1
+            elif counted_action in summary_keys and summary_outcome not in summary_keys:
+                counts[counted_action] = max(0, counts.get(counted_action, 0) - 1)
+            elif summary_outcome in summary_keys and counted_action not in summary_keys:
+                counts[summary_outcome] = counts.get(summary_outcome, 0) + 1
 
         except Exception as e:
             log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
@@ -11745,7 +11987,7 @@ def run_cycle():
     if not final_positions_available:
         final_positions_map = dict(positions_map)
 
-    log(f"[DEBUG] Собираем positions_summary из final_positions_map: {list((final_positions_map or {}).keys())}", Fore.LIGHTBLACK_EX)
+    log(f"[DEBUG] Building positions_summary from final_positions_map: {list((final_positions_map or {}).keys())}", Fore.LIGHTBLACK_EX)
     positions_summary: list[dict[str, Any]] = []
     for sym_active, payload in (final_positions_map or {}).items():
         if not isinstance(payload, dict):
