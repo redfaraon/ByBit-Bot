@@ -5514,9 +5514,25 @@ def fetch_all_open_orders_grouped(exchange, limit: int | None = None) -> dict[st
 def cancel_order_by_id(exchange, symbol, order_id: str):
     resolved_symbol = _resolve_symbol_alias(symbol) or symbol
     try:
+        # Primary attempt: usual ccxt signature cancel_order(id, symbol, params)
         exchange.cancel_order(order_id, resolved_symbol)
         return True, None
+    except TypeError as e:
+        # Some exchange adapters may choke on None params or unexpected types —
+        # try a safe fallback with empty params and capture both errors.
+        try:
+            exchange.cancel_order(order_id, resolved_symbol, {})
+            return True, None
+        except Exception as e2:
+            tb = traceback.format_exc()
+            log(f"[DEBUG] cancel_order_by_id TypeError fallback failed for {order_id} {symbol}: {e} | {e2}", Fore.YELLOW)
+            log(tb, Fore.LIGHTBLACK_EX)
+            return False, f"{e} | fallback: {e2}"
     except Exception as e:
+        # Log the traceback for diagnostics and return the error string for upper layers
+        tb = traceback.format_exc()
+        log(f"[DEBUG] cancel_order_by_id failed for {order_id} {symbol}: {e}", Fore.YELLOW)
+        log(tb, Fore.LIGHTBLACK_EX)
         return False, str(e)
 
 
@@ -7477,8 +7493,26 @@ def _enable_exchange_logging(exchange: Any) -> Any:
                 duration = time.time() - start
                 log(f"[EX] cancel ok {symbol or '?'} #{order_id} ({duration:.2f}s)", Fore.LIGHTBLACK_EX)
                 return result
+            except TypeError as exc:
+                # Defensive: some exchange adapters raise TypeError on unexpected param shapes.
+                # Retry with empty params to see if that helps, and log traceback for debugging.
+                tb = traceback.format_exc()
+                log(f"[EX] cancel TypeError {symbol or '?'} #{order_id}: {exc} — retrying with empty params", Fore.YELLOW)
+                log(tb, Fore.LIGHTBLACK_EX)
+                try:
+                    result = original_cancel_order(order_id, symbol, {})
+                    duration = time.time() - start
+                    log(f"[EX] cancel ok (fallback) {symbol or '?'} #{order_id} ({duration:.2f}s)", Fore.LIGHTBLACK_EX)
+                    return result
+                except Exception as exc2:
+                    tb2 = traceback.format_exc()
+                    log(f"[EX] cancel fail (fallback) {symbol or '?'} #{order_id}: {exc2}", Fore.YELLOW)
+                    log(tb2, Fore.LIGHTBLACK_EX)
+                    raise
             except Exception as exc:
                 log(f"[EX] cancel fail {symbol or '?'} #{order_id}: {exc}", Fore.YELLOW)
+                tb = traceback.format_exc()
+                log(tb, Fore.LIGHTBLACK_EX)
                 raise
         exchange.cancel_order = types.MethodType(logged_cancel_order, exchange)
     setattr(exchange, "_bybitbot_exchange_logging", True)
