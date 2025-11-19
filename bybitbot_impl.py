@@ -11280,6 +11280,9 @@ def run_cycle():
                             min_total_layers = min_qty_rule * len(normalized_entries)
                             if qty < min_total_layers:
                                 normalized_entries = [(1.0, 0.0)]
+                        # Compute sum of shares to normalize per-layer weights
+                        ratio_total = sum(item[0] for item in normalized_entries) or 1.0
+                        log(f"[DEBUG] {sym} - normalized_entries={normalized_entries}, ratio_total={ratio_total}", Fore.LIGHTBLACK_EX)
                         log(f"[DEBUG] {sym} {side.upper()} - qty={qty:.4f}, notional={notional:.2f}, margin_required={notional/symbol_leverage if symbol_leverage else notional:.2f}, effective_margin={effective_margin:.2f}, sl={sl:.2f}, tp={tp:.2f}", Fore.LIGHTBLACK_EX)
                         remaining_qty = qty
                         entry_summaries: list[str] = []
@@ -11288,7 +11291,11 @@ def run_cycle():
                         side_lower = side.lower()
                         total_layers = len(normalized_entries)
                         for idx, (share_val, offset_val) in enumerate(normalized_entries):
-                            weight = share_val / ratio_total if ratio_total else 0.0
+                            try:
+                                weight = share_val / ratio_total if ratio_total else 0.0
+                            except Exception as exc:
+                                log(f"[ERROR] {sym}: failed to compute weight for entry layer: {exc}; normalized_entries={normalized_entries}, ratio_total={ratio_total}", Fore.RED)
+                                weight = share_val / (sum(it[0] for it in normalized_entries) or 1.0)
                             target_qty = qty * weight if idx < total_layers - 1 else remaining_qty
                             target_qty = min(target_qty, remaining_qty)
                             if target_qty <= 0:
