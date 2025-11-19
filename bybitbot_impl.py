@@ -368,6 +368,12 @@ def _ensure_user_entry(
     if owner_id is not None:
         entry["owner_id"] = int(owner_id)
     _save_users_config(config)
+    # Ensure bybit.log exists for this user
+    try:
+        if user_id:
+            _ensure_user_bybit_log_for_all()
+    except Exception:
+        pass
 
 
 def _write_user_secrets(user_id: str, api_key: str, api_secret: str) -> Path:
@@ -3084,6 +3090,71 @@ def log(msg: str, color=Fore.WHITE):
     if TELEGRAM_FORWARD_LOGS:
         _enqueue_tg_log(record)
 
+
+def _append_user_log(user_id: int | None, text: str) -> None:
+    """Append a line to per-user log under runtime/ (safe, non-critical).
+
+    Files: runtime/user_<id>.log
+    """
+    if user_id is None:
+        return
+    try:
+        root = Path("runtime")
+        root.mkdir(parents=True, exist_ok=True)
+        log_path = root / f"user_{int(user_id)}.log"
+        now = _current_log_time().strftime("%Y-%m-%d %H:%M:%S %Z")
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"[{now}] {text}\n")
+    except Exception:
+        # non-fatal, only local per-user logging; do not raise
+        pass
+
+
+def _append_user_bybit_log(user_id: str | int | None, text: str) -> None:
+    """Append a trading-history style message to a bybit.log per user.
+
+    File location: runtime/<user_id>/bybit.log
+    """
+    if user_id is None:
+        return
+    try:
+        uid = str(user_id)
+        user_dir = Path("runtime") / uid
+        user_dir.mkdir(parents=True, exist_ok=True)
+        bybit_log = user_dir / "bybit.log"
+        now = _current_log_time().strftime("%Y-%m-%d %H:%M:%S %Z")
+        with open(bybit_log, "a", encoding="utf-8") as fh:
+            fh.write(f"[{now}] {text}\n")
+    except Exception:
+        # keep non-fatal
+        pass
+
+
+def _ensure_user_bybit_log_for_all() -> None:
+    """Ensure every user configured has a bybit.log file in runtime/USERID/bybit.log
+
+    This is called at startup – if missing, it creates the folder and the file.
+    """
+    try:
+        cfg = _load_users_config()
+        users_list = cfg.get("users") or []
+        for entry in users_list:
+            if not isinstance(entry, dict):
+                continue
+            uid = entry.get("id")
+            if not uid:
+                continue
+            user_dir = Path("runtime") / str(uid)
+            user_dir.mkdir(parents=True, exist_ok=True)
+            p = user_dir / "bybit.log"
+            if not p.exists():
+                try:
+                    p.write_text("", encoding="utf-8")
+                except Exception:
+                    pass
+    except Exception as exc:
+        log(f"[WARN] Failed to ensure per-user bybit logs: {exc}", Fore.YELLOW)
+
 _TG_LAST_SEND_TS = 0.0
 _TG_LAST_MESSAGE: str | None = None
 _TG_LAST_MESSAGE_TS = 0.0
@@ -3890,6 +3961,9 @@ def process_telegram_update(update: dict) -> None:
             and thread_id == TELEGRAM_SUPPORT_THREAD_ID
         ):
             handle_support_message(chat_id, text, thread_id=thread_id, message=message)
+        # Log user personal chats to per-user log
+        if from_user_id is not None and chat_id == from_user_id:
+            _append_user_log(from_user_id, f"IN: {text}")
         return
     handle_telegram_command(chat_id, text, thread_id=thread_id, user_id=from_user_id)
 
@@ -5112,6 +5186,20 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         thread_id=response_thread,
         no_log_forward=True,
     )
+    # Append per-user log for DM replies
+    try:
+        if user_id is not None and chat_id == user_id:
+            _append_user_log(user_id, f"OUT: {reply}")
+    except Exception:
+        pass
+    # Forward replies from a direct message (private chat) to the main owner chat
+    try:
+        if user_id is not None and chat_id == user_id and MAIN_OWNER_CHAT_ID is not None and MAIN_OWNER_CHAT_ID != chat_id:
+            fwd_text = f"[DM from {user_id}] Command: {text.strip()}\nReply:\n{reply}"
+            log(f"[DEBUG] Forwarding DM reply to owner {MAIN_OWNER_CHAT_ID}: {fwd_text[:200]}", Fore.LIGHTBLACK_EX)
+            send_tg(fwd_text, chat_id_override=MAIN_OWNER_CHAT_ID)
+    except Exception as exc:  # keep the command reply stable even if forwarding fails
+        log(f"⚠️ Failed to forward DM reply to owner: {exc}", Fore.YELLOW)
 
 
 def _current_changelog_signature() -> dict:
@@ -9799,6 +9887,11 @@ def run_cycle():
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
+    # Ensure each user has a bybit.log for per-user trading history
+    try:
+        _ensure_user_bybit_log_for_all()
+    except Exception:
+        pass
     configure_telegram_bot()
     start_telegram_webhook_server()
     start_telegram_long_polling()
@@ -11355,6 +11448,10 @@ def run_cycle():
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
                                 order_result = ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
                                 log(f"[DEBUG] create_order результат: {order_result}", Fore.LIGHTBLACK_EX)
+                                try:
+                                    _append_user_bybit_log(USER_ID, f"ORDER: {sym} {side.upper()} {precise_qty:.6f}@{layer_price:.4f} -> {order_result}")
+                                except Exception:
+                                    pass
                             open_executed = True
                             entry_created += 1
                             remaining_qty = max(0.0, remaining_qty - precise_qty)
@@ -11396,6 +11493,10 @@ def run_cycle():
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
                                 order_result = ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
                                 log(f"[DEBUG] create_order fallback результат: {order_result}", Fore.LIGHTBLACK_EX)
+                                try:
+                                    _append_user_bybit_log(USER_ID, f"ORDER (fallback): {sym} {side.upper()} {precise_qty:.6f}@{fallback_price:.4f} -> {order_result}")
+                                except Exception:
+                                    pass
                             open_executed = True
                             entry_created = 1
                             remaining_qty = max(0.0, qty - precise_qty)
@@ -11509,6 +11610,10 @@ def run_cycle():
                 detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
             if detail_entry:
                 decisions_details.append(detail_entry)
+                try:
+                    _append_user_bybit_log(USER_ID, detail_entry)
+                except Exception:
+                    pass
 
         except Exception as e:
             log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
@@ -11588,10 +11693,18 @@ def run_cycle():
                 f"пропуск {counts['skip']} ({pct['skip']:.1f}%) — всего {decisions_total}"
         log(summary, Fore.CYAN)
         send_tg(summary)
+        try:
+            _append_user_bybit_log(USER_ID, summary)
+        except Exception:
+            pass
         if decisions_details:
             detail_msg = "\n".join(decisions_details)
             log(detail_msg, Fore.LIGHTBLACK_EX)
             send_tg(detail_msg)
+            try:
+                _append_user_bybit_log(USER_ID, detail_msg)
+            except Exception:
+                pass
 
     final_positions_map, final_positions_count = fetch_positions_snapshot(ex)
     final_positions_available = final_positions_count is not None

@@ -177,6 +177,7 @@ def _parse_args():
     parser = argparse.ArgumentParser(description="ByBit Bot launcher")
     parser.add_argument("--user", help="Run using the specified user profile id")
     parser.add_argument("--list-users", action="store_true", help="List configured user profiles and exit")
+    parser.add_argument("--check-user-logs", action="store_true", help="Check that each configured user has a per-user bybit.log in runtime/<user>/bybit.log")
     return parser.parse_args()
 
 
@@ -1058,6 +1059,30 @@ def main():
     registry = _load_user_registry()
     if args.list_users:
         _list_user_profiles(registry)
+        return
+    if args.check_user_logs:
+        module = importlib.import_module("bybitbot_impl")
+        cfg = module._load_users_config()
+        users = cfg.get("users") or []
+        if not users:
+            print("No users configured.")
+            return
+        missing = []
+        for entry in users:
+            if not isinstance(entry, dict):
+                continue
+            uid = entry.get("id")
+            if not uid:
+                continue
+            p = REPO_ROOT / "runtime" / str(uid) / "bybit.log"
+            if not p.exists():
+                missing.append(str(uid))
+        if not missing:
+            print("All users have bybit.log in runtime/<user>/bybit.log")
+        else:
+            print("Users missing bybit.log:")
+            for u in missing:
+                print(f"- {u}")
         return
     active_user_id = args.user or os.getenv("BYBITBOT_USER_ID")
     if active_user_id:
