@@ -11629,7 +11629,7 @@ def run_cycle():
                     effective_min_notional = max(exchange_min_notional, env_min_notional)
                     min_notional_required = max(effective_min_notional, min_notional_rule or 0.0)
                     log(
-                        f"[INFO] {user_tag} {sym}: exchange min {exchange_min_notional:.2f} USDT; "
+                        f"[INFO] {sym}: exchange min {exchange_min_notional:.2f} USDT; "
                         f"env min {env_min_notional:.2f} USDT; effective min {effective_min_notional:.2f} USDT",
                         Fore.LIGHTBLACK_EX,
                     )
