@@ -212,6 +212,7 @@ USERBOT_DEFAULTS: dict[str, Any] = {
     "max_positions": 3,
     "default_next_run": 30.0,
 }
+DEFAULT_RISK_PCT = float(USERBOT_DEFAULTS.get("risk_pct") or 0.005)
 ACTIVE_POSITION_MODE: str = "oneway"
 ACTIVE_HEDGE_MODE: bool = False
 POSITION_MODE_MISMATCH_STATE: bool | None = None
@@ -2485,7 +2486,17 @@ def refresh_settings():
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
-    RISK_PCT = float(os.getenv("RISK_PCT", os.getenv("RISK_EQUITY_PCT", 0.05)))
+    risk_env_value = os.getenv("RISK_PCT")
+    if risk_env_value is None:
+        risk_env_value = os.getenv("RISK_EQUITY_PCT")
+    try:
+        RISK_PCT = float(risk_env_value) if risk_env_value is not None else DEFAULT_RISK_PCT
+    except (TypeError, ValueError):
+        log(f"[WARN] Invalid RISK_PCT value '{risk_env_value}', using default {DEFAULT_RISK_PCT:.4f}", Fore.YELLOW)
+        RISK_PCT = DEFAULT_RISK_PCT
+    if not math.isfinite(RISK_PCT) or RISK_PCT <= 0:
+        log(f"[WARN] RISK_PCT={RISK_PCT} is not positive, using default {DEFAULT_RISK_PCT:.4f}", Fore.YELLOW)
+        RISK_PCT = DEFAULT_RISK_PCT
     DYNAMIC_RISK_ENABLED = env_int("RISK_DYNAMIC_ENABLED", 1) != 0
     base_min_default = max(0.0005, RISK_PCT * 0.5)
     base_max_default = max(RISK_PCT, RISK_PCT * 1.8)
