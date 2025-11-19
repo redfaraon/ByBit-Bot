@@ -10132,19 +10132,15 @@ def apply_trade_plan_snapshot(
 
     def log_user(msg: str) -> None:
         tagged = f"{user_tag} {msg}"
+        log(tagged, Fore.LIGHTBLACK_EX)
         if user_id:
             _append_user_bybit_log(user_id, tagged)
 
     def _record_pending_entry(symbol: str, qty_value: float, side_value: str) -> None:
-        if qty_value and qty_value > 0:
-            LIMIT_ORDER_PENDING[_pending_entry_key(symbol, user_key)] = {
-                "ts": time.time(),
-                "qty": qty_value,
-                "side": side_value.lower() if side_value else "buy",
-            }
+        record_pending_entry(symbol, qty_value, side_value, user_key)
 
     def _clear_pending_entry(symbol: str) -> None:
-        LIMIT_ORDER_PENDING.pop(_pending_entry_key(symbol, user_key), None)
+        clear_pending_entry(symbol, user_key)
 
     def _execute_limit_fallback(symbol: str, pending_info: dict[str, Any], open_orders_list: list[dict[str, Any]] | None) -> bool:
         fallback_qty = pending_info.get("qty") or 0.0
@@ -10288,6 +10284,7 @@ def run_cycle():
     global SYMBOL_RULES_CACHE
     global CURRENT_RISK_PCT
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
+    user_tag = f"[user={active_user_id}]"
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
