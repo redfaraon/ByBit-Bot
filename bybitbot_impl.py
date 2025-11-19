@@ -1099,6 +1099,40 @@ def _extract_decision_position_size(decision, symbol_meta=None):
     return None, None
 
 
+def _extract_decision_pct(decision, symbol_meta=None):
+    """Extract a percentage size reference from AI payload (0-1)."""
+    def normalize(raw):
+        value = safe_float(raw)
+        if value is None:
+            return None
+        if value > 1 and value <= 100:
+            value = value / 100.0
+        if value <= 0:
+            return None
+        return min(value, 1.0)
+
+    sources: list[dict] = []
+    if isinstance(decision, dict):
+        sources.append(decision)
+        for key in ("config", "sizing", "risk"):
+            value = decision.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+    if isinstance(symbol_meta, dict):
+        sources.append(symbol_meta)
+        for key in ("config", "sizing", "risk"):
+            value = symbol_meta.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("size_pct", "notional_pct", "pct"):
+            pct = normalize(source.get(key))
+            if pct is not None:
+                return pct
+    return None
+
 def _select_risk_budget_base(equity: float, available_margin: float) -> float:
     """Pick a sane risk budget base even if one of the inputs is zero or missing."""
     eq = float(equity) if equity and math.isfinite(equity) else 0.0
@@ -10021,10 +10055,12 @@ def apply_trade_plan_snapshot(
         decisions = []
 
     equity, available_margin, _ = fetch_usdt_equity(exchange)
+    user_tag = f"[user={user_id or 'default'}]"
 
     def log_user(msg: str) -> None:
+        tagged = f"{user_tag} {msg}"
         if user_id:
-            _append_user_bybit_log(user_id, msg)
+            _append_user_bybit_log(user_id, tagged)
 
     log_user(f"USERBOT starting run: equity={equity} available={available_margin}")
 
@@ -10105,6 +10141,7 @@ def apply_trade_plan_snapshot(
                     f"DRY RUN {symbol} {action} {order_type} "
                     f"qty={qty:.6f} price={price} notional={notional}"
                 )
+                log(f"{user_tag} DRY RUN {symbol} {action} {order_type} qty={qty:.6f} price={price} notional={notional}", Fore.LIGHTBLACK_EX)
                 continue
             params = dict(dec.get("params") or {})
             price_for_order = dec.get("price") or dec.get("limit") or price
@@ -10119,8 +10156,13 @@ def apply_trade_plan_snapshot(
                     f"ORDER {symbol} {action} {order_type} qty={qty:.6f} "
                     f"price={order_price_text} -> {res}"
                 )
+                log(
+                    f"{user_tag} ORDER {symbol} {action} {order_type} qty={qty:.6f} price={order_price_text} -> {res}",
+                    Fore.LIGHTBLACK_EX,
+                )
             except Exception as exc:
                 log_user(f"ORDER FAIL {symbol}: {exc}")
+                log(f"{user_tag} ORDER FAIL {symbol}: {exc}", Fore.YELLOW)
         except Exception as exc_outer:
             log_user(f"Decision processing error: {exc_outer}")
 
@@ -11476,8 +11518,15 @@ def run_cycle():
                     df["atr"] = atr(df,14)
                     trade_rules = _get_symbol_trade_rules(ex, sym)
                     min_qty_rule = trade_rules.get("min_qty") or 0.0
-                    min_notional_rule = trade_rules.get("min_notional") or 0.0
-                    min_notional_required = max(MIN_NOTIONAL_USDT, min_notional_rule or 0.0)
+                    exchange_min_notional = trade_rules.get("min_notional") or 0.0
+                    env_min_notional = float(MIN_NOTIONAL_USDT or 0.0)
+                    effective_min_notional = max(exchange_min_notional, env_min_notional)
+                    min_notional_required = max(effective_min_notional, min_notional_rule or 0.0)
+                    log(
+                        f"[INFO] {user_tag} {sym}: exchange min {exchange_min_notional:.2f} USDT; "
+                        f"env min {env_min_notional:.2f} USDT; effective min {effective_min_notional:.2f} USDT",
+                        Fore.LIGHTBLACK_EX,
+                    )
                     last_row = df.iloc[-1]
                     price = float(last_row.get("close") or 0)
                     atrv = float(last_row.get("atr") or 0)
@@ -11510,24 +11559,37 @@ def run_cycle():
                                 break
                     if duplicate_order:
                         dup_price = duplicate_order.get("price")
-                        log(f"[INFO] Skipping entry for {sym}: existing {side.upper()} @ {dup_price} still active", Fore.LIGHTBLACK_EX)
-                        send_tg(f"[INFO] {sym}: existing {side.upper()} @ {dup_price} still active, new order skipped")
+                        log(f"[INFO] {user_tag} {sym}: existing {side.upper()} @ {dup_price} still active; skipping new entry", Fore.LIGHTBLACK_EX)
+                        send_tg(f"[INFO] {user_tag} {sym}: existing {side.upper()} @ {dup_price} still active, new order skipped")
                         continue
                     explicit_qty, explicit_notional = _extract_decision_position_size(dec, symbol_meta)
                     qty = None
                     notional = None
-                    if explicit_qty is not None or explicit_notional is not None:
+                    pct = _extract_decision_pct(dec, symbol_meta)
+                    if pct is not None and equity and equity > 0:
+                        notional = equity * pct
+                        if notional is None or not math.isfinite(notional) or notional <= 0:
+                            log(f"[WARN] {user_tag} {sym}: invalid notional from percentage {pct:.2%}", Fore.YELLOW)
+                            send_tg(f"[WARN] {user_tag} {sym}: invalid percentage size {pct:.2%}")
+                            continue
                         if price is None or not math.isfinite(price) or price <= 0:
-                            log(f"[WARN] Unable to use provided size for {sym}: price is invalid", Fore.YELLOW)
-                            send_tg(f"[WARN] {sym}: model sent explicit size but no usable price — skipping trade")
+                            log(f"[WARN] {user_tag} {sym}: price invalid for percentage sizing", Fore.YELLOW)
+                            send_tg(f"[WARN] {user_tag} {sym}: cannot size percentage order without price")
+                            continue
+                        qty = notional / price
+                        log(f"[INFO] {user_tag} {sym}: applying percentage {pct:.2%} -> notional {notional:.2f} USDT", Fore.LIGHTBLACK_EX)
+                    elif explicit_qty is not None or explicit_notional is not None:
+                        if price is None or not math.isfinite(price) or price <= 0:
+                            log(f"[WARN] {user_tag} {sym}: invalid price for explicit size", Fore.YELLOW)
+                            send_tg(f"[WARN] {user_tag} {sym}: model sent explicit size but no usable price - skipping trade")
                             continue
                         qty = explicit_qty if explicit_qty is not None else explicit_notional / price
                         notional = qty * price
                     else:
                         risk_distance = abs(price - sl)
                         if risk_distance <= 0 or not math.isfinite(risk_distance):
-                            log(f"[WARN] Unable to compute risk distance for {sym}", Fore.YELLOW)
-                            send_tg(f"[WARN] {sym}: failed to compute stop-based risk, skipping")
+                            log(f"[WARN] {user_tag} {sym}: unable to compute risk distance", Fore.YELLOW)
+                            send_tg(f"[WARN] {user_tag} {sym}: failed to compute stop-based risk, skipping")
                             continue
                         risk_budget_base = _select_risk_budget_base(equity, available_margin)
                         try:
@@ -11555,18 +11617,18 @@ def run_cycle():
                             position_risk_pct = 0.0
                         risk_capital = risk_budget_base * position_risk_pct
                         if risk_capital <= 0:
-                            log(f"[WARN] {sym}: risk budget is zero (available margin {available_margin:.2f} USDT)", Fore.YELLOW)
-                            send_tg(f"[WARN] {sym}: insufficient free margin ({available_margin:.2f} USDT)")
+                            log(f"[WARN] {user_tag} {sym}: risk budget is zero (available margin {available_margin:.2f} USDT)", Fore.YELLOW)
+                            send_tg(f"[WARN] {user_tag} {sym}: insufficient free margin ({available_margin:.2f} USDT)")
                             continue
                         qty = risk_capital / risk_distance
                         if min_qty_rule and qty < min_qty_rule:
                             qty = min_qty_rule
                         if not math.isfinite(qty) or qty <= 0:
-                            log(f"[WARN] {sym}: computed quantity is invalid", Fore.YELLOW)
+                            log(f"[WARN] {user_tag} {sym}: computed quantity is invalid", Fore.YELLOW)
                             continue
                         notional = qty * price
                         if not math.isfinite(notional) or notional <= 0:
-                            log(f"[WARN] {sym}: computed notional is invalid", Fore.YELLOW)
+                            log(f"[WARN] {user_tag} {sym}: computed notional is invalid", Fore.YELLOW)
                             continue
                     if notional + NOTIONAL_EPSILON < min_notional_required:
                         min_qty_from_notional = min_notional_required / price if price > 0 else min_notional_required
@@ -11576,22 +11638,22 @@ def run_cycle():
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
                     max_notional = effective_margin * max(1, symbol_leverage)
                     if max_notional <= 0:
-                        log(f"[WARN] {sym}: usable margin exhausted", Fore.YELLOW)
-                        send_tg(f"[WARN] {sym}: usable margin exhausted")
+                        log(f"[WARN] {user_tag} {sym}: usable margin exhausted", Fore.YELLOW)
+                        send_tg(f"[WARN] {user_tag} {sym}: usable margin exhausted")
                         continue
                     if max_notional + NOTIONAL_EPSILON < min_notional_required:
-                        log(f"[WARN] {sym}: margin {available_margin:.2f} USDT below exchange minimum order size", Fore.YELLOW)
-                        send_tg(f"[WARN] {sym}: margin {available_margin:.2f} USDT below minimum order size")
+                        log(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below exchange minimum order size", Fore.YELLOW)
+                        send_tg(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below minimum order size")
                         continue
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
-                        log(f'[WARN] {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT (total {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), skipping order', Fore.YELLOW)
-                        send_tg(f'[WARN] {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT, skipping')
+                        log(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT (total {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), skipping order', Fore.YELLOW)
+                        send_tg(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT, skipping')
                         continue
                     if notional > max_notional:
                         qty = max_notional / price
                         notional = max_notional
-                        log(f'[WARN] {sym}: trimmed size to {qty:.4f} (~{notional:.2f} USDT) due to margin cap (max_notional={max_notional:.2f}, effective_margin={effective_margin:.2f}, leverage={symbol_leverage})', Fore.YELLOW)
+                        log(f'[WARN] {user_tag} {sym}: trimmed size to {qty:.4f} (~{notional:.2f} USDT) due to margin cap (max_notional={max_notional:.2f}, effective_margin={effective_margin:.2f}, leverage={symbol_leverage})', Fore.YELLOW)
                     try:
                         qty = float(ex.amount_to_precision(sym, qty))
                     except Exception:
@@ -11601,8 +11663,8 @@ def run_cycle():
                         continue
                     notional = qty * price
                     if notional + NOTIONAL_EPSILON < min_notional_required:
-                        log(f"[WARN] {sym}: notional {notional:.2f} USDT below minimum {min_notional_required:.2f} USDT, skipping", Fore.YELLOW)
-                        send_tg(f"[WARN] {sym}: size {notional:.2f} USDT below exchange minimum {min_notional_required:.2f} USDT")
+                        log(f"[WARN] {user_tag} {sym}: notional {notional:.2f} USDT below minimum {min_notional_required:.2f} USDT, skipping", Fore.YELLOW)
+                        send_tg(f"[WARN] {user_tag} {sym}: size {notional:.2f} USDT below exchange minimum {min_notional_required:.2f} USDT")
                         continue
                     try:
                         # Determine category (spot/derivatives) and prepare base params
