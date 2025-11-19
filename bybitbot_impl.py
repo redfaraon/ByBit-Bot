@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
@@ -87,7 +88,40 @@ def _configure_state_paths() -> None:
     except Exception:
         pass
 
-_configure_state_paths()
+LIMIT_ORDER_FALLBACK_SECONDS = float(os.getenv("LIMIT_ORDER_FALLBACK_SECONDS", "30"))
+CYCLE_FALLBACK_INTERVAL = 5
+PNL_LOOKBACK_HOURS = 6
+SPARKLINE_BLOCKS = "???"  # trimmed
+RESULTS_CLOSED_ORDER_DISPLAY_LIMIT = 10
+REQUIRE_TAKE_PROFIT = True
+DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
+DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
+PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
+ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
+_LAST_COMMIT_HASH: Optional[str] = None
+SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
+DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
+CURRENT_RISK_PCT: float = 0.0
+DYNAMIC_RISK_ENABLED: bool = True
+MIN_DYNAMIC_RISK_PCT: float = 0.0
+MAX_DYNAMIC_RISK_PCT: float = 0.0
+BREAKEVEN_ENABLED: bool = True
+BREAKEVEN_ATR_MULT: float = 0.6
+BREAKEVEN_BUFFER_ATR: float = 0.15
+TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
+TRAILING_DYNAMIC_FACTOR: float = 0.65
+TRAILING_DYNAMIC_MIN_ATR: float = 0.35
+TELEGRAM_FORWARD_LOGS: bool = False
+TELEGRAM_LOG_BATCH_SIZE: int = 12
+TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
+TELEGRAM_LOG_RATE_LIMIT_WINDOW: float = 60.0
+TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW: int = 18
+TELEGRAM_LOG_THREAD_ID: int | None = None
+TELEGRAM_WEBHOOK_URL: str = ""
+TELEGRAM_WEBHOOK_HOST: str = "127.0.0.1"
+TELEGRAM_WEBHOOK_PORT: int = 0
+
+LIMIT_ORDER_PENDING: dict[tuple[str, str], dict[str, Any]] = {}
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
@@ -10055,12 +10089,54 @@ def apply_trade_plan_snapshot(
         decisions = []
 
     equity, available_margin, _ = fetch_usdt_equity(exchange)
-    user_tag = f"[user={user_id or 'default'}]"
+    user_key = user_id or "default"
+    user_tag = f"[user={user_key}]"
 
     def log_user(msg: str) -> None:
         tagged = f"{user_tag} {msg}"
         if user_id:
             _append_user_bybit_log(user_id, tagged)
+
+    def _pending_key(symbol: str) -> tuple[str, str]:
+        return (user_key, symbol)
+
+    def _record_pending_entry(symbol: str, qty_value: float, side_value: str) -> None:
+        if qty_value and qty_value > 0:
+            LIMIT_ORDER_PENDING[_pending_key(symbol)] = {
+                "ts": time.time(),
+                "qty": qty_value,
+                "side": side_value.lower() if side_value else "buy",
+            }
+
+    def _clear_pending_entry(symbol: str) -> None:
+        LIMIT_ORDER_PENDING.pop(_pending_key(symbol), None)
+
+    def _execute_limit_fallback(symbol: str, pending_info: dict[str, Any], open_orders_list: list[dict[str, Any]] | None) -> bool:
+        fallback_qty = pending_info.get("qty") or 0.0
+        fallback_side = pending_info.get("side")
+        if fallback_qty <= 0 or not fallback_side:
+            _clear_pending_entry(symbol)
+            return False
+        orders_to_cancel = open_orders_list or []
+        for order in orders_to_cancel:
+            oid = order.get("id")
+            if oid:
+                cancel_order_by_id(exchange, symbol, str(oid))
+        try:
+            res = exchange.create_order(symbol, "market", fallback_side, fallback_qty, None, {})
+            log_user(f"FALLBACK market order after {LIMIT_ORDER_FALLBACK_SECONDS:.0f}s: {symbol} {fallback_side} {fallback_qty:.6f}")
+            log(
+                f"{user_tag} FALLBACK {symbol} {fallback_side} {fallback_qty:.6f} -> {res}",
+                Fore.LIGHTBLACK_EX,
+            )
+            send_tg(f"[FALLBACK] {user_tag} {symbol}: market {fallback_side.upper()} {fallback_qty:.6f} executed after limit not filled")
+            return True
+        except Exception as exc:
+            log_user(f"FALLBACK ORDER FAIL {symbol}: {exc}")
+            log(f"{user_tag} FALLBACK ORDER FAIL {symbol}: {exc}", Fore.YELLOW)
+            return False
+        finally:
+            _clear_pending_entry(symbol)
 
     log_user(f"USERBOT starting run: equity={equity} available={available_margin}")
 
@@ -11065,6 +11141,8 @@ def run_cycle():
             if initial_position_amount is None or not math.isfinite(initial_position_amount):
                 initial_position_amount = 0.0
             has_position = abs(initial_position_amount) > 0
+            if has_position:
+                _clear_pending_entry(sym)
             open_orders_symbol = open_orders_prefetch.get(sym)
             sym_confidence_text: str | None = None
             sym_confidence_value: float | None = None
@@ -11086,6 +11164,15 @@ def run_cycle():
             open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
+            pending_info = LIMIT_ORDER_PENDING.get(_pending_key(sym))
+            if (
+                pending_info
+                and not has_position
+                and open_orders_symbol
+                and time.time() - pending_info.get("ts", 0.0) >= LIMIT_ORDER_FALLBACK_SECONDS
+            ):
+                if _execute_limit_fallback(sym, pending_info, open_orders_symbol):
+                    continue
             canonical_lookup = _canonical_decision_symbol(sym)
             preloaded_decision = decisions_map.get(canonical_lookup)
             initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
@@ -11837,6 +11924,8 @@ def run_cycle():
                         positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                         current_position = positions_map.get(sym)
                         base_exposure_counts = _build_base_exposure_map(positions_map)
+                        if open_executed and qty and qty > 0 and side:
+                            _record_pending_entry(sym, qty, side)
 
                     except Exception as e:
                         err_text = str(e)
