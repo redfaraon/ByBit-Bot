@@ -136,6 +136,11 @@ def _append_user_bybit_log(user_id: str | None, text: str) -> None:
 
 LIMIT_ORDER_FALLBACK_SECONDS = float(os.getenv("LIMIT_ORDER_FALLBACK_SECONDS", "30"))
 LIMIT_ORDER_PENDING: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _pending_entry_key(symbol: str, user_id: str | None = None) -> tuple[str, str]:
+    user_key = user_id or os.getenv("BYBITBOT_USER_ID") or "default"
+    return (user_key, symbol)
 CYCLE_FALLBACK_INTERVAL = 5
 PNL_LOOKBACK_HOURS = 6
 SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
@@ -10112,19 +10117,16 @@ def apply_trade_plan_snapshot(
         if user_id:
             _append_user_bybit_log(user_id, tagged)
 
-    def _pending_key(symbol: str) -> tuple[str, str]:
-        return (user_key, symbol)
-
     def _record_pending_entry(symbol: str, qty_value: float, side_value: str) -> None:
         if qty_value and qty_value > 0:
-            LIMIT_ORDER_PENDING[_pending_key(symbol)] = {
+            LIMIT_ORDER_PENDING[_pending_entry_key(symbol, user_key)] = {
                 "ts": time.time(),
                 "qty": qty_value,
                 "side": side_value.lower() if side_value else "buy",
             }
 
     def _clear_pending_entry(symbol: str) -> None:
-        LIMIT_ORDER_PENDING.pop(_pending_key(symbol), None)
+        LIMIT_ORDER_PENDING.pop(_pending_entry_key(symbol, user_key), None)
 
     def _execute_limit_fallback(symbol: str, pending_info: dict[str, Any], open_orders_list: list[dict[str, Any]] | None) -> bool:
         fallback_qty = pending_info.get("qty") or 0.0
@@ -10267,6 +10269,7 @@ def run_cycle():
     global DYNAMIC_SYMBOL_ALIASES
     global SYMBOL_RULES_CACHE
     global CURRENT_RISK_PCT
+    active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
@@ -11179,7 +11182,7 @@ def run_cycle():
             open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
             initial_protection_signature = _protection_orders_signature(open_orders_symbol)
-            pending_info = LIMIT_ORDER_PENDING.get(_pending_key(sym))
+            pending_info = LIMIT_ORDER_PENDING.get(_pending_entry_key(sym, active_user_id))
             if (
                 pending_info
                 and not has_position
