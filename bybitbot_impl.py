@@ -10291,6 +10291,15 @@ def run_cycle():
     global CURRENT_RISK_PCT
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     user_tag = f"[user={active_user_id}]"
+
+    def log_user(msg: str, *, color: str = Fore.LIGHTBLACK_EX) -> None:
+        tagged = f"{user_tag} {msg}"
+        log(tagged, color)
+        if active_user_id:
+            _append_user_bybit_log(active_user_id, tagged)
+
+    def log_open_skip(symbol: str, reason: str) -> None:
+        log_user(f"OPEN SKIP {symbol}: {reason}")
     _sync_with_remote()
     _write_runtime_status(None, None, "running")
     refresh_settings()
