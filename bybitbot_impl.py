@@ -10136,6 +10136,12 @@ def apply_trade_plan_snapshot(
         if user_id:
             _append_user_bybit_log(user_id, tagged)
 
+    def log_open_skip(symbol: str, reason: str) -> None:
+        log_user(f"OPEN SKIP {symbol}: {reason}")
+
+    def log_open_skip(symbol: str, reason: str) -> None:
+        log_user(f"OPEN SKIP {symbol}: {reason}")
+
     def _record_pending_entry(symbol: str, qty_value: float, side_value: str) -> None:
         record_pending_entry(symbol, qty_value, side_value, user_key)
 
@@ -11346,8 +11352,9 @@ def run_cycle():
                         dec["reason"] = combined_reason
                         action = "skip"
                         reason = combined_reason
-                        log(f"[INFO] {sym}: skipping open — {limit_reason}", Fore.LIGHTBLACK_EX)
-                        send_tg(f"[INFO] {sym}: skip open — {limit_reason}")
+                        log(f"[INFO] {sym}: skipping open - {limit_reason}", Fore.LIGHTBLACK_EX)
+                        send_tg(f"[INFO] {sym}: skip open - {limit_reason}")
+                        log_open_skip(sym, limit_reason)
                     else:
                         pending_base_allocations[base_asset_key] += 1
                         preallocated_base_asset = base_asset_key
@@ -11682,6 +11689,7 @@ def run_cycle():
                         dup_price = duplicate_order.get("price")
                         log(f"[INFO] {user_tag} {sym}: existing {side.upper()} @ {dup_price} still active; skipping new entry", Fore.LIGHTBLACK_EX)
                         send_tg(f"[INFO] {user_tag} {sym}: existing {side.upper()} @ {dup_price} still active, new order skipped")
+                        log_open_skip(sym, f"duplicate limit @ {dup_price}")
                         continue
                     explicit_qty, explicit_notional = _extract_decision_position_size(dec, symbol_meta)
                     qty = None
@@ -11692,10 +11700,12 @@ def run_cycle():
                         if notional is None or not math.isfinite(notional) or notional <= 0:
                             log(f"[WARN] {user_tag} {sym}: invalid notional from percentage {pct:.2%}", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: invalid percentage size {pct:.2%}")
+                            log_open_skip(sym, "percentage notional invalid")
                             continue
                         if price is None or not math.isfinite(price) or price <= 0:
                             log(f"[WARN] {user_tag} {sym}: price invalid for percentage sizing", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: cannot size percentage order without price")
+                            log_open_skip(sym, "percentage price invalid")
                             continue
                         qty = notional / price
                         log(f"[INFO] {user_tag} {sym}: applying percentage {pct:.2%} -> notional {notional:.2f} USDT", Fore.LIGHTBLACK_EX)
@@ -11703,6 +11713,7 @@ def run_cycle():
                         if price is None or not math.isfinite(price) or price <= 0:
                             log(f"[WARN] {user_tag} {sym}: invalid price for explicit size", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: model sent explicit size but no usable price - skipping trade")
+                            log_open_skip(sym, "explicit price invalid")
                             continue
                         qty = explicit_qty if explicit_qty is not None else explicit_notional / price
                         notional = qty * price
@@ -11711,6 +11722,7 @@ def run_cycle():
                         if risk_distance <= 0 or not math.isfinite(risk_distance):
                             log(f"[WARN] {user_tag} {sym}: unable to compute risk distance", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: failed to compute stop-based risk, skipping")
+                            log_open_skip(sym, "risk distance invalid")
                             continue
                         risk_budget_base = _select_risk_budget_base(equity, available_margin)
                         try:
@@ -11740,36 +11752,46 @@ def run_cycle():
                         if risk_capital <= 0:
                             log(f"[WARN] {user_tag} {sym}: risk budget is zero (available margin {available_margin:.2f} USDT)", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: insufficient free margin ({available_margin:.2f} USDT)")
+                            log_open_skip(sym, "risk budget zero")
                             continue
                         qty = risk_capital / risk_distance
                         if min_qty_rule and qty < min_qty_rule:
                             qty = min_qty_rule
                         if not math.isfinite(qty) or qty <= 0:
                             log(f"[WARN] {user_tag} {sym}: computed quantity is invalid", Fore.YELLOW)
+                            log_open_skip(sym, "quantity invalid")
                             continue
                         notional = qty * price
                         if not math.isfinite(notional) or notional <= 0:
                             log(f"[WARN] {user_tag} {sym}: computed notional is invalid", Fore.YELLOW)
+                            log_open_skip(sym, "notional invalid")
                             continue
+                    log_user(
+                        f"OPEN PLAN {sym}: side={side or '?'} qty={qty:.6f} notional={notional:.2f} sl={sl:.2f} tp={tp:.2f}"
+                    )
                     if notional + NOTIONAL_EPSILON < min_notional_required:
                         min_qty_from_notional = min_notional_required / price if price > 0 else min_notional_required
                         target_qty = max(min_qty_rule, min_qty_from_notional) if min_qty_rule else min_qty_from_notional
                         qty = target_qty
                         notional = qty * price
+                        log_open_skip(sym, f"increasing qty to meet min notional {min_notional_required:.2f} USDT")
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
                     max_notional = effective_margin * max(1, symbol_leverage)
                     if max_notional <= 0:
                         log(f"[WARN] {user_tag} {sym}: usable margin exhausted", Fore.YELLOW)
                         send_tg(f"[WARN] {user_tag} {sym}: usable margin exhausted")
+                        log_open_skip(sym, "usable margin exhausted")
                         continue
                     if max_notional + NOTIONAL_EPSILON < min_notional_required:
                         log(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below exchange minimum order size", Fore.YELLOW)
                         send_tg(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below minimum order size")
+                        log_open_skip(sym, "margin below exchange minimum order size")
                         continue
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
                         log(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT (total {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), skipping order', Fore.YELLOW)
                         send_tg(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT, skipping')
+                        log_open_skip(sym, f"required margin {margin_required:.2f} > usable {effective_margin:.2f}")
                         continue
                     if notional > max_notional:
                         qty = max_notional / price
