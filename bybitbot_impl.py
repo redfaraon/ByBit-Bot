@@ -8250,7 +8250,10 @@ def _sync_with_remote() -> None:
     except subprocess.CalledProcessError as exc:
         log(f"[WARN] Git fetch failed: {exc.stderr or exc.stdout or exc}", Fore.YELLOW)
         return
+    branch_name = get_current_branch_name()
     pull_cmd = ["git", "pull", "--ff-only"]
+    if branch_name:
+        pull_cmd.extend(["origin", branch_name])
     if working_tree_dirty:
         _send_git_notification("[GIT] Working tree dirty, pulling with --autostash.")
         pull_cmd.append("--autostash")
