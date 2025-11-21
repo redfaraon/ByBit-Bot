@@ -3248,21 +3248,17 @@ def log(msg: str, color=Fore.WHITE):
 
 
 def _append_user_log(user_id: int | None, text: str) -> None:
-    """Append a line to per-user log under runtime/ (safe, non-critical).
-
-    Files: runtime/user_<id>.log
-    """
+    """Append a line to the user's chat log inside runtime/<user_id>/chat.log."""
     if user_id is None:
         return
     try:
-        root = Path("runtime")
-        root.mkdir(parents=True, exist_ok=True)
-        log_path = root / f"user_{int(user_id)}.log"
+        user_dir = Path("runtime") / str(user_id)
+        user_dir.mkdir(parents=True, exist_ok=True)
+        log_path = user_dir / "chat.log"
         now = _current_log_time().strftime("%Y-%m-%d %H:%M:%S %Z")
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"[{now}] {text}\n")
     except Exception:
-        # non-fatal, only local per-user logging; do not raise
         pass
 
 
@@ -11644,6 +11640,22 @@ def run_cycle():
                     if updated_orders is not None:
                         open_orders_symbol = updated_orders
                         open_orders_cache[sym] = updated_orders
+            elif action == "needs":
+                requested_context = dec.get("requested_context")
+                context_parts: list[str] = []
+                if isinstance(requested_context, dict):
+                    for key, value in requested_context.items():
+                        context_parts.append(f"{key}={value}")
+                elif isinstance(requested_context, (list, tuple)):
+                    context_parts.extend(str(item) for item in requested_context if item)
+                elif requested_context:
+                    context_parts.append(str(requested_context))
+                context_desc = ", ".join(context_parts) if context_parts else "context not specified"
+                log(f"ℹ️ Needs data for {sym}: {reason} (requested {context_desc})", Fore.WHITE)
+                send_tg(
+                    f"ℹ️ {sym}: needs additional data — {reason or 'reason not provided'} (requested {context_desc})"
+                )
+                continue
             elif action == "open":
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"ℹ️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
