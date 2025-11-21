@@ -11947,6 +11947,9 @@ def run_cycle():
                                 remaining_qty = max(0.0, remaining_qty - consumed_qty)
                                 entry_created += 1
                                 entry_summaries.append(f"existing limit @ {layer_price:.2f} (qty~{consumed_qty:.4f})")
+                                log_user(
+                                    f"OPEN DUPLICATE {sym}: existing limit @ {layer_price:.2f} (qty~{consumed_qty:.4f})",
+                                )
                                 continue
                             try:
                                 precise_qty = float(ex.amount_to_precision(sym, target_qty))
