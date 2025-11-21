@@ -3248,16 +3248,16 @@ def log(msg: str, color=Fore.WHITE):
 
 
 def _append_user_log(user_id: int | None, text: str) -> None:
-    """Append a line to the user's chat log inside runtime/<user_id>/chat.log."""
+    """Append a line to the shared chat log (runtime/chat.log)."""
     if user_id is None:
         return
     try:
-        user_dir = Path("runtime") / str(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
-        log_path = user_dir / "chat.log"
+        root = Path("runtime")
+        root.mkdir(parents=True, exist_ok=True)
+        chat_log = root / "chat.log"
         now = _current_log_time().strftime("%Y-%m-%d %H:%M:%S %Z")
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(f"[{now}] {text}\n")
+        with open(chat_log, "a", encoding="utf-8") as fh:
+            fh.write(f"[{now}] user={user_id} {text}\n")
     except Exception:
         pass
 
