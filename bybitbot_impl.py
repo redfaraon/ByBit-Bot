@@ -164,10 +164,16 @@ PNL_LOOKBACK_HOURS = 6
 SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
 RESULTS_CLOSED_ORDER_DISPLAY_LIMIT = 10
 REQUIRE_TAKE_PROFIT = True
-DEFAULT_PARTIAL_TP_SCHEME = [(0.5, 1.0), (0.5, 2.0)]
+DEFAULT_PARTIAL_TP_SCHEME = [(0.33, 1.2), (0.33, 2.0), (0.34, 3.0)]
 DEFAULT_ENTRY_LADDER_SCHEME = [(0.6, 0.0), (0.4, 0.6)]
 PARTIAL_TP_SCHEME = list(DEFAULT_PARTIAL_TP_SCHEME)
 ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
+DEFAULT_AUTO_MIN_NOTIONAL: bool = True
+DEFAULT_AUTO_MARGIN_SCALE: bool = True
+DEFAULT_AUTO_MARGIN_SCALE_RATIO: float = 0.75
+AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
+AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
+AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 _LAST_COMMIT_HASH: Optional[str] = None
 SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
 DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
@@ -2472,6 +2478,14 @@ def env_int(name: str, default: int) -> int:
             return int(default)
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return bool(default)
+    normalized = value.strip().lower()
+    return normalized in ("1", "true", "yes", "on", "y")
+
+
 def resolve_timezone(value: str):
     if not value:
         return None
@@ -2574,6 +2588,7 @@ def refresh_settings():
     global LOW_CONFIDENCE_TIMEFRAMES, LOW_CONFIDENCE_INDICATORS, LOW_CONFIDENCE_SERIALIZE_LIMIT
     global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
+    global AUTO_MIN_NOTIONAL, AUTO_MARGIN_SCALE, AUTO_MARGIN_SCALE_RATIO
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_RATE_LIMIT_WINDOW, TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
@@ -2718,6 +2733,17 @@ def refresh_settings():
         TELEGRAM_SUPPORT_THREAD_ID = 6
     PARTIAL_TP_SCHEME = _parse_ratio_scheme(os.getenv("PARTIAL_TP_SCHEME"), DEFAULT_PARTIAL_TP_SCHEME)
     ENTRY_LADDER_SCHEME = _parse_ratio_scheme(os.getenv("ENTRY_LADDER_SCHEME"), DEFAULT_ENTRY_LADDER_SCHEME)
+    AUTO_MIN_NOTIONAL = env_bool("AUTO_MIN_NOTIONAL", DEFAULT_AUTO_MIN_NOTIONAL)
+    AUTO_MARGIN_SCALE = env_bool("AUTO_MARGIN_SCALE", DEFAULT_AUTO_MARGIN_SCALE)
+    ratio_candidate = os.getenv("AUTO_MARGIN_SCALE_RATIO")
+    if ratio_candidate is not None and ratio_candidate != "":
+        try:
+            ratio_candidate_val = float(ratio_candidate)
+        except (ValueError, TypeError):
+            ratio_candidate_val = DEFAULT_AUTO_MARGIN_SCALE_RATIO
+    else:
+        ratio_candidate_val = DEFAULT_AUTO_MARGIN_SCALE_RATIO
+    AUTO_MARGIN_SCALE_RATIO = max(0.0, min(1.0, ratio_candidate_val))
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -11788,13 +11814,26 @@ def run_cycle():
                         f"OPEN PLAN {sym}: side={side or '?'} qty={qty:.6f} notional={notional:.2f} sl={sl:.2f} tp={tp:.2f}"
                     )
                     if notional + NOTIONAL_EPSILON < min_notional_required:
-                        min_qty_from_notional = min_notional_required / price if price > 0 else min_notional_required
-                        target_qty = max(min_qty_rule, min_qty_from_notional) if min_qty_rule else min_qty_from_notional
-                        qty = target_qty
-                        notional = qty * price
-                        log_user(
-                            f"OPEN ADJUST {sym}: increasing qty to meet min notional {min_notional_required:.2f} USDT -> qty={qty:.6f}, notional={notional:.2f}"
-                        )
+                        if AUTO_MIN_NOTIONAL:
+                            min_qty_from_notional = (
+                                min_notional_required / price if price > 0 else min_notional_required
+                            )
+                            target_qty = (
+                                max(min_qty_rule, min_qty_from_notional)
+                                if min_qty_rule
+                                else min_qty_from_notional
+                            )
+                            qty = target_qty
+                            notional = qty * price
+                            log_user(
+                                f"OPEN ADJUST {sym}: increasing qty to meet min notional {min_notional_required:.2f} USDT -> qty={qty:.6f}, notional={notional:.2f}"
+                            )
+                        else:
+                            log_open_skip(
+                                sym,
+                                f"notional {notional:.2f} USDT below minimum {min_notional_required:.2f} USDT",
+                            )
+                            continue
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
                     max_notional = effective_margin * max(1, symbol_leverage)
                     if max_notional <= 0:
@@ -11807,6 +11846,21 @@ def run_cycle():
                         send_tg(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below minimum order size")
                         log_open_skip(sym, "margin below exchange minimum order size")
                         continue
+                    if (
+                        AUTO_MARGIN_SCALE
+                        and AUTO_MARGIN_SCALE_RATIO > 0
+                        and max_notional > 0
+                        and price
+                        and price > 0
+                    ):
+                        desired_notional = max_notional * AUTO_MARGIN_SCALE_RATIO
+                        if desired_notional > notional:
+                            scaled_notional = min(max_notional, max(desired_notional, notional))
+                            qty = scaled_notional / price
+                            notional = qty * price
+                            log_user(
+                                f"OPEN ADJUST {sym}: scaling to margin {notional:.2f} USDT (ratio {AUTO_MARGIN_SCALE_RATIO:.2f}) -> qty={qty:.6f}"
+                            )
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
                         log(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT (total {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), skipping order', Fore.YELLOW)
