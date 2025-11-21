@@ -11810,9 +11810,9 @@ def run_cycle():
                             log(f"[WARN] {user_tag} {sym}: computed notional is invalid", Fore.YELLOW)
                             log_open_skip(sym, "notional invalid")
                             continue
-                    log_user(
-                        f"OPEN PLAN {sym}: side={side or '?'} qty={qty:.6f} notional={notional:.2f} sl={sl:.2f} tp={tp:.2f}"
-                    )
+                        log_user(
+                            f"OPEN PLAN {sym}: side={side or '?'} qty={qty:.6f} notional={notional:.2f} sl={sl:.2f} tp={tp:.2f}"
+                        )
                     if notional + NOTIONAL_EPSILON < min_notional_required:
                         if AUTO_MIN_NOTIONAL:
                             min_qty_from_notional = (
@@ -11986,14 +11986,21 @@ def run_cycle():
                                 layer_notional = precise_qty * layer_price
                                 if layer_notional + NOTIONAL_EPSILON < min_notional_required:
                                     continue
-                                layer_params = dict(base_params)
-                                layer_params = _sanitize_order_params_for_category(layer_params, category)
-                                order_result = ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
-                                log(f"[DEBUG] create_order результат: {order_result}", Fore.LIGHTBLACK_EX)
-                                try:
-                                    _append_user_bybit_log(USER_ID, f"ORDER: {sym} {side.upper()} {precise_qty:.6f}@{layer_price:.4f} -> {order_result}")
-                                except Exception:
-                                    pass
+                            layer_params = dict(base_params)
+                            layer_params = _sanitize_order_params_for_category(layer_params, category)
+                            log(
+                                f"[EX] create {sym} {side_lower}/limit qty={precise_qty:.6f} price={layer_price:.4f} params={layer_params}",
+                                Fore.LIGHTBLACK_EX,
+                            )
+                            order_result = ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
+                            log(f"[EX] ok {sym} {side_lower}/limit -> {order_result}", Fore.LIGHTBLACK_EX)
+                            try:
+                                _append_user_bybit_log(
+                                    USER_ID,
+                                    f"ORDER: {sym} {side.upper()} {precise_qty:.6f}@{layer_price:.4f} -> {order_result}",
+                                )
+                            except Exception:
+                                pass
                             open_executed = True
                             entry_created += 1
                             remaining_qty = max(0.0, remaining_qty - precise_qty)
@@ -12033,10 +12040,17 @@ def run_cycle():
                                     raise RuntimeError("no entry orders placed")
                                 layer_params = dict(base_params)
                                 layer_params = _sanitize_order_params_for_category(layer_params, category)
+                                log(
+                                    f"[EX] create (fallback) {sym} {side_lower}/limit qty={precise_qty:.6f} price={fallback_price:.4f} params={layer_params}",
+                                    Fore.LIGHTBLACK_EX,
+                                )
                                 order_result = ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
-                                log(f"[DEBUG] create_order fallback результат: {order_result}", Fore.LIGHTBLACK_EX)
+                                log(f"[EX] ok (fallback) {sym} {side_lower}/limit -> {order_result}", Fore.LIGHTBLACK_EX)
                                 try:
-                                    _append_user_bybit_log(USER_ID, f"ORDER (fallback): {sym} {side.upper()} {precise_qty:.6f}@{fallback_price:.4f} -> {order_result}")
+                                    _append_user_bybit_log(
+                                        USER_ID,
+                                        f"ORDER (fallback): {sym} {side.upper()} {precise_qty:.6f}@{fallback_price:.4f} -> {order_result}",
+                                    )
                                 except Exception:
                                     pass
                             open_executed = True
