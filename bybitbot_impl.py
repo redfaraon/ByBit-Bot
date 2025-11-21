@@ -11751,12 +11751,21 @@ def run_cycle():
                             alloc = 1.0
                         alloc = max(0.0, min(1.0, alloc))
                         risk_budget_base *= alloc
-                        # Пер-позиционный риск считаем от базового RISK_PCT,
-                        # чтобы каждая сделка могла использовать свою долю риска,
-                        # а не глобальный динамический CURRENT_RISK_PCT.
-                        position_risk_pct = RISK_PCT if RISK_PCT and math.isfinite(RISK_PCT) else CURRENT_RISK_PCT
+                        # Используем динамический риск, если он включён и валиден,
+                        # иначе возвращаемся к базовому RISK_PCT.
+                        raw_risk_pct = (
+                            CURRENT_RISK_PCT
+                            if DYNAMIC_RISK_ENABLED
+                            and CURRENT_RISK_PCT
+                            and math.isfinite(CURRENT_RISK_PCT)
+                            else RISK_PCT
+                        )
+                        position_risk_pct = min(
+                            MAX_DYNAMIC_RISK_PCT,
+                            max(MIN_DYNAMIC_RISK_PCT, raw_risk_pct),
+                        )
                         if position_risk_pct <= 0 or not math.isfinite(position_risk_pct):
-                            position_risk_pct = 0.0
+                            position_risk_pct = RISK_PCT
                         risk_capital = risk_budget_base * position_risk_pct
                         if risk_capital <= 0:
                             log(f"[WARN] {user_tag} {sym}: risk budget is zero (available margin {available_margin:.2f} USDT)", Fore.YELLOW)
@@ -11783,7 +11792,9 @@ def run_cycle():
                         target_qty = max(min_qty_rule, min_qty_from_notional) if min_qty_rule else min_qty_from_notional
                         qty = target_qty
                         notional = qty * price
-                        log_open_skip(sym, f"increasing qty to meet min notional {min_notional_required:.2f} USDT")
+                        log_user(
+                            f"OPEN ADJUST {sym}: increasing qty to meet min notional {min_notional_required:.2f} USDT -> qty={qty:.6f}, notional={notional:.2f}"
+                        )
                     effective_margin = max(0.0, available_margin * ORDER_MARGIN_UTILIZATION)
                     max_notional = effective_margin * max(1, symbol_leverage)
                     if max_notional <= 0:
