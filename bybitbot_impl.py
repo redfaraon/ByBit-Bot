@@ -171,9 +171,11 @@ ENTRY_LADDER_SCHEME = list(DEFAULT_ENTRY_LADDER_SCHEME)
 DEFAULT_AUTO_MIN_NOTIONAL: bool = True
 DEFAULT_AUTO_MARGIN_SCALE: bool = True
 DEFAULT_AUTO_MARGIN_SCALE_RATIO: float = 0.75
+DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT: float = 1.15
 AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
+AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
 _LAST_COMMIT_HASH: Optional[str] = None
 SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
 DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
@@ -2744,6 +2746,17 @@ def refresh_settings():
     else:
         ratio_candidate_val = DEFAULT_AUTO_MARGIN_SCALE_RATIO
     AUTO_MARGIN_SCALE_RATIO = max(0.0, min(1.0, ratio_candidate_val))
+    try:
+        AUTO_MARGIN_CONFIDENCE_MULT = float(
+            os.getenv("AUTO_MARGIN_CONFIDENCE_MULT", str(DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT))
+        )
+    except (TypeError, ValueError):
+        AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
+    if not math.isfinite(AUTO_MARGIN_CONFIDENCE_MULT) or AUTO_MARGIN_CONFIDENCE_MULT < 1.0:
+        AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
+    AUTO_MARGIN_CONFIDENCE_MULT = float(os.getenv("AUTO_MARGIN_CONFIDENCE_MULT") or DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT)
+    if not math.isfinite(AUTO_MARGIN_CONFIDENCE_MULT) or AUTO_MARGIN_CONFIDENCE_MULT < 1.0:
+        AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -3279,6 +3292,19 @@ def _append_user_bybit_log(user_id: str | int | None, text: str) -> None:
             fh.write(f"[{now}] {text}\n")
     except Exception:
         # keep non-fatal
+        pass
+
+
+def _append_trade_log(text: str) -> None:
+    """Append a trading line to the shared runtime/trades.log."""
+    try:
+        root = Path("runtime")
+        root.mkdir(parents=True, exist_ok=True)
+        trade_log = root / "trades.log"
+        now = _current_log_time().strftime("%Y-%m-%d %H:%M:%S %Z")
+        with open(trade_log, "a", encoding="utf-8") as fh:
+            fh.write(f"[{now}] {text}\n")
+    except Exception:
         pass
 
 
@@ -11313,6 +11339,7 @@ def run_cycle():
                 send_tg(confidence_msg)
             else:
                 sym_confidence_tag = None
+            dec["confidence_value"] = sym_confidence_value or 0.0
             low_confidence_flag = (
                 sym_confidence_value is not None
                 and sym_confidence_value < AI_CONFIDENCE_THRESHOLD
@@ -11868,13 +11895,20 @@ def run_cycle():
                         and price
                         and price > 0
                     ):
-                        desired_notional = max_notional * AUTO_MARGIN_SCALE_RATIO
+                        ratio_to_use = AUTO_MARGIN_SCALE_RATIO
+                        confidence_value = dec.get("confidence_value") or 0.0
+                        if (
+                            confidence_value >= AI_CONFIDENCE_THRESHOLD
+                            and AUTO_MARGIN_CONFIDENCE_MULT > 1.0
+                        ):
+                            ratio_to_use = min(1.0, ratio_to_use * AUTO_MARGIN_CONFIDENCE_MULT)
+                        desired_notional = max_notional * ratio_to_use
                         if desired_notional > notional:
                             scaled_notional = min(max_notional, max(desired_notional, notional))
                             qty = scaled_notional / price
                             notional = qty * price
                             log_user(
-                                f"OPEN ADJUST {sym}: scaling to margin {notional:.2f} USDT (ratio {AUTO_MARGIN_SCALE_RATIO:.2f}) -> qty={qty:.6f}"
+                                f"OPEN ADJUST {sym}: scaling to margin {notional:.2f} USDT (ratio {ratio_to_use:.2f}) -> qty={qty:.6f}"
                             )
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
@@ -12019,6 +12053,7 @@ def run_cycle():
                                 )
                             except Exception:
                                 pass
+                            _append_trade_log(f"{user_tag} ORDER {sym} {side.upper()} qty={precise_qty:.6f} price={layer_price:.4f} -> {order_result}")
                             open_executed = True
                             entry_created += 1
                             remaining_qty = max(0.0, remaining_qty - precise_qty)
@@ -12071,6 +12106,9 @@ def run_cycle():
                                     )
                                 except Exception:
                                     pass
+                                _append_trade_log(
+                                    f"{user_tag} ORDER (fallback) {sym} {side.upper()} qty={precise_qty:.6f} price={fallback_price:.4f} -> {order_result}"
+                                )
                             open_executed = True
                             entry_created = 1
                             remaining_qty = max(0.0, qty - precise_qty)
