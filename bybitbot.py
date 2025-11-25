@@ -7,6 +7,7 @@ import os
 import random
 import time
 import shutil
+import signal
 import subprocess
 import sys
 import traceback
@@ -56,6 +57,61 @@ USERS_DEFAULT_SECRET = "secrets.env"
 
 _ENGINE_AUTOSTART_PROCESS = None
 _ENGINE_AUTOSTART_LOG = None
+
+
+def _engine_runtime_dir() -> Path:
+    runtime_root = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
+    log_dir = runtime_root / "engine"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return log_dir
+
+
+def _engine_pid_path() -> Path:
+    return _engine_runtime_dir() / "engine-autostart.pid"
+
+
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except Exception:
+        return None
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _pid_cmdline(pid: int) -> str:
+    proc_path = Path("/proc") / str(pid) / "cmdline"
+    try:
+        return proc_path.read_text(errors="ignore")
+    except Exception:
+        return ""
+
+
+def _terminate_pid(pid: int, grace: float = 10.0) -> None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        return
+    start = time.time()
+    while time.time() - start < grace:
+        if not _pid_is_running(pid):
+            return
+        time.sleep(0.5)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
 
 
 def _resolve_commit_limit(raw_value: str | None) -> int:
@@ -204,12 +260,18 @@ def _start_background_engine() -> None:
     script_path = REPO_ROOT / "bybit_engine.py"
     if not script_path.exists():
         return
-    runtime_root = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
-    log_dir = runtime_root / "engine"
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    log_dir = _engine_runtime_dir()
+    pid_path = _engine_pid_path()
+    existing_pid = _read_pid_file(pid_path)
+    if existing_pid and _pid_is_running(existing_pid):
+        cmdline = _pid_cmdline(existing_pid)
+        if "bybit_engine.py" in cmdline:
+            print(f"[ENGINE] Terminating previous autostart engine (pid={existing_pid})", file=sys.stderr)
+            _terminate_pid(existing_pid)
+        try:
+            pid_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     log_path = log_dir / "engine-autostart.log"
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -239,11 +301,16 @@ def _start_background_engine() -> None:
         return
     _ENGINE_AUTOSTART_PROCESS = proc
     _ENGINE_AUTOSTART_LOG = log_file
+    try:
+        pid_path.write_text(str(proc.pid))
+    except Exception:
+        pass
 
 
 def _stop_background_engine() -> None:
     global _ENGINE_AUTOSTART_PROCESS, _ENGINE_AUTOSTART_LOG
     proc = _ENGINE_AUTOSTART_PROCESS
+    pid_path = _engine_pid_path()
     if proc:
         try:
             if proc.poll() is None:
@@ -267,6 +334,10 @@ def _stop_background_engine() -> None:
             pass
     _ENGINE_AUTOSTART_PROCESS = None
     _ENGINE_AUTOSTART_LOG = None
+    try:
+        pid_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _parse_args():
