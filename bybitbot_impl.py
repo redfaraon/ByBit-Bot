@@ -52,9 +52,24 @@ BOT_CHANGELOG = (
     "Support replies now search the full codebase with smarter keywords, /logs docs mention ticker filters, and onboarding docs highlight per-user balances."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR
-CHANGELOG_FILE = SCRIPT_DIR / "CHANGELOG.txt"
-STATE_DIR = SCRIPT_DIR
+
+
+def _resolve_repo_root(script_dir: Path) -> Path:
+    """Return the nearest parent containing .git (or script_dir if not found)."""
+    current = script_dir
+    for _ in range(6):
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return script_dir
+
+
+REPO_ROOT = _resolve_repo_root(SCRIPT_DIR)
+CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
+STATE_DIR = REPO_ROOT
 def _configure_state_paths() -> None:
     global STATE_DIR
     global EQUITY_HISTORY_FILE
@@ -68,7 +83,7 @@ def _configure_state_paths() -> None:
     global COMMANDS_HELP_STATE_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
-        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else SCRIPT_DIR)
+        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else REPO_ROOT)
     except Exception:
         STATE_DIR = SCRIPT_DIR
     try:

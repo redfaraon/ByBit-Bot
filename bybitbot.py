@@ -16,7 +16,20 @@ from typing import Callable
 
 from dotenv import dotenv_values
 
-REPO_ROOT = Path(__file__).resolve().parent
+
+def _resolve_repo_root(script_path: Path) -> Path:
+    current = script_path
+    for _ in range(6):
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return script_path
+
+
+REPO_ROOT = _resolve_repo_root(Path(__file__).resolve().parent)
 BOT_VERSION = os.getenv("BYBITBOT_VERSION", "12.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT))
