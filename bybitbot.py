@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Entry point and fallback wrapper for bybitbot_impl."""
 import argparse
 import importlib
@@ -17,7 +17,7 @@ from typing import Callable
 from dotenv import dotenv_values
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "12.0")
+BOT_VERSION = os.getenv("BYBITBOT_VERSION", "12.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT))
 
