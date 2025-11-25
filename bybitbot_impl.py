@@ -176,6 +176,8 @@ AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
+DEFAULT_OPEN_MIN_CONFIDENCE: float = 0.7
+OPEN_MIN_CONFIDENCE: float = DEFAULT_OPEN_MIN_CONFIDENCE
 _LAST_COMMIT_HASH: Optional[str] = None
 SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
 DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
@@ -3010,9 +3012,15 @@ def refresh_settings():
         TRADE_PLAN_BACKOFF_SECONDS = 5.0
     TRADE_PLAN_BACKOFF_SECONDS = max(1.0, TRADE_PLAN_BACKOFF_SECONDS)
     try:
-        AI_CONFIDENCE_THRESHOLD = float(os.getenv("BYBITBOT_CONFIDENCE_THRESHOLD", "0.55"))
+        AI_CONFIDENCE_THRESHOLD = float(os.getenv("BYBITBOT_CONFIDENCE_THRESHOLD", "0.65"))
     except (TypeError, ValueError):
-        AI_CONFIDENCE_THRESHOLD = 0.55
+        AI_CONFIDENCE_THRESHOLD = 0.65
+    try:
+        OPEN_MIN_CONFIDENCE = float(os.getenv("OPEN_MIN_CONFIDENCE", str(DEFAULT_OPEN_MIN_CONFIDENCE)))
+    except (TypeError, ValueError):
+        OPEN_MIN_CONFIDENCE = DEFAULT_OPEN_MIN_CONFIDENCE
+    if not math.isfinite(OPEN_MIN_CONFIDENCE) or OPEN_MIN_CONFIDENCE <= 0:
+        OPEN_MIN_CONFIDENCE = DEFAULT_OPEN_MIN_CONFIDENCE
     low_conf_needs_env = os.getenv("BYBITBOT_CONFIDENCE_NEEDS")
     if low_conf_needs_env:
         try:
@@ -3086,7 +3094,7 @@ if "TRADE_PLAN_MAX_ATTEMPTS" not in globals():
 if "TRADE_PLAN_BACKOFF_SECONDS" not in globals():
     TRADE_PLAN_BACKOFF_SECONDS = 5.0
 if "AI_CONFIDENCE_THRESHOLD" not in globals():
-    AI_CONFIDENCE_THRESHOLD = 0.55
+    AI_CONFIDENCE_THRESHOLD = 0.65
 if "LOW_CONFIDENCE_NEEDS" not in globals():
     LOW_CONFIDENCE_NEEDS = ["funding", "open_interest", "news"]
 if "SUPPORT_CONTEXT_TIMEFRAMES" not in globals():
@@ -11625,6 +11633,23 @@ def run_cycle():
             if cancel_failures:
                 errors = "; ".join(f"{oid}: {err}" for oid, err in cancel_failures)
                 send_tg(f"⚠️ Не удалось отменить ордера по {sym}: {errors}")
+
+            # Downgrade low-confidence opens to skip before handling branches
+            if action == "open" and not has_position:
+                try:
+                    conf_val = float(sym_confidence_value) if sym_confidence_value is not None else 0.0
+                except Exception:
+                    conf_val = 0.0
+                if conf_val < OPEN_MIN_CONFIDENCE:
+                    log(
+                        f"ℹ️ Пропуск {sym}: confidence {conf_val:.3f} ниже порога {OPEN_MIN_CONFIDENCE:.3f} для открытия",
+                        Fore.WHITE,
+                    )
+                    send_tg(
+                        f"ℹ️ {sym}: сигнал OPEN пропущен — confidence {conf_val:.3f} ниже порога {OPEN_MIN_CONFIDENCE:.3f}"
+                    )
+                    action = "skip"
+                    dec["action"] = "skip"
 
             if action == "skip":
                 log(f"ℹ️ Пропуск {sym} ({reason})", Fore.WHITE)
