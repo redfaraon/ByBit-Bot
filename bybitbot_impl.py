@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # Version: 12.2
 """
-Bybit Intraday AI Trading Bot вЂ” 30m, 5 РїР°СЂ USDT Perpetual
-РЎР±Р°Р»Р°РЅСЃРёСЂРѕРІР°РЅРЅС‹Р№ РёРЅС‚СЂР°РґРµР№-Р±РѕС‚ СЃ РїРѕРґРґРµСЂР¶РєРѕР№ OpenAI GPT, Telegram Рё СЂР°СЃС€РёСЂРµРЅРЅС‹Рј РєРѕРЅС‚РµРєСЃС‚РѕРј.
+Bybit Intraday AI Trading Bot РІР‚вЂќ 30m, 5 Р С—Р В°РЎР‚ USDT Perpetual
+Р РЋР В±Р В°Р В»Р В°Р Р…РЎРѓР С‘РЎР‚Р С•Р Р†Р В°Р Р…Р Р…РЎвЂ№Р в„– Р С‘Р Р…РЎвЂљРЎР‚Р В°Р Т‘Р ВµР в„–-Р В±Р С•РЎвЂљ РЎРѓ Р С—Р С•Р Т‘Р Т‘Р ВµРЎР‚Р В¶Р С”Р С•Р в„– OpenAI GPT, Telegram Р С‘ РЎР‚Р В°РЎРѓРЎв‚¬Р С‘РЎР‚Р ВµР Р…Р Р…РЎвЂ№Р С Р С”Р С•Р Р…РЎвЂљР ВµР С”РЎРѓРЎвЂљР С•Р С.
 
 """
 
@@ -20,7 +20,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
-# --- Импорты ---
+# --- РРјРїРѕСЂС‚С‹ ---
 import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, textwrap, types
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -46,7 +46,7 @@ try:
 except ImportError:
     feedparser = None
 
-# Версия бота: обновляйте при каждом релизе/значимых изменениях
+# Р’РµСЂСЃРёСЏ Р±РѕС‚Р°: РѕР±РЅРѕРІР»СЏР№С‚Рµ РїСЂРё РєР°Р¶РґРѕРј СЂРµР»РёР·Рµ/Р·РЅР°С‡РёРјС‹С… РёР·РјРµРЅРµРЅРёСЏС…
 BOT_VERSION = "2025.11.19.1"
 BOT_CHANGELOG = (
     "Support replies now search the full codebase with smarter keywords, /logs docs mention ticker filters, and onboarding docs highlight per-user balances."
@@ -206,50 +206,50 @@ TELEGRAM_WEBHOOK_SECRET: str | None = None
 TELEGRAM_ALLOWED_CHAT_IDS: set[int] = set()
 TELEGRAM_COMMANDS_LIST: list[dict[str, str]] = []
 TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
-    ("start", "Приветствие и доступные команды"),
-    ("help", "Список доступных команд"),
-    ("status", "Текущий статус бота"),
-    ("positions", "Открытые позиции"),
-    ("risk", "Текущий риск-профиль"),
-    ("logs", "Последние события"),
-    ("schedule", "Запланировать следующую сессию"),
-    ("tokens", "Лимиты OpenAI токенов"),
-    ("bybitkey", "Установить BYBIT_API_KEY/BYBIT_API_SECRET"),
-    ("adduser", "Создать нового юзер-бота (DM)"),
-    ("config", "Настройки бота и окружения"),
-    ("sandbox", "Управление песочницами"),
-    ("version", "Текущая версия и changelog"),
-    ("ai", "Диагностика AI payload"),
+    ("start", "РџСЂРёРІРµС‚СЃС‚РІРёРµ Рё РґРѕСЃС‚СѓРїРЅС‹Рµ РєРѕРјР°РЅРґС‹"),
+    ("help", "РЎРїРёСЃРѕРє РґРѕСЃС‚СѓРїРЅС‹С… РєРѕРјР°РЅРґ"),
+    ("status", "РўРµРєСѓС‰РёР№ СЃС‚Р°С‚СѓСЃ Р±РѕС‚Р°"),
+    ("positions", "РћС‚РєСЂС‹С‚С‹Рµ РїРѕР·РёС†РёРё"),
+    ("risk", "РўРµРєСѓС‰РёР№ СЂРёСЃРє-РїСЂРѕС„РёР»СЊ"),
+    ("logs", "РџРѕСЃР»РµРґРЅРёРµ СЃРѕР±С‹С‚РёСЏ"),
+    ("schedule", "Р—Р°РїР»Р°РЅРёСЂРѕРІР°С‚СЊ СЃР»РµРґСѓСЋС‰СѓСЋ СЃРµСЃСЃРёСЋ"),
+    ("tokens", "Р›РёРјРёС‚С‹ OpenAI С‚РѕРєРµРЅРѕРІ"),
+    ("bybitkey", "РЈСЃС‚Р°РЅРѕРІРёС‚СЊ BYBIT_API_KEY/BYBIT_API_SECRET"),
+    ("adduser", "РЎРѕР·РґР°С‚СЊ РЅРѕРІРѕРіРѕ СЋР·РµСЂ-Р±РѕС‚Р° (DM)"),
+    ("config", "РќР°СЃС‚СЂРѕР№РєРё Р±РѕС‚Р° Рё РѕРєСЂСѓР¶РµРЅРёСЏ"),
+    ("sandbox", "РЈРїСЂР°РІР»РµРЅРёРµ РїРµСЃРѕС‡РЅРёС†Р°РјРё"),
+    ("version", "РўРµРєСѓС‰Р°СЏ РІРµСЂСЃРёСЏ Рё changelog"),
+    ("ai", "Р”РёР°РіРЅРѕСЃС‚РёРєР° AI payload"),
 ]
 COMMANDS_HELP_SECTIONS = [
     {
         "key": "core",
-        "title": "Основные команды",
+        "title": "РћСЃРЅРѕРІРЅС‹Рµ РєРѕРјР°РЅРґС‹",
         "lines": [
-            "/status — текущий статус цикла, equity и расписания",
-            "/positions — активные позиции и защитные ордера",
-            "/risk — действующие параметры риска и плеча",
-            "/logs [N|symbol minutes] — последние логи или фильтр по тикеру (пример: /logs BTC 60)",
+            "/status вЂ” С‚РµРєСѓС‰РёР№ СЃС‚Р°С‚СѓСЃ С†РёРєР»Р°, equity Рё СЂР°СЃРїРёСЃР°РЅРёСЏ",
+            "/positions вЂ” Р°РєС‚РёРІРЅС‹Рµ РїРѕР·РёС†РёРё Рё Р·Р°С‰РёС‚РЅС‹Рµ РѕСЂРґРµСЂР°",
+            "/risk вЂ” РґРµР№СЃС‚РІСѓСЋС‰РёРµ РїР°СЂР°РјРµС‚СЂС‹ СЂРёСЃРєР° Рё РїР»РµС‡Р°",
+            "/logs [N|symbol minutes] вЂ” РїРѕСЃР»РµРґРЅРёРµ Р»РѕРіРё РёР»Рё С„РёР»СЊС‚СЂ РїРѕ С‚РёРєРµСЂСѓ (РїСЂРёРјРµСЂ: /logs BTC 60)",
         ],
     },
     {
         "key": "ops",
-        "title": "Торговля и диагностика",
+        "title": "РўРѕСЂРіРѕРІР»СЏ Рё РґРёР°РіРЅРѕСЃС‚РёРєР°",
         "lines": [
-            "/schedule <in|at> — задать вручную следующий запуск",
-            "/tokens — бюджет токенов OpenAI и текущий расход",
-            "/ai payload [universe|trade] — показать последний запрос/ответ модели",
-            "/sandbox — управление песочницами",
+            "/schedule <in|at> вЂ” Р·Р°РґР°С‚СЊ РІСЂСѓС‡РЅСѓСЋ СЃР»РµРґСѓСЋС‰РёР№ Р·Р°РїСѓСЃРє",
+            "/tokens вЂ” Р±СЋРґР¶РµС‚ С‚РѕРєРµРЅРѕРІ OpenAI Рё С‚РµРєСѓС‰РёР№ СЂР°СЃС…РѕРґ",
+            "/ai payload [universe|trade] вЂ” РїРѕРєР°Р·Р°С‚СЊ РїРѕСЃР»РµРґРЅРёР№ Р·Р°РїСЂРѕСЃ/РѕС‚РІРµС‚ РјРѕРґРµР»Рё",
+            "/sandbox вЂ” СѓРїСЂР°РІР»РµРЅРёРµ РїРµСЃРѕС‡РЅРёС†Р°РјРё",
         ],
     },
     {
         "key": "admin",
-        "title": "Администрирование",
+        "title": "РђРґРјРёРЅРёСЃС‚СЂРёСЂРѕРІР°РЅРёРµ",
         "lines": [
-            "/bybitkey <key> <secret> — заменить API ключи (сохраняются в secrets.env)",
-            "/adduser <id> <telegram_id> — добавить нового трейдера",
-            "/config — вывести активные переменные окружения",
-            "/version — показать changelog текущей версии",
+            "/bybitkey <key> <secret> вЂ” Р·Р°РјРµРЅРёС‚СЊ API РєР»СЋС‡Рё (СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ РІ secrets.env)",
+            "/adduser <id> <telegram_id> вЂ” РґРѕР±Р°РІРёС‚СЊ РЅРѕРІРѕРіРѕ С‚СЂРµР№РґРµСЂР°",
+            "/config вЂ” РІС‹РІРµСЃС‚Рё Р°РєС‚РёРІРЅС‹Рµ РїРµСЂРµРјРµРЅРЅС‹Рµ РѕРєСЂСѓР¶РµРЅРёСЏ",
+            "/version вЂ” РїРѕРєР°Р·Р°С‚СЊ changelog С‚РµРєСѓС‰РµР№ РІРµСЂСЃРёРё",
         ],
     },
 ]
@@ -326,12 +326,12 @@ def _load_bybit_credentials() -> tuple[str | None, str | None]:
     except FileNotFoundError:
         return None, None
     except Exception as exc:
-        log(f"[BYBIT] Не удалось прочитать сохранённые ключи: {exc}", Fore.YELLOW)
+        log(f"[BYBIT] РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РєР»СЋС‡Рё: {exc}", Fore.YELLOW)
         return None, None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log("[BYBIT] Файл bybit_credentials.json повреждён, игнорируем.", Fore.YELLOW)
+        log("[BYBIT] Р¤Р°Р№Р» bybit_credentials.json РїРѕРІСЂРµР¶РґС‘РЅ, РёРіРЅРѕСЂРёСЂСѓРµРј.", Fore.YELLOW)
         return None, None
     if not isinstance(data, dict):
         return None, None
@@ -347,7 +347,7 @@ def _store_bybit_credentials(api_key: str | None, api_secret: str | None) -> Non
         except FileNotFoundError:
             pass
         except Exception as exc:
-            log(f"[BYBIT] Не удалось удалить сохранённые ключи: {exc}", Fore.YELLOW)
+            log(f"[BYBIT] РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ РєР»СЋС‡Рё: {exc}", Fore.YELLOW)
         os.environ.pop("BYBIT_API_KEY", None)
         os.environ.pop("BYBIT_API_SECRET", None)
         return
@@ -359,7 +359,7 @@ def _store_bybit_credentials(api_key: str | None, api_secret: str | None) -> Non
         except Exception:
             pass
     except Exception as exc:
-        log(f"[BYBIT] Не удалось сохранить ключи: {exc}", Fore.YELLOW)
+        log(f"[BYBIT] РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ РєР»СЋС‡Рё: {exc}", Fore.YELLOW)
         return
     os.environ["BYBIT_API_KEY"] = api_key
     os.environ["BYBIT_API_SECRET"] = api_secret
@@ -388,12 +388,12 @@ def _load_users_config() -> dict[str, Any]:
     try:
         raw = USERS_CONFIG_FILE.read_text(encoding="utf-8")
     except Exception as exc:
-        log(f"[USERS] Не удалось прочитать {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
+        log(f"[USERS] РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
         return {"users": []}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        log(f"[USERS] Некорректный JSON в {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
+        log(f"[USERS] РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ JSON РІ {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
         return {"users": []}
     return data if isinstance(data, dict) else {"users": []}
 
@@ -403,7 +403,7 @@ def _save_users_config(config: dict[str, Any]) -> None:
         USERS_DIR.mkdir(parents=True, exist_ok=True)
         USERS_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        log(f"[USERS] Не удалось сохранить {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
+        log(f"[USERS] РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ {USERS_CONFIG_FILE}: {exc}", Fore.YELLOW)
 
 
 def _ensure_user_entry(
@@ -471,11 +471,11 @@ def _write_user_secrets(user_id: str, api_key: str, api_secret: str) -> Path:
         except Exception:
             pass
     except Exception as exc:
-        raise RuntimeError(f"Не удалось сохранить secrets.env: {exc}") from exc
+        raise RuntimeError(f"РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ secrets.env: {exc}") from exc
     public_env_path = user_dir / USERS_PUBLIC_ENV_FILE
     if not public_env_path.exists():
         try:
-            public_env_path.write_text("# Дополнительные настройки для пользователя\n", encoding="utf-8")
+            public_env_path.write_text("# Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РЅР°СЃС‚СЂРѕР№РєРё РґР»СЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ\n", encoding="utf-8")
         except Exception:
             pass
     return secrets_path
@@ -718,7 +718,7 @@ def normalize_requested_timeframe(tf_value: Any, default: str = "4h") -> str:
             return f"{value}m"
     return lowered or default
 
-# Подавляем FutureWarning от pandas
+# РџРѕРґР°РІР»СЏРµРј FutureWarning РѕС‚ pandas
 warnings.filterwarnings("ignore", category=FutureWarning)
 init(autoreset=True)
 
@@ -1144,9 +1144,9 @@ def _set_symbol_leverage(exchange, symbol: str, leverage: int, current_position:
     except Exception as e:
         code = get_bybit_retcode(e)
         if code == 110043:
-            log(f"?? Плечо {leverage_val}x уже установлено для {symbol} (код {code})", Fore.LIGHTBLACK_EX)
+            log(f"?? РџР»РµС‡Рѕ {leverage_val}x СѓР¶Рµ СѓСЃС‚Р°РЅРѕРІР»РµРЅРѕ РґР»СЏ {symbol} (РєРѕРґ {code})", Fore.LIGHTBLACK_EX)
         else:
-            log(f"?? Не удалось установить плечо {leverage_val}x для {symbol}: {e}", Fore.YELLOW)
+            log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ СѓСЃС‚Р°РЅРѕРІРёС‚СЊ РїР»РµС‡Рѕ {leverage_val}x РґР»СЏ {symbol}: {e}", Fore.YELLOW)
 
 
 
@@ -1277,7 +1277,7 @@ def _collect_news_pairs(limit: int = 40) -> set[str]:
     try:
         rss_payload = get_news_from_rss("", limit)
     except Exception as exc:
-        log(f"?? Не удалось собрать RSS-новости для расширения универсума: {exc}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР±СЂР°С‚СЊ RSS-РЅРѕРІРѕСЃС‚Рё РґР»СЏ СЂР°СЃС€РёСЂРµРЅРёСЏ СѓРЅРёРІРµСЂСЃСѓРјР°: {exc}", Fore.YELLOW)
         rss_payload = {}
     items = (rss_payload or {}).get("items") or []
     for item in items:
@@ -1378,18 +1378,18 @@ def _notify_release_event(
     thread_target: Optional[int] = TELEGRAM_RELEASE_THREAD_ID
     if thread_target is None:
         thread_target = TG_GIT_TOPIC_ID if TG_GIT_TOPIC_ID is not None else TG_TOPIC_ID
-    header = "?? Новый релиз" if event_type == "release" else "?? Новый коммит"
+    header = "?? РќРѕРІС‹Р№ СЂРµР»РёР·" if event_type == "release" else "?? РќРѕРІС‹Р№ РєРѕРјРјРёС‚"
     lines = [header]
     formatted_ts = _format_commit_timestamp(commit_timestamp) if commit_timestamp else None
     if formatted_ts:
-        lines.append(f"Дата: {formatted_ts}")
+        lines.append(f"Р”Р°С‚Р°: {formatted_ts}")
     elif commit_timestamp:
-        lines.append(f"Дата (UTC): {commit_timestamp}")
+        lines.append(f"Р”Р°С‚Р° (UTC): {commit_timestamp}")
     if commit_hash:
-        lines.append(f"Коммит: {commit_hash[:8]} ({commit_hash})")
+        lines.append(f"РљРѕРјРјРёС‚: {commit_hash[:8]} ({commit_hash})")
     if commit_message:
-        lines.append(f"Сообщение: {commit_message}")
-    lines.append(f"Версия: {BOT_VERSION}")
+        lines.append(f"РЎРѕРѕР±С‰РµРЅРёРµ: {commit_message}")
+    lines.append(f"Р’РµСЂСЃРёСЏ: {BOT_VERSION}")
     if BOT_CHANGELOG:
         lines.append("Changelog:")
         lines.append(BOT_CHANGELOG)
@@ -1441,10 +1441,10 @@ def maybe_refresh_metadata() -> dict[str, Any]:
     commit_hash_meta, commit_message_meta, commit_timestamp_meta = _resolve_commit_metadata(head)
     if version_changed:
         ensure_version_backup()
-        log(f"?? Обнаружена новая версия: {previous_version} > {BOT_VERSION}", Fore.LIGHTBLUE_EX)
+        log(f"?? РћР±РЅР°СЂСѓР¶РµРЅР° РЅРѕРІР°СЏ РІРµСЂСЃРёСЏ: {previous_version} > {BOT_VERSION}", Fore.LIGHTBLUE_EX)
         release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
         send_tg(
-            f"?? Обновлена версия до {BOT_VERSION}",
+            f"?? РћР±РЅРѕРІР»РµРЅР° РІРµСЂСЃРёСЏ РґРѕ {BOT_VERSION}",
             thread_id=release_thread,
             no_log_forward=True,
             no_prefix=True,
@@ -1452,16 +1452,16 @@ def maybe_refresh_metadata() -> dict[str, Any]:
         if head:
             _notify_release_event("release", commit_hash_meta, commit_message_meta, commit_timestamp_meta)
     elif metadata_changed:
-        log("?? Обновлён changelog без изменения версии.", Fore.LIGHTBLACK_EX)
+        log("?? РћР±РЅРѕРІР»С‘РЅ changelog Р±РµР· РёР·РјРµРЅРµРЅРёСЏ РІРµСЂСЃРёРё.", Fore.LIGHTBLACK_EX)
         release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
         send_tg(
-            "?? Обновлён changelog без изменения версии.",
+            "?? РћР±РЅРѕРІР»С‘РЅ changelog Р±РµР· РёР·РјРµРЅРµРЅРёСЏ РІРµСЂСЃРёРё.",
             thread_id=release_thread,
             no_log_forward=True,
             no_prefix=True,
         )
     elif commit_changed and previous_hash is not None:
-        log("?? Обновлена HEAD коммита без изменения changelog.", Fore.LIGHTBLACK_EX)
+        log("?? РћР±РЅРѕРІР»РµРЅР° HEAD РєРѕРјРјРёС‚Р° Р±РµР· РёР·РјРµРЅРµРЅРёСЏ changelog.", Fore.LIGHTBLACK_EX)
         if head:
             _notify_release_event("commit", commit_hash_meta, commit_message_meta, commit_timestamp_meta)
 
@@ -2201,7 +2201,7 @@ def ai_plan_trades(
         break
     if per_cap and token_estimate > per_cap:
         log(
-            f"[AI] trade plan ({stage}): не удалось ужать запрос до {per_cap} токенов",
+            f"[AI] trade plan ({stage}): РЅРµ СѓРґР°Р»РѕСЃСЊ СѓР¶Р°С‚СЊ Р·Р°РїСЂРѕСЃ РґРѕ {per_cap} С‚РѕРєРµРЅРѕРІ",
             Fore.YELLOW,
         )
         return None
@@ -2398,10 +2398,10 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         if success:
             cancelled_ids.add(oid)
             cancelled_success.append((oid, source))
-            log(f"?? —?'—?—?—?—?—? ——?——?—< {oid} {sym} (source={source})", Fore.LIGHTBLUE_EX)
+            log(f"?? вЂ”?'вЂ”?вЂ”?вЂ”?вЂ”?вЂ”? вЂ”вЂ”?вЂ”вЂ”?вЂ”< {oid} {sym} (source={source})", Fore.LIGHTBLUE_EX)
         else:
             cancel_failures.append((oid, err))
-            log(f"?? Не удалось отменить ордер {oid} {sym}: {err}", Fore.YELLOW)
+            log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РјРµРЅРёС‚СЊ РѕСЂРґРµСЂ {oid} {sym}: {err}", Fore.YELLOW)
 
     for oid in cancel_candidates:
         try_cancel(oid, "cancel_orders")
@@ -2423,7 +2423,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
 
     if cancel_failures:
         errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_failures)
-        send_tg(f"{sym}: не удалось отменить ордера: {errs}")
+        send_tg(f"{sym}: РЅРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РјРµРЅРёС‚СЊ РѕСЂРґРµСЂР°: {errs}")
 
     if replacement_orders:
         extra_orders.extend(replacement_orders)
@@ -2438,7 +2438,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
         )
         if executed:
-            send_tg(f"{sym}: —?—?—?——? выполнил:\n- " + "\n- ".join(executed))
+            send_tg(f"{sym}: вЂ”?вЂ”?вЂ”?вЂ”вЂ”? РІС‹РїРѕР»РЅРёР»:\n- " + "\n- ".join(executed))
         if actions_performed:
             positions_map, _ = fetch_positions_snapshot(exchange, symbols_filter=[sym])
             current_position = positions_map.get(sym)
@@ -3038,7 +3038,7 @@ def refresh_settings():
     parsed_tz = resolve_timezone(LOG_TIMEZONE)
     if LOG_TIMEZONE and parsed_tz is None:
         if not _LOG_TZ_WARNING_EMITTED:
-            log(f"[WARN] LOG_TIMEZONE '{LOG_TIMEZONE}' не распознан, используется системное время.", Fore.YELLOW)
+            log(f"[WARN] LOG_TIMEZONE '{LOG_TIMEZONE}' РЅРµ СЂР°СЃРїРѕР·РЅР°РЅ, РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ СЃРёСЃС‚РµРјРЅРѕРµ РІСЂРµРјСЏ.", Fore.YELLOW)
             _LOG_TZ_WARNING_EMITTED = True
         LOG_TZINFO = None
     else:
@@ -3071,7 +3071,7 @@ except (TypeError, ValueError):
 
 refresh_settings()
 
-# --- Конфигурация ---
+# --- РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ ---
 MIN_CONTEXT_30M = env_int("AI_CONTEXT_30M_MIN", 16)
 MIN_CONTEXT_4H = env_int("AI_CONTEXT_4H_MIN", 12)
 DEFAULT_CONTEXT_30M = max(MIN_CONTEXT_30M, env_int("AI_CONTEXT_30M", 40))
@@ -3197,7 +3197,7 @@ def save_universe_cache(payload: dict) -> None:
 AI_MODEL_PRIMARY = ""
 AI_MODEL_CHEAP = ""
 AI_MODEL_THRESHOLD = 5
-# --- Вспомогательные функции ---
+# --- Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё ---
 def _current_log_time():
     base = datetime.datetime.now(datetime.timezone.utc)
     if LOG_TZINFO is not None:
@@ -3320,7 +3320,7 @@ def _append_trade_log(text: str) -> None:
 def _ensure_user_bybit_log_for_all() -> None:
     """Ensure every user configured has a bybit.log file in runtime/USERID/bybit.log
 
-    This is called at startup – if missing, it creates the folder and the file.
+    This is called at startup вЂ“ if missing, it creates the folder and the file.
     """
     try:
         cfg = _load_users_config()
@@ -3605,7 +3605,7 @@ def send_tg(msg: str | Sequence[str], **extra):
                         data = response.json()
                     except Exception:
                         last_error = f"{response.status_code} {response.text}"
-                        log(f"?? Telegram: декодирование ответа не удалось — {last_error}", Fore.YELLOW)
+                        log(f"?? Telegram: РґРµРєРѕРґРёСЂРѕРІР°РЅРёРµ РѕС‚РІРµС‚Р° РЅРµ СѓРґР°Р»РѕСЃСЊ вЂ” {last_error}", Fore.YELLOW)
                     else:
                         if isinstance(data, dict) and data.get('ok'):
                             result = data.get('result') or {}
@@ -3618,7 +3618,7 @@ def send_tg(msg: str | Sequence[str], **extra):
                             last_message_id = message_id
                             break
                         last_error = data
-                        log(f"?? Telegram API ответил ошибкой: {data}", Fore.YELLOW)
+                        log(f"?? Telegram API РѕС‚РІРµС‚РёР» РѕС€РёР±РєРѕР№: {data}", Fore.YELLOW)
                         if isinstance(data, dict) and data.get('error_code') == 429:
                             retry_after = data.get('parameters', {}).get('retry_after')
                             sleep_for = float(retry_after or (TG_RETRY_BACKOFF * attempt))
@@ -3686,19 +3686,19 @@ def _pin_tg_message(chat_id: int, message_id: int) -> None:
         if not (isinstance(data, dict) and data.get("ok")):
             log(f"[WARN] pinChatMessage failed: {data}", Fore.YELLOW)
     except Exception as exc:
-        log(f"[WARN] Не удалось закрепить сообщение {message_id}: {exc}", Fore.YELLOW)
+        log(f"[WARN] РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РєСЂРµРїРёС‚СЊ СЃРѕРѕР±С‰РµРЅРёРµ {message_id}: {exc}", Fore.YELLOW)
 def _load_changelog_state() -> dict:
     try:
         raw = CHANGELOG_STATE_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
     except Exception as exc:
-        log(f"?? Не удалось прочитать состояние changelog: {exc}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ СЃРѕСЃС‚РѕСЏРЅРёРµ changelog: {exc}", Fore.YELLOW)
         return {}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log("?? Повреждён файл changelog_state.json, начинаем заново.", Fore.YELLOW)
+        log("?? РџРѕРІСЂРµР¶РґС‘РЅ С„Р°Р№Р» changelog_state.json, РЅР°С‡РёРЅР°РµРј Р·Р°РЅРѕРІРѕ.", Fore.YELLOW)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -3707,7 +3707,7 @@ def _save_changelog_state(state: dict) -> None:
     try:
         CHANGELOG_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        log(f"?? Не удалось сохранить состояние changelog: {exc}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ СЃРѕСЃС‚РѕСЏРЅРёРµ changelog: {exc}", Fore.YELLOW)
 
 
 def _load_results_state() -> dict:
@@ -3716,12 +3716,12 @@ def _load_results_state() -> dict:
     except FileNotFoundError:
         return {}
     except Exception as exc:
-        log(f"[RESULTS] Не удалось прочитать results_state.json: {exc}", Fore.YELLOW)
+        log(f"[RESULTS] РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ results_state.json: {exc}", Fore.YELLOW)
         return {}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log("[RESULTS] Файл results_state.json повреждён, начинаем заново.", Fore.YELLOW)
+        log("[RESULTS] Р¤Р°Р№Р» results_state.json РїРѕРІСЂРµР¶РґС‘РЅ, РЅР°С‡РёРЅР°РµРј Р·Р°РЅРѕРІРѕ.", Fore.YELLOW)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -3730,7 +3730,7 @@ def _save_results_state(state: dict) -> None:
     try:
         RESULTS_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        log(f"[RESULTS] Не удалось сохранить results_state.json: {exc}", Fore.YELLOW)
+        log(f"[RESULTS] РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ results_state.json: {exc}", Fore.YELLOW)
 
 
 def _results_order_key(detail: dict[str, Any]) -> str:
@@ -3957,12 +3957,12 @@ def _load_release_state() -> dict:
     except FileNotFoundError:
         return {}
     except Exception as exc:
-        log(f"[RELEASE] Не удалось прочитать release_state.json: {exc}", Fore.YELLOW)
+        log(f"[RELEASE] РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ release_state.json: {exc}", Fore.YELLOW)
         return {}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log("[RELEASE] Файл release_state.json повреждён, начинаем заново.", Fore.YELLOW)
+        log("[RELEASE] Р¤Р°Р№Р» release_state.json РїРѕРІСЂРµР¶РґС‘РЅ, РЅР°С‡РёРЅР°РµРј Р·Р°РЅРѕРІРѕ.", Fore.YELLOW)
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -3971,7 +3971,7 @@ def _save_release_state(state: dict) -> None:
     try:
         RELEASE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        log(f"[RELEASE] Не удалось сохранить release_state.json: {exc}", Fore.YELLOW)
+        log(f"[RELEASE] РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ release_state.json: {exc}", Fore.YELLOW)
 
 
 def _infer_market_category(symbol: str, market_info: dict | None) -> str | None:
@@ -4268,7 +4268,7 @@ def _summarize_positions_lines(positions_map: dict[str, Any], limit: int = 10) -
         total_unrealized += unreal
         amount_text = f"{abs(amount):.4f}"
         entry_txt = f" @ {entry_price:.4f}" if entry_price is not None and math.isfinite(entry_price) else ""
-        lines.append(f"{symbol} — {side.upper()} {amount_text}{entry_txt} (PnL {unreal:+.2f} USDT)")
+        lines.append(f"{symbol} вЂ” {side.upper()} {amount_text}{entry_txt} (PnL {unreal:+.2f} USDT)")
         if len(lines) >= limit:
             break
     overflow = max(0, len(items) - limit)
@@ -4338,9 +4338,9 @@ def start_telegram_long_polling() -> None:
 
 def _build_help_message() -> str:
     commands = TELEGRAM_COMMANDS_LIST or _default_command_payload()
-    lines = ["Команды закреплены в разделе Commands. Краткий список:"]
+    lines = ["РљРѕРјР°РЅРґС‹ Р·Р°РєСЂРµРїР»РµРЅС‹ РІ СЂР°Р·РґРµР»Рµ Commands. РљСЂР°С‚РєРёР№ СЃРїРёСЃРѕРє:"]
     for entry in commands:
-        lines.append(f"/{entry['command']} — {entry['description']}")
+        lines.append(f"/{entry['command']} вЂ” {entry['description']}")
     return "\n".join(lines)
 
 
@@ -4402,36 +4402,36 @@ def _support_context_targets() -> list[Path]:
 def _extract_support_keywords(question: str | None) -> list[str]:
     if not question:
         return []
-    tokens = re.findall(r"[A-Za-zА-Яа-я0-9_/]{3,}", question.lower())
+    tokens = re.findall(r"[A-Za-zРђ-РЇР°-СЏ0-9_/]{3,}", question.lower())
     aliases = {
-        "песочниц": "sandbox",
-        "песочницa": "sandbox",
+        "РїРµСЃРѕС‡РЅРёС†": "sandbox",
+        "РїРµСЃРѕС‡РЅРёС†a": "sandbox",
         "sandbox": "sandbox",
         "sandboxe": "sandbox",
         "model": "model",
         "modely": "model",
-        "модель": "model",
-        "модели": "model",
-        "моделях": "model",
+        "РјРѕРґРµР»СЊ": "model",
+        "РјРѕРґРµР»Рё": "model",
+        "РјРѕРґРµР»СЏС…": "model",
         "ai": "ai",
         "gpt": "gpt",
-        "логика": "logic",
-        "логике": "logic",
+        "Р»РѕРіРёРєР°": "logic",
+        "Р»РѕРіРёРєРµ": "logic",
         "logika": "logic",
         "logic": "logic",
         "strategy": "strategy",
-        "стратегия": "strategy",
-        "стратегии": "strategy",
-        "торговля": "trade",
-        "торговли": "trade",
-        "торговый": "trade",
-        "торговые": "trade",
-        "решения": "decision",
-        "решение": "decision",
+        "СЃС‚СЂР°С‚РµРіРёСЏ": "strategy",
+        "СЃС‚СЂР°С‚РµРіРёРё": "strategy",
+        "С‚РѕСЂРіРѕРІР»СЏ": "trade",
+        "С‚РѕСЂРіРѕРІР»Рё": "trade",
+        "С‚РѕСЂРіРѕРІС‹Р№": "trade",
+        "С‚РѕСЂРіРѕРІС‹Рµ": "trade",
+        "СЂРµС€РµРЅРёСЏ": "decision",
+        "СЂРµС€РµРЅРёРµ": "decision",
         "decision": "decision",
         "order": "order",
-        "ордер": "order",
-        "ордера": "order",
+        "РѕСЂРґРµСЂ": "order",
+        "РѕСЂРґРµСЂР°": "order",
     }
     keywords: list[str] = []
     seen: set[str] = set()
@@ -4492,7 +4492,7 @@ def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: O
         return
     if not AI_KEY:
         send_tg(
-            "?? Не могу ответить автоматически: отсутствует OpenAI ключ.",
+            "?? РќРµ РјРѕРіСѓ РѕС‚РІРµС‚РёС‚СЊ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё: РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ OpenAI РєР»СЋС‡.",
             thread_id=thread_id,
             reply_to_message_id=reply_to,
         )
@@ -4503,20 +4503,20 @@ def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: O
         {
             "role": "system",
             "content": (
-                "Ты — технический помощник по торговому боту ByBit. "
-                "Отвечай кратко на русском языке, опираясь на предоставленный фрагмент кода и документацию. "
-                "Если информации недостаточно, скажи, что нужно уточнение."
+                "РўС‹ вЂ” С‚РµС…РЅРёС‡РµСЃРєРёР№ РїРѕРјРѕС‰РЅРёРє РїРѕ С‚РѕСЂРіРѕРІРѕРјСѓ Р±РѕС‚Сѓ ByBit. "
+                "РћС‚РІРµС‡Р°Р№ РєСЂР°С‚РєРѕ РЅР° СЂСѓСЃСЃРєРѕРј СЏР·С‹РєРµ, РѕРїРёСЂР°СЏСЃСЊ РЅР° РїСЂРµРґРѕСЃС‚Р°РІР»РµРЅРЅС‹Р№ С„СЂР°РіРјРµРЅС‚ РєРѕРґР° Рё РґРѕРєСѓРјРµРЅС‚Р°С†РёСЋ. "
+                "Р•СЃР»Рё РёРЅС„РѕСЂРјР°С†РёРё РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ, СЃРєР°Р¶Рё, С‡С‚Рѕ РЅСѓР¶РЅРѕ СѓС‚РѕС‡РЅРµРЅРёРµ."
             ),
         },
         {
             "role": "user",
-            "content": f"Контекст:\n{context_blob}\n\nВопрос: {question}",
+            "content": f"РљРѕРЅС‚РµРєСЃС‚:\n{context_blob}\n\nР’РѕРїСЂРѕСЃ: {question}",
         },
     ]
     token_estimate = estimate_tokens(messages, support_model)
     if not _ensure_token_budget(token_estimate, support_model, "support reply"):
         send_tg(
-            "?? Лимит токенов достигнут, не могу ответить автоматически прямо сейчас.",
+            "?? Р›РёРјРёС‚ С‚РѕРєРµРЅРѕРІ РґРѕСЃС‚РёРіРЅСѓС‚, РЅРµ РјРѕРіСѓ РѕС‚РІРµС‚РёС‚СЊ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РїСЂСЏРјРѕ СЃРµР№С‡Р°СЃ.",
             thread_id=thread_id,
             reply_to_message_id=reply_to,
         )
@@ -4532,14 +4532,14 @@ def _handle_support_question(text: str, *, thread_id: Optional[int], reply_to: O
     except Exception as exc:
         log(f"[WARN] Support reply failed: {exc}", Fore.YELLOW)
         send_tg(
-            "?? Не удалось получить ответ от модели, перешлите вопрос вручную.",
+            "?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РѕС‚РІРµС‚ РѕС‚ РјРѕРґРµР»Рё, РїРµСЂРµС€Р»РёС‚Рµ РІРѕРїСЂРѕСЃ РІСЂСѓС‡РЅСѓСЋ.",
             thread_id=thread_id,
             reply_to_message_id=reply_to,
         )
         return
     answer = (response.choices[0].message.content or "").strip()
     if not answer:
-        answer = "?? Модель не дала ответа. Нужна дополнительная информация."
+        answer = "?? РњРѕРґРµР»СЊ РЅРµ РґР°Р»Р° РѕС‚РІРµС‚Р°. РќСѓР¶РЅР° РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅР°СЏ РёРЅС„РѕСЂРјР°С†РёСЏ."
     _register_ai_usage(support_model, getattr(response, "usage", None), "support reply")
     send_tg(answer, thread_id=thread_id, reply_to_message_id=reply_to)
 
@@ -4566,7 +4566,7 @@ def _save_sandbox_state(state: dict[str, Any]) -> None:
     try:
         SUPPORT_SANDBOX_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        log(f"[WARN] Не удалось сохранить состояние песочниц: {exc}", Fore.YELLOW)
+        log(f"[WARN] РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕС…СЂР°РЅРёС‚СЊ СЃРѕСЃС‚РѕСЏРЅРёРµ РїРµСЃРѕС‡РЅРёС†: {exc}", Fore.YELLOW)
 
 
 def _get_user_sandboxes(user_id: int) -> list[dict[str, Any]]:
@@ -4697,7 +4697,7 @@ def _prepare_support_sandbox(
     user_limit = 10 if promotable else 3
     current_sandboxes = _get_user_sandboxes(requester_id_int) if requester_id is not None else []
     if len(current_sandboxes) >= user_limit:
-        return None, f"достигнут лимит песочниц ({user_limit}). Удалите старые песочницы командой /sandbox delete <id>.", None
+        return None, f"РґРѕСЃС‚РёРіРЅСѓС‚ Р»РёРјРёС‚ РїРµСЃРѕС‡РЅРёС† ({user_limit}). РЈРґР°Р»РёС‚Рµ СЃС‚Р°СЂС‹Рµ РїРµСЃРѕС‡РЅРёС†С‹ РєРѕРјР°РЅРґРѕР№ /sandbox delete <id>.", None
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
     slug = re.sub(r"[^a-z0-9]+", "-", request_text.lower()).strip("-")[:24] or "request"
     sandbox_dir = SUPPORT_SANDBOX_ROOT / f"{timestamp}_{slug}"
@@ -4766,8 +4766,8 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     if not content:
         return
     lower = content.lower()
-    words_wish = ("хочу", "нужно", "сделай", "добавь", "улучши", "пусть", "надо", "please", "feature")
-    is_question = "?" in content or lower.startswith(("почему", "как", "что", "когда", "где"))
+    words_wish = ("С…РѕС‡Сѓ", "РЅСѓР¶РЅРѕ", "СЃРґРµР»Р°Р№", "РґРѕР±Р°РІСЊ", "СѓР»СѓС‡С€Рё", "РїСѓСЃС‚СЊ", "РЅР°РґРѕ", "please", "feature")
+    is_question = "?" in content or lower.startswith(("РїРѕС‡РµРјСѓ", "РєР°Рє", "С‡С‚Рѕ", "РєРѕРіРґР°", "РіРґРµ"))
     is_wish = any(trigger in lower for trigger in words_wish) or not is_question
     reply_to = message.get("message_id") if isinstance(message.get("message_id"), int) else None
     log(
@@ -4776,7 +4776,7 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     )
     if is_question and not is_wish:
         send_tg(
-            "?? Вопрос принят, формирую ответ…",
+            "?? Р’РѕРїСЂРѕСЃ РїСЂРёРЅСЏС‚, С„РѕСЂРјРёСЂСѓСЋ РѕС‚РІРµС‚вЂ¦",
             thread_id=thread_id,
             reply_to_message_id=reply_to,
         )
@@ -4786,7 +4786,7 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     requester_id = safe_int(message.get("from", {}).get("id"))
     is_owner = is_bot_owner(requester_id, current_bot_id) if requester_id is not None else False
     send_tg(
-        "?? Получил пожелание, поднимаю тестовую песочницу…",
+        "?? РџРѕР»СѓС‡РёР» РїРѕР¶РµР»Р°РЅРёРµ, РїРѕРґРЅРёРјР°СЋ С‚РµСЃС‚РѕРІСѓСЋ РїРµСЃРѕС‡РЅРёС†СѓвЂ¦",
         thread_id=thread_id,
         reply_to_message_id=reply_to,
         chat_id_override=chat_id,
@@ -4799,20 +4799,20 @@ def handle_support_message(chat_id: int, text: str, *, thread_id: Optional[int],
     )
     if sandbox_dir is None:
         send_tg(
-            f"?? Не удалось подготовить тестовое окружение: {sim_excerpt}",
+            f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРіРѕС‚РѕРІРёС‚СЊ С‚РµСЃС‚РѕРІРѕРµ РѕРєСЂСѓР¶РµРЅРёРµ: {sim_excerpt}",
             thread_id=thread_id,
             reply_to_message_id=reply_to,
         )
         return
     path_display = str(sandbox_dir).replace("`", "'")
     summary_lines = [
-        "?? Подготовлена песочница для проверки пожелания.",
-        f"Каталог: `{path_display}`",
+        "?? РџРѕРґРіРѕС‚РѕРІР»РµРЅР° РїРµСЃРѕС‡РЅРёС†Р° РґР»СЏ РїСЂРѕРІРµСЂРєРё РїРѕР¶РµР»Р°РЅРёСЏ.",
+        f"РљР°С‚Р°Р»РѕРі: `{path_display}`",
     ]
     if sandbox_id:
         summary_lines.append(f"ID: `{sandbox_id}`")
     if sim_excerpt:
-        summary_lines.append(f"Симуляция: {sim_excerpt[:200]}")
+        summary_lines.append(f"РЎРёРјСѓР»СЏС†РёСЏ: {sim_excerpt[:200]}")
     send_tg(
         summary_lines,
         thread_id=thread_id,
@@ -4828,21 +4828,21 @@ def _format_positions_message(limit: int = 10, *, live: bool = False) -> str:
         try:
             snapshot = _collect_live_status_snapshot()
         except Exception as exc:
-            log(f"[WARN] Не удалось получить live-позиции: {exc}", Fore.YELLOW)
+            log(f"[WARN] РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ live-РїРѕР·РёС†РёРё: {exc}", Fore.YELLOW)
         else:
             lines, total_unrealized, overflow = _summarize_positions_lines(snapshot.get("positions") or {}, limit)
             if not lines:
-                return "Открытых позиций нет."
-            header = ["Открытые позиции (live):"]
+                return "РћС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ РЅРµС‚."
+            header = ["РћС‚РєСЂС‹С‚С‹Рµ РїРѕР·РёС†РёРё (live):"]
             header.extend(lines)
             if overflow > 0:
-                header.append(f"… ещё {overflow}")
+                header.append(f"вЂ¦ РµС‰С‘ {overflow}")
             header.append(f"? PnL: {total_unrealized:+.2f} USDT")
             return "\n".join(header)
     positions = LATEST_STATUS.get("positions") or []
     if not positions:
-        return "Открытых позиций нет."
-    lines = ["Открытые позиции (последний цикл):"]
+        return "РћС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ РЅРµС‚."
+    lines = ["РћС‚РєСЂС‹С‚С‹Рµ РїРѕР·РёС†РёРё (РїРѕСЃР»РµРґРЅРёР№ С†РёРєР»):"]
     total_unrealized = 0.0
     for pos in positions[:limit]:
         entry_price = pos.get("entry")
@@ -4850,10 +4850,10 @@ def _format_positions_message(limit: int = 10, *, live: bool = False) -> str:
         unreal_val = safe_float(pos.get("unrealized", 0.0)) or 0.0
         total_unrealized += unreal_val
         lines.append(
-            f"{pos.get('symbol')} — {pos.get('side')} {pos.get('amount'):.4f}{entry_txt} (PnL {unreal_val:+.2f} USDT)"
+            f"{pos.get('symbol')} вЂ” {pos.get('side')} {pos.get('amount'):.4f}{entry_txt} (PnL {unreal_val:+.2f} USDT)"
         )
     if len(positions) > limit:
-        lines.append(f"… ещё {len(positions) - limit}")
+        lines.append(f"вЂ¦ РµС‰С‘ {len(positions) - limit}")
     lines.append(f"? PnL: {total_unrealized:+.2f} USDT")
     return "\n".join(lines)
 
@@ -4863,49 +4863,49 @@ def _format_status_message(live: bool = False) -> str:
         try:
             snapshot = _collect_live_status_snapshot()
         except Exception as exc:
-            log(f"[WARN] Не удалось получить live-статус: {exc}", Fore.YELLOW)
+            log(f"[WARN] РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ live-СЃС‚Р°С‚СѓСЃ: {exc}", Fore.YELLOW)
         else:
             lines = [
-                "Статус (live):",
-                f"Баланс: {snapshot.get('equity', 0.0):.2f} USDT, доступно {snapshot.get('available', 0.0):.2f} USDT",
-                f"Открытых позиций: {len(snapshot.get('positions') or [])}",
-                f"Открытых ордеров: {snapshot.get('orders_count', 0)}",
-                f"? PnL по позициям: {snapshot.get('positions_unrealized', 0.0):+.2f} USDT",
+                "РЎС‚Р°С‚СѓСЃ (live):",
+                f"Р‘Р°Р»Р°РЅСЃ: {snapshot.get('equity', 0.0):.2f} USDT, РґРѕСЃС‚СѓРїРЅРѕ {snapshot.get('available', 0.0):.2f} USDT",
+                f"РћС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№: {len(snapshot.get('positions') or [])}",
+                f"РћС‚РєСЂС‹С‚С‹С… РѕСЂРґРµСЂРѕРІ: {snapshot.get('orders_count', 0)}",
+                f"? PnL РїРѕ РїРѕР·РёС†РёСЏРј: {snapshot.get('positions_unrealized', 0.0):+.2f} USDT",
             ]
             realized = snapshot.get("realized")
             if realized is not None:
-                lines.append(f"Реализованный PnL (Bybit): {realized:+.2f} USDT")
+                lines.append(f"Р РµР°Р»РёР·РѕРІР°РЅРЅС‹Р№ PnL (Bybit): {realized:+.2f} USDT")
             return "\n".join(lines)
     if not LATEST_STATUS:
-        return "Статус пока недоступен."
+        return "РЎС‚Р°С‚СѓСЃ РїРѕРєР° РЅРµРґРѕСЃС‚СѓРїРµРЅ."
     lines = [
-        f"Цикл #{LATEST_STATUS.get('cycle', '?')} ({LATEST_STATUS.get('cycle_kind', 'normal')}/{LATEST_STATUS.get('cycle_mode', 'last')})",
+        f"Р¦РёРєР» #{LATEST_STATUS.get('cycle', '?')} ({LATEST_STATUS.get('cycle_kind', 'normal')}/{LATEST_STATUS.get('cycle_mode', 'last')})",
     ]
     if LATEST_STATUS.get("timestamp"):
-        lines.append(f"Обновлено: {LATEST_STATUS['timestamp']}")
+        lines.append(f"РћР±РЅРѕРІР»РµРЅРѕ: {LATEST_STATUS['timestamp']}")
     if LATEST_STATUS.get("equity_end") is not None:
         lines.append(
-            f"Баланс: {LATEST_STATUS.get('equity_end', 0.0):.2f} USDT, доступно {LATEST_STATUS.get('available_end', 0.0):.2f} USDT"
+            f"Р‘Р°Р»Р°РЅСЃ: {LATEST_STATUS.get('equity_end', 0.0):.2f} USDT, РґРѕСЃС‚СѓРїРЅРѕ {LATEST_STATUS.get('available_end', 0.0):.2f} USDT"
         )
     elif LATEST_STATUS.get("equity_start") is not None:
         lines.append(
-            f"Баланс: {LATEST_STATUS.get('equity_start', 0.0):.2f} USDT, доступно {LATEST_STATUS.get('available_start', 0.0):.2f} USDT"
+            f"Р‘Р°Р»Р°РЅСЃ: {LATEST_STATUS.get('equity_start', 0.0):.2f} USDT, РґРѕСЃС‚СѓРїРЅРѕ {LATEST_STATUS.get('available_start', 0.0):.2f} USDT"
         )
     if LATEST_STATUS.get("closed_pnl") is not None:
         lines.append(f"PnL (6h closed): {LATEST_STATUS['closed_pnl']:+.2f} USDT")
     if LATEST_STATUS.get("unrealized") is not None:
         lines.append(f"PnL (open unrealized): {LATEST_STATUS['unrealized']:+.2f} USDT")
-    lines.append(f"Открытых позиций: {len(LATEST_STATUS.get('positions') or [])}")
+    lines.append(f"РћС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№: {len(LATEST_STATUS.get('positions') or [])}")
     return "\n".join(lines)
 
 
 def _format_risk_message() -> str:
     return (
-        "Риск-профиль:\n"
-        f"Базовый риск: {RISK_PCT:.4f}\n"
-        f"Текущий риск: {CURRENT_RISK_PCT:.4f}\n"
-        f"Диапазон: {MIN_DYNAMIC_RISK_PCT:.4f} – {MAX_DYNAMIC_RISK_PCT:.4f}\n"
-        f"Плечо (env): {LEVERAGE}x"
+        "Р РёСЃРє-РїСЂРѕС„РёР»СЊ:\n"
+        f"Р‘Р°Р·РѕРІС‹Р№ СЂРёСЃРє: {RISK_PCT:.4f}\n"
+        f"РўРµРєСѓС‰РёР№ СЂРёСЃРє: {CURRENT_RISK_PCT:.4f}\n"
+        f"Р”РёР°РїР°Р·РѕРЅ: {MIN_DYNAMIC_RISK_PCT:.4f} вЂ“ {MAX_DYNAMIC_RISK_PCT:.4f}\n"
+        f"РџР»РµС‡Рѕ (env): {LEVERAGE}x"
     )
 
 
@@ -4915,8 +4915,8 @@ def _format_log_history_message(lines: int = 12) -> str:
 
 def _render_log_block(records: Sequence[str], header: str | None = None) -> str:
     if not records:
-        return "Логов пока нет."
-    title = header or f"Последние {len(records)} записей лога:"
+        return "Р›РѕРіРѕРІ РїРѕРєР° РЅРµС‚."
+    title = header or f"РџРѕСЃР»РµРґРЅРёРµ {len(records)} Р·Р°РїРёСЃРµР№ Р»РѕРіР°:"
     body = "\n".join(records)
     return f"{title}\n```\n{body}\n```"
 
@@ -4972,7 +4972,7 @@ def _filter_log_history(*, symbol: str | None = None, minutes: int | None = None
 
 def _handle_logs_command(args: list[str]) -> str:
     if not _LOG_HISTORY:
-        return "Логов пока нет."
+        return "Р›РѕРіРѕРІ РїРѕРєР° РЅРµС‚."
     symbol = None
     minutes: int | None = None
     count = 20
@@ -5019,14 +5019,14 @@ def _handle_logs_command(args: list[str]) -> str:
     count = max(5, min(200, count))
     filtered = _filter_log_history(symbol=symbol, minutes=minutes, limit=count)
     if not filtered:
-        detail = f" по {symbol}" if symbol else ""
-        return f"Нет логов за указанный интервал{detail}."
+        detail = f" РїРѕ {symbol}" if symbol else ""
+        return f"РќРµС‚ Р»РѕРіРѕРІ Р·Р° СѓРєР°Р·Р°РЅРЅС‹Р№ РёРЅС‚РµСЂРІР°Р»{detail}."
     if symbol and minutes:
-        header = f"Логи для {symbol.upper()} за последние {minutes} мин ({len(filtered)} записей)"
+        header = f"Р›РѕРіРё РґР»СЏ {symbol.upper()} Р·Р° РїРѕСЃР»РµРґРЅРёРµ {minutes} РјРёРЅ ({len(filtered)} Р·Р°РїРёСЃРµР№)"
     elif symbol:
-        header = f"Логи для {symbol.upper()} ({len(filtered)} записей)"
+        header = f"Р›РѕРіРё РґР»СЏ {symbol.upper()} ({len(filtered)} Р·Р°РїРёСЃРµР№)"
     elif minutes:
-        header = f"Логи за последние {minutes} мин ({len(filtered)} записей)"
+        header = f"Р›РѕРіРё Р·Р° РїРѕСЃР»РµРґРЅРёРµ {minutes} РјРёРЅ ({len(filtered)} Р·Р°РїРёСЃРµР№)"
     else:
         header = None
     return _render_log_block(filtered, header)
@@ -5048,7 +5048,7 @@ def _read_runtime_status() -> dict[str, Any]:
 
 def _format_local_dt(value: datetime.datetime | None) -> str:
     if not value:
-        return "не запланировано"
+        return "РЅРµ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅРѕ"
     try:
         local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
         local_dt = value.astimezone(local_tz)
@@ -5061,33 +5061,33 @@ def _format_schedule_overview() -> str:
     status = _read_runtime_status()
     lines = []
     if status:
-        lines.append(f"Текущий статус: {status.get('status', 'unknown')}")
+        lines.append(f"РўРµРєСѓС‰РёР№ СЃС‚Р°С‚СѓСЃ: {status.get('status', 'unknown')}")
         next_local = status.get("next_run_local")
         next_utc = status.get("next_run_utc")
         if next_local:
-            lines.append(f"Следующий запуск: {next_local}")
+            lines.append(f"РЎР»РµРґСѓСЋС‰РёР№ Р·Р°РїСѓСЃРє: {next_local}")
         elif next_utc:
-            lines.append(f"Следующий запуск (UTC): {next_utc}")
+            lines.append(f"РЎР»РµРґСѓСЋС‰РёР№ Р·Р°РїСѓСЃРє (UTC): {next_utc}")
         else:
-            lines.append("Следующий запуск: не запланирован.")
+            lines.append("РЎР»РµРґСѓСЋС‰РёР№ Р·Р°РїСѓСЃРє: РЅРµ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅ.")
         if status.get("next_run_minutes") is not None:
-            lines.append(f"Оставшееся время (мин): {status['next_run_minutes']}")
+            lines.append(f"РћСЃС‚Р°РІС€РµРµСЃСЏ РІСЂРµРјСЏ (РјРёРЅ): {status['next_run_minutes']}")
     else:
-        lines.append("Статус цикла недоступен.")
+        lines.append("РЎС‚Р°С‚СѓСЃ С†РёРєР»Р° РЅРµРґРѕСЃС‚СѓРїРµРЅ.")
     with _SCHEDULE_OVERRIDE_LOCK:
         override = dict(_SCHEDULE_OVERRIDE) if _SCHEDULE_OVERRIDE else None
     if override:
         target_dt = override.get("target")
         delay = override.get("delay")
-        origin = override.get("note") or "ручное"
+        origin = override.get("note") or "СЂСѓС‡РЅРѕРµ"
         lines.append(
-            "Ручное расписание: "
-            f"{_format_local_dt(target_dt)} (~{delay:.1f} мин), источник: {origin}"
+            "Р СѓС‡РЅРѕРµ СЂР°СЃРїРёСЃР°РЅРёРµ: "
+            f"{_format_local_dt(target_dt)} (~{delay:.1f} РјРёРЅ), РёСЃС‚РѕС‡РЅРёРє: {origin}"
         )
     else:
-        lines.append("Ручное расписание не активно.")
+        lines.append("Р СѓС‡РЅРѕРµ СЂР°СЃРїРёСЃР°РЅРёРµ РЅРµ Р°РєС‚РёРІРЅРѕ.")
     lines.append("")
-    lines.append("Команды: /schedule now, /schedule in 30, /schedule at 23:15, /schedule cancel")
+    lines.append("РљРѕРјР°РЅРґС‹: /schedule now, /schedule in 30, /schedule at 23:15, /schedule cancel")
     return "\n".join(lines)
 
 
@@ -5108,7 +5108,7 @@ def _parse_schedule_datetime(expression: str) -> Optional[datetime.datetime]:
     expr = expression.strip()
     if not expr:
         return None
-    if expr.lower() in {"now", "сейчас"}:
+    if expr.lower() in {"now", "СЃРµР№С‡Р°СЃ"}:
         return datetime.datetime.now(datetime.timezone.utc)
     if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", expr):
         local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
@@ -5162,8 +5162,8 @@ def _set_manual_schedule(
     _SCHEDULE_EVENT.set()
     _write_runtime_status(delay, target, "scheduled")
     if delay <= 0.01:
-        return "? Следующая сессия будет запущена немедленно."
-    return f"? Следующая сессия запланирована через {delay:.1f} мин ({_format_local_dt(target)})."
+        return "? РЎР»РµРґСѓСЋС‰Р°СЏ СЃРµСЃСЃРёСЏ Р±СѓРґРµС‚ Р·Р°РїСѓС‰РµРЅР° РЅРµРјРµРґР»РµРЅРЅРѕ."
+    return f"? РЎР»РµРґСѓСЋС‰Р°СЏ СЃРµСЃСЃРёСЏ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅР° С‡РµСЂРµР· {delay:.1f} РјРёРЅ ({_format_local_dt(target)})."
 
 
 def _clear_manual_schedule() -> str:
@@ -5174,8 +5174,8 @@ def _clear_manual_schedule() -> str:
     _SCHEDULE_EVENT.set()
     _write_runtime_status(None, None, "running")
     if had_override:
-        return "? Ручное расписание отменено, возвращаемся к автоматическому режиму."
-    return "? Ручное расписание не активно."
+        return "? Р СѓС‡РЅРѕРµ СЂР°СЃРїРёСЃР°РЅРёРµ РѕС‚РјРµРЅРµРЅРѕ, РІРѕР·РІСЂР°С‰Р°РµРјСЃСЏ Рє Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРѕРјСѓ СЂРµР¶РёРјСѓ."
+    return "? Р СѓС‡РЅРѕРµ СЂР°СЃРїРёСЃР°РЅРёРµ РЅРµ Р°РєС‚РёРІРЅРѕ."
 
 
 def _consume_schedule_override(default_delay: Optional[float]) -> tuple[float, Optional[datetime.datetime], bool]:
@@ -5248,13 +5248,13 @@ def _format_token_usage_message() -> str:
     hard_stop = AI_HARD_STOP_BUDGET or 0
     secondary = AI_SECONDARY_BUDGET_START or 0
     lines = [
-        f"Использовано токенов: {AI_TOKEN_USAGE_TOTAL}",
-        f"Лимит цикла: {AI_TOKEN_BUDGET_CYCLE}",
-        f"Порог дешёвой модели: {secondary if secondary else 'отключён'}",
-        f"Жёсткий стоп: {hard_stop if hard_stop else 'отключён'}",
+        f"РСЃРїРѕР»СЊР·РѕРІР°РЅРѕ С‚РѕРєРµРЅРѕРІ: {AI_TOKEN_USAGE_TOTAL}",
+        f"Р›РёРјРёС‚ С†РёРєР»Р°: {AI_TOKEN_BUDGET_CYCLE}",
+        f"РџРѕСЂРѕРі РґРµС€С‘РІРѕР№ РјРѕРґРµР»Рё: {secondary if secondary else 'РѕС‚РєР»СЋС‡С‘РЅ'}",
+        f"Р–С‘СЃС‚РєРёР№ СЃС‚РѕРї: {hard_stop if hard_stop else 'РѕС‚РєР»СЋС‡С‘РЅ'}",
     ]
     if AI_TOKEN_USAGE_BY_MODEL:
-        lines.append("Статистика по моделям:")
+        lines.append("РЎС‚Р°С‚РёСЃС‚РёРєР° РїРѕ РјРѕРґРµР»СЏРј:")
         for model, stats in sorted(AI_TOKEN_USAGE_BY_MODEL.items()):
             prompt = stats.get("prompt", 0)
             completion = stats.get("completion", 0)
@@ -5271,15 +5271,15 @@ def _handle_schedule_command(args: list[str]) -> str:
         return _clear_manual_schedule()
     if first in {"now", "run", "start"}:
         return _set_manual_schedule(delay_minutes=0.0, target_dt=None, note="manual")
-    if first in {"in", "через"} and len(args) > 1:
+    if first in {"in", "С‡РµСЂРµР·"} and len(args) > 1:
         minutes = _parse_minutes_argument(args[1])
         if minutes is None:
-            return "? Не удалось разобрать интервал. Пример: /schedule in 45"
+            return "? РќРµ СѓРґР°Р»РѕСЃСЊ СЂР°Р·РѕР±СЂР°С‚СЊ РёРЅС‚РµСЂРІР°Р». РџСЂРёРјРµСЂ: /schedule in 45"
         return _set_manual_schedule(delay_minutes=minutes, target_dt=None, note="manual")
-    if first in {"at", "в"} and len(args) > 1:
+    if first in {"at", "РІ"} and len(args) > 1:
         target = _parse_schedule_datetime(" ".join(args[1:]))
         if target is None:
-            return "? Не удалось разобрать время запуска. Пример: /schedule at 23:15"
+            return "? РќРµ СѓРґР°Р»РѕСЃСЊ СЂР°Р·РѕР±СЂР°С‚СЊ РІСЂРµРјСЏ Р·Р°РїСѓСЃРєР°. РџСЂРёРјРµСЂ: /schedule at 23:15"
         return _set_manual_schedule(delay_minutes=None, target_dt=target, note="manual")
     minutes = _parse_minutes_argument(args[0])
     if minutes is not None:
@@ -5288,7 +5288,7 @@ def _handle_schedule_command(args: list[str]) -> str:
     if target is not None:
         return _set_manual_schedule(delay_minutes=None, target_dt=target, note="manual")
     return (
-        "? Использование: /schedule 30 (в минутах), "
+        "? РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /schedule 30 (РІ РјРёРЅСѓС‚Р°С…), "
         "/schedule at 23:15, /schedule 2025-01-01 12:00, "
         "/schedule cancel"
     )
@@ -5296,12 +5296,12 @@ def _handle_schedule_command(args: list[str]) -> str:
 
 def _handle_ai_command(args: list[str]) -> str:
     if not args:
-        return "?? ????????? подкоманду. Пример: /ai payload [universe|trade]"
+        return "?? ????????? РїРѕРґРєРѕРјР°РЅРґСѓ. РџСЂРёРјРµСЂ: /ai payload [universe|trade]"
     sub = args[0].lower()
     if sub == "payload":
         context_hint = args[1] if len(args) > 1 else None
         return _format_ai_payload(context_hint)
-    return "?? Неизвестная подкоманда /ai. Доступно: payload"
+    return "?? РќРµРёР·РІРµСЃС‚РЅР°СЏ РїРѕРґРєРѕРјР°РЅРґР° /ai. Р”РѕСЃС‚СѓРїРЅРѕ: payload"
 
 
 
@@ -5346,7 +5346,7 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
     elif command in {"bybitkey", "bybit"}:
         dm_context = user_id is not None and chat_id == user_id
         if not (is_bot_owner(user_id, USER_ID) or dm_context):
-            reply = "?? Команда /bybitkey доступна только владельцу процесса или в личном чате после /adduser."
+            reply = "?? РљРѕРјР°РЅРґР° /bybitkey РґРѕСЃС‚СѓРїРЅР° С‚РѕР»СЊРєРѕ РІР»Р°РґРµР»СЊС†Сѓ РїСЂРѕС†РµСЃСЃР° РёР»Рё РІ Р»РёС‡РЅРѕРј С‡Р°С‚Рµ РїРѕСЃР»Рµ /adduser."
         else:
             reply = _handle_bybit_key_command(args)
     elif command == "adduser":
@@ -5362,11 +5362,11 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         if reply is None:
             return
     elif command == "version":
-        reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
+        reply = f"Р’РµСЂСЃРёСЏ {BOT_VERSION}\n{BOT_CHANGELOG}"
     elif command == "ai":
         reply = _handle_ai_command(args)
     else:
-        reply = "Неизвестная команда. Используйте /help."
+        reply = "РќРµРёР·РІРµСЃС‚РЅР°СЏ РєРѕРјР°РЅРґР°. РСЃРїРѕР»СЊР·СѓР№С‚Рµ /help."
     send_tg(
         reply,
         chat_id_override=chat_id,
@@ -5409,7 +5409,7 @@ def ensure_changelog_announcement() -> dict:
     ):
         return state
 
-    lines = [f"?? Версия {BOT_VERSION}"]
+    lines = [f"?? Р’РµСЂСЃРёСЏ {BOT_VERSION}"]
     if BOT_CHANGELOG:
         lines.append(BOT_CHANGELOG)
     message_text = "\n".join(lines)
@@ -5517,7 +5517,7 @@ def _restart_with_latest_code(reason: str) -> None:
     try:
         os.execv(python_exec, args)
     except Exception as exc:
-        err_msg = f"?? Не удалось перезапустить процесс автоматически: {exc}"
+        err_msg = f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚СЊ РїСЂРѕС†РµСЃСЃ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё: {exc}"
         log(err_msg, Fore.RED)
         send_tg(err_msg)
         raise
@@ -5528,7 +5528,7 @@ def save_json_line(path, data):
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
     except Exception as e:
-        log(f"?? Ошибка записи в {path}: {e}", Fore.YELLOW)
+        log(f"?? РћС€РёР±РєР° Р·Р°РїРёСЃРё РІ {path}: {e}", Fore.YELLOW)
 
 def extract_position_amount(position) -> float:
     candidates = [
@@ -5583,7 +5583,7 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     try:
         positions = exchange.fetch_positions()
     except Exception as e:
-        log(f"?? Не удалось получить список позиций: {e}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ СЃРїРёСЃРѕРє РїРѕР·РёС†РёР№: {e}", Fore.YELLOW)
         return {}, None
     count = 0
     simplified = {}
@@ -5664,7 +5664,7 @@ def fetch_open_orders_for_symbol(exchange, symbol, limit: int | None = 50):
     try:
         raw_orders = exchange.fetch_open_orders(resolved_symbol)
     except Exception as e:
-        log(f"?? Не удалось получить открытые ордера для {symbol}: {e}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РѕС‚РєСЂС‹С‚С‹Рµ РѕСЂРґРµСЂР° РґР»СЏ {symbol}: {e}", Fore.YELLOW)
         return []
     simplified = []
     for order in raw_orders:
@@ -5705,7 +5705,7 @@ def cancel_order_by_id(exchange, symbol, order_id: str):
         exchange.cancel_order(order_id, resolved_symbol)
         return True, None
     except TypeError as e:
-        # Some exchange adapters may choke on None params or unexpected types —
+        # Some exchange adapters may choke on None params or unexpected types вЂ”
         # try a safe fallback with empty params and capture both errors.
         try:
             exchange.cancel_order(order_id, resolved_symbol, {})
@@ -5885,7 +5885,7 @@ def estimate_tokens(messages, model) -> int:
     # Fallback: rough estimate 4 chars per token
     return max(1, math.ceil(len(payload) / 4))
 
-# --- Индикаторы ---
+# --- РРЅРґРёРєР°С‚РѕСЂС‹ ---
 def ema(series, n): return series.ewm(span=n, adjust=False).mean()
 def rsi(series, n=14):
     delta = series.diff()
@@ -5902,7 +5902,7 @@ def atr(df, n=14):
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1/n, adjust=False).mean()
 
-# --- Получение контекста ---
+# --- РџРѕР»СѓС‡РµРЅРёРµ РєРѕРЅС‚РµРєСЃС‚Р° ---
 def get_higher_tf(exchange, symbol, tf="4h", limit=120):
     resolved_symbol = _resolve_symbol_alias(symbol) or symbol
     try:
@@ -5915,7 +5915,7 @@ def get_higher_tf(exchange, symbol, tf="4h", limit=120):
         df["rsi"] = rsi(df["close"],14)
         return df.tail(60).to_dict(orient="records")
     except Exception as e:
-        log(f"?? Не удалось получить higher_tf {tf}: {e}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ higher_tf {tf}: {e}", Fore.YELLOW)
         return []
 
 def get_funding_rate(exchange, symbol):
@@ -5943,11 +5943,11 @@ def get_funding_rate(exchange, symbol):
             index_price = fr.get("indexPrice")
             summary_parts = []
             if funding_rate is not None:
-                summary_parts.append(f"текущая ставка {funding_rate*100:.4f}%")
+                summary_parts.append(f"С‚РµРєСѓС‰Р°СЏ СЃС‚Р°РІРєР° {funding_rate*100:.4f}%")
             if next_time:
-                summary_parts.append(f"след. выплата {next_time}")
+                summary_parts.append(f"СЃР»РµРґ. РІС‹РїР»Р°С‚Р° {next_time}")
             if not summary_parts:
-                summary_parts.append("данные получены, ставка отсутствует")
+                summary_parts.append("РґР°РЅРЅС‹Рµ РїРѕР»СѓС‡РµРЅС‹, СЃС‚Р°РІРєР° РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚")
             return {
                 "source": "fetchFundingRate",
                 "fundingRate": funding_rate,
@@ -5969,11 +5969,11 @@ def get_funding_rate(exchange, symbol):
                     rate = None
                 ts_iso = to_iso_utc(fr.get("timestamp") or fr.get("datetime"))
                 summary = (
-                    f"последняя ставка {rate*100:.4f}% на {ts_iso}"
+                    f"РїРѕСЃР»РµРґРЅСЏСЏ СЃС‚Р°РІРєР° {rate*100:.4f}% РЅР° {ts_iso}"
                     if rate is not None and ts_iso else
-                    f"последняя ставка {rate*100:.4f}%"
+                    f"РїРѕСЃР»РµРґРЅСЏСЏ СЃС‚Р°РІРєР° {rate*100:.4f}%"
                     if rate is not None else
-                    f"в истории найдена запись на {ts_iso}" if ts_iso else "история получена"
+                    f"РІ РёСЃС‚РѕСЂРёРё РЅР°Р№РґРµРЅР° Р·Р°РїРёСЃСЊ РЅР° {ts_iso}" if ts_iso else "РёСЃС‚РѕСЂРёСЏ РїРѕР»СѓС‡РµРЅР°"
                 )
                 return {
                     "source": "fetchFundingRateHistory",
@@ -5983,7 +5983,7 @@ def get_funding_rate(exchange, symbol):
                     "summary": summary
                 }
     except Exception as e:
-        log(f"?? Funding rate недоступен: {e}", Fore.YELLOW)
+        log(f"?? Funding rate РЅРµРґРѕСЃС‚СѓРїРµРЅ: {e}", Fore.YELLOW)
     return {}
 
 def get_open_interest(exchange, symbol):
@@ -6015,7 +6015,7 @@ def get_open_interest(exchange, symbol):
                     cleaned.append(row)
             return cleaned
     except Exception as e:
-        log(f"?? Open interest недоступен: {e}", Fore.YELLOW)
+        log(f"?? Open interest РЅРµРґРѕСЃС‚СѓРїРµРЅ: {e}", Fore.YELLOW)
     return []
 
 
@@ -6078,9 +6078,9 @@ def _spot_funds_sufficient(exchange, symbol: str, side: str, amount: float | Non
 
 def get_news_from_rss(base_symbol: str, limit: int):
     if not RSS_FEEDS:
-        return {"summary": "RSS источники не настроены", "items": []}
+        return {"summary": "RSS РёСЃС‚РѕС‡РЅРёРєРё РЅРµ РЅР°СЃС‚СЂРѕРµРЅС‹", "items": []}
     if feedparser is None:
-        return {"summary": "feedparser не установлен", "items": []}
+        return {"summary": "feedparser РЅРµ СѓСЃС‚Р°РЅРѕРІР»РµРЅ", "items": []}
     base_upper = (base_symbol or "").upper()
     symbol_articles = []
     general_articles = []
@@ -6088,7 +6088,7 @@ def get_news_from_rss(base_symbol: str, limit: int):
         try:
             feed = feedparser.parse(url)
         except Exception as e:
-            log(f"?? RSS источник недоступен ({url}): {e}", Fore.YELLOW)
+            log(f"?? RSS РёСЃС‚РѕС‡РЅРёРє РЅРµРґРѕСЃС‚СѓРїРµРЅ ({url}): {e}", Fore.YELLOW)
             continue
         for entry in feed.entries[:10]:
             title = entry.get("title", "")
@@ -6116,11 +6116,11 @@ def get_news_from_rss(base_symbol: str, limit: int):
             break
     if symbol_articles:
         selected = symbol_articles[:limit]
-        summary = f"RSS {len(selected)} записей по {base_upper}"
+        summary = f"RSS {len(selected)} Р·Р°РїРёСЃРµР№ РїРѕ {base_upper}"
     else:
         selected = general_articles[:limit]
         summary = (
-            f"RSS {len(selected)} общих новостей" if selected else "новости не найдены (RSS)"
+            f"RSS {len(selected)} РѕР±С‰РёС… РЅРѕРІРѕСЃС‚РµР№" if selected else "РЅРѕРІРѕСЃС‚Рё РЅРµ РЅР°Р№РґРµРЅС‹ (RSS)"
         )
     return {"summary": summary, "items": selected, "asset": base_upper, "source": "rss"}
 
@@ -6233,7 +6233,7 @@ def get_news(symbol):
         return payloads[0]
     return _merge_news_payloads(base, payloads, limit)
 
-# --- Подключение к бирже ---
+# --- РџРѕРґРєР»СЋС‡РµРЅРёРµ Рє Р±РёСЂР¶Рµ ---
 def init_exchange():
     api_key = os.getenv("BYBIT_API_KEY")
     api_secret = os.getenv("BYBIT_API_SECRET")
@@ -6244,8 +6244,8 @@ def init_exchange():
             api_secret = api_secret or stored_secret
     if not api_key or not api_secret:
         raise RuntimeError(
-            "Требуется указать BYBIT_API_KEY и BYBIT_API_SECRET. "
-            "Используйте /bybitkey <apiKey> <apiSecret> или добавьте их в users/<id>/secrets.env."
+            "РўСЂРµР±СѓРµС‚СЃСЏ СѓРєР°Р·Р°С‚СЊ BYBIT_API_KEY Рё BYBIT_API_SECRET. "
+            "РСЃРїРѕР»СЊР·СѓР№С‚Рµ /bybitkey <apiKey> <apiSecret> РёР»Рё РґРѕР±Р°РІСЊС‚Рµ РёС… РІ users/<id>/secrets.env."
         )
     exchange = ccxt.bybit({
         "apiKey": api_key,
@@ -6308,7 +6308,7 @@ def _init_exchange_enhanced() -> Any:
     try:
         _enable_exchange_logging(exchange)
     except Exception as exc:
-        log(f"[WARN] Не удалось включить расширенное логирование ордеров: {exc}", Fore.YELLOW)
+        log(f"[WARN] РќРµ СѓРґР°Р»РѕСЃСЊ РІРєР»СЋС‡РёС‚СЊ СЂР°СЃС€РёСЂРµРЅРЅРѕРµ Р»РѕРіРёСЂРѕРІР°РЅРёРµ РѕСЂРґРµСЂРѕРІ: {exc}", Fore.YELLOW)
     return exchange
 
 # Replace default init_exchange with enhanced version
@@ -7246,7 +7246,7 @@ def fetch_usdt_equity(exchange):
     try:
         balance = exchange.fetch_balance()
     except Exception as e:
-        log(f"?? Не удалось получить баланс: {e}", Fore.YELLOW)
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ Р±Р°Р»Р°РЅСЃ: {e}", Fore.YELLOW)
         return 0.0, 0.0, {}
     usdt = balance.get("USDT") or balance.get("USDT:USDT") or {}
 
@@ -7312,7 +7312,7 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
     }
 
     if not hasattr(exchange, "privateGetV5AssetTransferQueryInterTransferList"):
-        summary["warnings"].append("[STATUS] Endpoint inter-transfer list недоступен; операции Unified-Funding не будут показаны.")
+        summary["warnings"].append("[STATUS] Endpoint inter-transfer list РЅРµРґРѕСЃС‚СѓРїРµРЅ; РѕРїРµСЂР°С†РёРё Unified-Funding РЅРµ Р±СѓРґСѓС‚ РїРѕРєР°Р·Р°РЅС‹.")
         return summary
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -7358,7 +7358,7 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
         rows = ((((resp or {}).get("result") or {}).get("list")) or [])
     except Exception as exc:
         rows = []
-        summary["warnings"].append(f"[STATUS] Не удалось получить внутренние переводы: {exc}")
+        summary["warnings"].append(f"[STATUS] РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РІРЅСѓС‚СЂРµРЅРЅРёРµ РїРµСЂРµРІРѕРґС‹: {exc}")
     for row in rows:
         amount = safe_float(row.get("amount") or row.get("qty"))
         if amount is None or amount <= 0:
@@ -7511,9 +7511,9 @@ def _init_ai_cycle_usage() -> None:
 def _log_ai_request(model: str, estimate: int, context: str) -> None:
     budget = AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE
     cap = _current_request_token_cap()
-    cap_text = f", кап {cap}" if cap else ""
+    cap_text = f", РєР°Рї {cap}" if cap else ""
     log(
-        f"[AI] {context}: модель {model}, оценка {estimate} токенов (использовано {AI_TOKEN_USAGE_TOTAL}/{budget}{cap_text})",
+        f"[AI] {context}: РјРѕРґРµР»СЊ {model}, РѕС†РµРЅРєР° {estimate} С‚РѕРєРµРЅРѕРІ (РёСЃРїРѕР»СЊР·РѕРІР°РЅРѕ {AI_TOKEN_USAGE_TOTAL}/{budget}{cap_text})",
         Fore.LIGHTBLACK_EX,
     )
 
@@ -7522,14 +7522,14 @@ def _ensure_token_budget(estimate: int, model: str, context: str) -> bool:
     hard_stop = AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE
     if hard_stop and AI_TOKEN_USAGE_TOTAL >= hard_stop:
         log(
-            f"[AI] Пропуск {context}: достигнут жёсткий предел {hard_stop} токенов",
+            f"[AI] РџСЂРѕРїСѓСЃРє {context}: РґРѕСЃС‚РёРіРЅСѓС‚ Р¶С‘СЃС‚РєРёР№ РїСЂРµРґРµР» {hard_stop} С‚РѕРєРµРЅРѕРІ",
             Fore.YELLOW,
         )
         return False
     projected_total = AI_TOKEN_USAGE_TOTAL + (estimate or 0)
     if hard_stop and projected_total > hard_stop:
         log(
-            f"[AI] Пропуск {context}: запрос превысит предел {hard_stop} токенов (будет {projected_total})",
+            f"[AI] РџСЂРѕРїСѓСЃРє {context}: Р·Р°РїСЂРѕСЃ РїСЂРµРІС‹СЃРёС‚ РїСЂРµРґРµР» {hard_stop} С‚РѕРєРµРЅРѕРІ (Р±СѓРґРµС‚ {projected_total})",
             Fore.YELLOW,
         )
         return False
@@ -7556,12 +7556,12 @@ def _register_ai_usage(model: str, usage: Any, context: str) -> None:
     stats["requests"] += 1
     log(
         f"[AI] {context}: {model} prompt={prompt_tokens} completion={completion_tokens} total={total_tokens} "
-        f"(цикл {AI_TOKEN_USAGE_TOTAL}/{AI_TOKEN_BUDGET_CYCLE})",
+        f"(С†РёРєР» {AI_TOKEN_USAGE_TOTAL}/{AI_TOKEN_BUDGET_CYCLE})",
         Fore.LIGHTBLACK_EX,
     )
     if AI_TOKEN_BUDGET_CYCLE and AI_TOKEN_USAGE_TOTAL > AI_TOKEN_BUDGET_CYCLE:
         log(
-            f"[AI] Внимание: превышен лимит токенов {AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE} (использовано {AI_TOKEN_USAGE_TOTAL})",
+            f"[AI] Р’РЅРёРјР°РЅРёРµ: РїСЂРµРІС‹С€РµРЅ Р»РёРјРёС‚ С‚РѕРєРµРЅРѕРІ {AI_HARD_STOP_BUDGET or AI_TOKEN_BUDGET_CYCLE} (РёСЃРїРѕР»СЊР·РѕРІР°РЅРѕ {AI_TOKEN_USAGE_TOTAL})",
             Fore.YELLOW,
         )
     _maybe_switch_model_after_usage()
@@ -7684,7 +7684,7 @@ def _enable_exchange_logging(exchange: Any) -> Any:
                 # Defensive: some exchange adapters raise TypeError on unexpected param shapes.
                 # Retry with empty params to see if that helps, and log traceback for debugging.
                 tb = traceback.format_exc()
-                log(f"[EX] cancel TypeError {symbol or '?'} #{order_id}: {exc} — retrying with empty params", Fore.YELLOW)
+                log(f"[EX] cancel TypeError {symbol or '?'} #{order_id}: {exc} вЂ” retrying with empty params", Fore.YELLOW)
                 log(tb, Fore.LIGHTBLACK_EX)
                 try:
                     result = original_cancel_order(order_id, symbol, {})
@@ -7733,16 +7733,16 @@ def _format_ai_payload(context_hint: Optional[str] = None) -> str:
                 entry.get("label") or ctx
                 for ctx, entry in sorted(AI_LAST_EXCHANGE.items())
             )
-            return f"?? ?????? AI payload '{context_hint}'. Доступно: {options}"
-        return "?? Пока нет сохранённых AI-запросов — дождитесь следующего вызова модели."
+            return f"?? ?????? AI payload '{context_hint}'. Р”РѕСЃС‚СѓРїРЅРѕ: {options}"
+        return "?? РџРѕРєР° РЅРµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅС‹С… AI-Р·Р°РїСЂРѕСЃРѕРІ вЂ” РґРѕР¶РґРёС‚РµСЃСЊ СЃР»РµРґСѓСЋС‰РµРіРѕ РІС‹Р·РѕРІР° РјРѕРґРµР»Рё."
     label = entry.get("label") or key or "payload"
     lines = [
-        f"[AI] Последний запрос ({label})",
-        f"- Время: {entry.get('captured_at') or 'n/a'}",
-        f"- Модель: {entry.get('model') or 'n/a'}",
+        f"[AI] РџРѕСЃР»РµРґРЅРёР№ Р·Р°РїСЂРѕСЃ ({label})",
+        f"- Р’СЂРµРјСЏ: {entry.get('captured_at') or 'n/a'}",
+        f"- РњРѕРґРµР»СЊ: {entry.get('model') or 'n/a'}",
     ]
     if entry.get("token_estimate") is not None:
-        lines.append(f"- Оценка токенов: {entry['token_estimate']}")
+        lines.append(f"- РћС†РµРЅРєР° С‚РѕРєРµРЅРѕРІ: {entry['token_estimate']}")
     usage = entry.get("usage")
     if usage:
         prompt = usage.get("prompt")
@@ -7756,21 +7756,21 @@ def _format_ai_payload(context_hint: Optional[str] = None) -> str:
         if total is not None:
             usage_parts.append(f"total {total}")
         if usage_parts:
-            lines.append(f"- Факт токенов: {', '.join(usage_parts)}")
+            lines.append(f"- Р¤Р°РєС‚ С‚РѕРєРµРЅРѕРІ: {', '.join(usage_parts)}")
     if entry.get("error"):
-        lines.append(f"- Ошибка: {entry['error']}")
+        lines.append(f"- РћС€РёР±РєР°: {entry['error']}")
     if entry.get("meta"):
         for key_name, value in entry["meta"].items():
             lines.append(f"- {key_name}: {value}")
     request_excerpt = entry.get("request_excerpt")
     if request_excerpt:
         lines.append("")
-        lines.append("---- Запрос ----")
+        lines.append("---- Р—Р°РїСЂРѕСЃ ----")
         lines.append(request_excerpt)
     response_excerpt = entry.get("response_excerpt")
     if response_excerpt:
         lines.append("")
-        lines.append("---- Ответ ----")
+        lines.append("---- РћС‚РІРµС‚ ----")
         lines.append(response_excerpt)
     return "\n".join(lines)
 
@@ -8110,25 +8110,25 @@ def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
 
     spec = {
         "stop": {
-            "label": "СЛ",
-            "changed": "изменены СЛ",
-            "added": "добавлено СЛ",
-            "removed": "убрано СЛ",
+            "label": "РЎР›",
+            "changed": "РёР·РјРµРЅРµРЅС‹ РЎР›",
+            "added": "РґРѕР±Р°РІР»РµРЅРѕ РЎР›",
+            "removed": "СѓР±СЂР°РЅРѕ РЎР›",
         },
         "take_profit": {
-            "label": "ТП",
-            "changed": "изменены ТП",
-            "added": "добавлено ТП",
-            "removed": "убрано ТП",
+            "label": "РўРџ",
+            "changed": "РёР·РјРµРЅРµРЅС‹ РўРџ",
+            "added": "РґРѕР±Р°РІР»РµРЅРѕ РўРџ",
+            "removed": "СѓР±СЂР°РЅРѕ РўРџ",
         },
         "trailing": {
-            "label": "трейлинг",
-            "changed": "изменён трейлинг",
-            "added": "добавлен трейлинг",
-            "removed": "убран трейлинг",
-            "added_plural": "добавлено трейлинг: {}",
-            "removed_plural": "убрано трейлинг: {}",
-            "changed_plural": "изменены трейлинги",
+            "label": "С‚СЂРµР№Р»РёРЅРі",
+            "changed": "РёР·РјРµРЅС‘РЅ С‚СЂРµР№Р»РёРЅРі",
+            "added": "РґРѕР±Р°РІР»РµРЅ С‚СЂРµР№Р»РёРЅРі",
+            "removed": "СѓР±СЂР°РЅ С‚СЂРµР№Р»РёРЅРі",
+            "added_plural": "РґРѕР±Р°РІР»РµРЅРѕ С‚СЂРµР№Р»РёРЅРі: {}",
+            "removed_plural": "СѓР±СЂР°РЅРѕ С‚СЂРµР№Р»РёРЅРі: {}",
+            "changed_plural": "РёР·РјРµРЅРµРЅС‹ С‚СЂРµР№Р»РёРЅРіРё",
         },
     }
 
@@ -8145,7 +8145,7 @@ def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
                     if plural_text:
                         changes.append(plural_text.format(diff))
                     else:
-                        changes.append(f"добавлено {meta['label']}: {diff}")
+                        changes.append(f"РґРѕР±Р°РІР»РµРЅРѕ {meta['label']}: {diff}")
             else:
                 changes.append(f"{meta['added']}: {diff}")
         elif diff < 0:
@@ -8158,7 +8158,7 @@ def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
                     if plural_text:
                         changes.append(plural_text.format(diff_abs))
                     else:
-                        changes.append(f"убрано {meta['label']}: {diff_abs}")
+                        changes.append(f"СѓР±СЂР°РЅРѕ {meta['label']}: {diff_abs}")
             else:
                 changes.append(f"{meta['removed']}: {diff_abs}")
         else:
@@ -8253,17 +8253,17 @@ def _sync_with_remote() -> None:
         if (not _LAST_WORKTREE_STATE_DIRTY) or (current_hash != _LAST_WORKTREE_STATE_HASH):
             lines = status_snapshot.strip().splitlines()
             preview_lines = lines[:10]
-            preview = "\n".join(f"- {line}" for line in preview_lines) if preview_lines else "- изменения без подробностей"
+            preview = "\n".join(f"- {line}" for line in preview_lines) if preview_lines else "- РёР·РјРµРЅРµРЅРёСЏ Р±РµР· РїРѕРґСЂРѕР±РЅРѕСЃС‚РµР№"
             if len(lines) > len(preview_lines):
-                preview += f"\n… и ещё {len(lines) - len(preview_lines)} файлов"
+                preview += f"\nвЂ¦ Рё РµС‰С‘ {len(lines) - len(preview_lines)} С„Р°Р№Р»РѕРІ"
             if INPROGRESS_WIP_ENABLED:
-                _send_inprogress_notification(f"[WIP] Есть незакоммиченные изменения:\n{preview}")
+                _send_inprogress_notification(f"[WIP] Р•СЃС‚СЊ РЅРµР·Р°РєРѕРјРјРёС‡РµРЅРЅС‹Рµ РёР·РјРµРЅРµРЅРёСЏ:\n{preview}")
         _LAST_WORKTREE_STATE_DIRTY = True
         _LAST_WORKTREE_STATE_HASH = current_hash
     else:
         if _LAST_WORKTREE_STATE_DIRTY:
             if INPROGRESS_WIP_ENABLED:
-                _send_inprogress_notification("[WIP] Рабочее дерево очищено.")
+                _send_inprogress_notification("[WIP] Р Р°Р±РѕС‡РµРµ РґРµСЂРµРІРѕ РѕС‡РёС‰РµРЅРѕ.")
             _LAST_INPROGRESS_MESSAGE = None
         _LAST_WORKTREE_STATE_DIRTY = False
         _LAST_WORKTREE_STATE_HASH = ""
@@ -8325,7 +8325,7 @@ def _sync_with_remote() -> None:
                 return
         else:
             if working_tree_dirty:
-                log("[WARN] Git pull failed and рабочее дерево грязное; пропускаем автосинх.", Fore.YELLOW)
+                log("[WARN] Git pull failed and СЂР°Р±РѕС‡РµРµ РґРµСЂРµРІРѕ РіСЂСЏР·РЅРѕРµ; РїСЂРѕРїСѓСЃРєР°РµРј Р°РІС‚РѕСЃРёРЅС….", Fore.YELLOW)
             log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
 
 
@@ -8446,12 +8446,12 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     )
     if cancelled_stop_entries:
         summary = "; ".join(cancelled_stop_entries)
-        log(f"?? {symbol}: удалены лишние стоп-ордера: {summary}", Fore.LIGHTBLUE_EX)
-        send_tg(f"?? {symbol}: удалены лишние стоп-ордера: {summary}")
+        log(f"?? {symbol}: СѓРґР°Р»РµРЅС‹ Р»РёС€РЅРёРµ СЃС‚РѕРї-РѕСЂРґРµСЂР°: {summary}", Fore.LIGHTBLUE_EX)
+        send_tg(f"?? {symbol}: СѓРґР°Р»РµРЅС‹ Р»РёС€РЅРёРµ СЃС‚РѕРї-РѕСЂРґРµСЂР°: {summary}")
     if cancel_stop_errors:
         details = "; ".join(f"{descriptor} -> {err}" for descriptor, err in cancel_stop_errors)
-        log(f"?? {symbol}: не удалось удалить часть стоп-ордеров: {details}", Fore.YELLOW)
-        send_tg(f"?? {symbol}: ошибка при удалении стоп-ордеров: {details}")
+        log(f"?? {symbol}: РЅРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ С‡Р°СЃС‚СЊ СЃС‚РѕРї-РѕСЂРґРµСЂРѕРІ: {details}", Fore.YELLOW)
+        send_tg(f"?? {symbol}: РѕС€РёР±РєР° РїСЂРё СѓРґР°Р»РµРЅРёРё СЃС‚РѕРї-РѕСЂРґРµСЂРѕРІ: {details}")
     if cancelled_stop_entries or cancel_stop_errors:
         open_orders = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
         reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
@@ -8481,19 +8481,19 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     df_calc = df_primary.copy() if isinstance(df_primary, pd.DataFrame) and not df_primary.empty else None
     if df_calc is None:
-        log(f"[WARN] {symbol}: пропуск обновления защиты — нет актуальных свечей для расчёта", Fore.LIGHTBLACK_EX)
+        log(f"[WARN] {symbol}: РїСЂРѕРїСѓСЃРє РѕР±РЅРѕРІР»РµРЅРёСЏ Р·Р°С‰РёС‚С‹ вЂ” РЅРµС‚ Р°РєС‚СѓР°Р»СЊРЅС‹С… СЃРІРµС‡РµР№ РґР»СЏ СЂР°СЃС‡С‘С‚Р°", Fore.LIGHTBLACK_EX)
         return open_orders or []
     if "atr" not in df_calc.columns:
         try:
             df_calc["atr"] = atr(df_calc, 14)
         except Exception as exc:
-            log(f"?? {symbol}: не удалось вычислить ATR для защиты позиции ({exc})", Fore.YELLOW)
+            log(f"?? {symbol}: РЅРµ СѓРґР°Р»РѕСЃСЊ РІС‹С‡РёСЃР»РёС‚СЊ ATR РґР»СЏ Р·Р°С‰РёС‚С‹ РїРѕР·РёС†РёРё ({exc})", Fore.YELLOW)
             return open_orders or []
     last_row = df_calc.iloc[-1]
     price = safe_float(last_row.get("close"))
     atrv = safe_float(last_row.get("atr"))
     if not (math.isfinite(price) and math.isfinite(atrv) and atrv and atrv > 0):
-        log(f"?? {symbol}: нет валидных значений ATR/цены для защиты позиции", Fore.YELLOW)
+        log(f"?? {symbol}: РЅРµС‚ РІР°Р»РёРґРЅС‹С… Р·РЅР°С‡РµРЅРёР№ ATR/С†РµРЅС‹ РґР»СЏ Р·Р°С‰РёС‚С‹ РїРѕР·РёС†РёРё", Fore.YELLOW)
         return open_orders or []
 
     target_spec = cfg.get("target") if isinstance(cfg.get("target"), dict) else {}
@@ -8621,7 +8621,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         if breakeven_note:
             created_log_parts.append(breakeven_note)
     except Exception as exc:
-        log(f"?? {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
+        log(f"?? {symbol}: РЅРµ СѓРґР°Р»РѕСЃСЊ РІС‹СЃС‚Р°РІРёС‚СЊ СЃС‚РѕРї-РѕСЂРґРµСЂ Р·Р°С‰РёС‚С‹ РїРѕР·РёС†РёРё: {exc}", Fore.YELLOW)
 
     tp_scheme_override = target_spec.get("takeProfitLevels") or target_spec.get("take_profit_levels")
     normalized_scheme: list[tuple[float, float]] = []
@@ -8700,7 +8700,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 tp_params,
             )
         except Exception as exc:
-            log(f"?? {symbol}: не удалось выставить тейк-профит ({target_qty_precise:.4f}@{tp_target_price:.2f}): {exc}", Fore.YELLOW)
+            log(f"?? {symbol}: РЅРµ СѓРґР°Р»РѕСЃСЊ РІС‹СЃС‚Р°РІРёС‚СЊ С‚РµР№Рє-РїСЂРѕС„РёС‚ ({target_qty_precise:.4f}@{tp_target_price:.2f}): {exc}", Fore.YELLOW)
             continue
         remaining_qty = max(0.0, remaining_qty - target_qty_precise)
         take_created.append(f"takeProfit {target_qty_precise:.4f} @ {tp_target_price:.2f}")
@@ -8823,9 +8823,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if trailing_amount and not trailing_set and trailing_errors:
         combined = "; ".join(trailing_errors)
         if "set_trading_stop not supported" in combined.lower():
-            log(f"?? {symbol}: биржа не поддерживает трейлинг-стоп (оставляем SL/TP).", Fore.LIGHTBLACK_EX)
+            log(f"?? {symbol}: Р±РёСЂР¶Р° РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚ С‚СЂРµР№Р»РёРЅРі-СЃС‚РѕРї (РѕСЃС‚Р°РІР»СЏРµРј SL/TP).", Fore.LIGHTBLACK_EX)
         else:
-            log(f"?? {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
+            log(f"?? {symbol}: РЅРµ СѓРґР°Р»РѕСЃСЊ РІС‹СЃС‚Р°РІРёС‚СЊ С‚СЂРµР№Р»РёРЅРі-СЃС‚РѕРї ({combined})", Fore.YELLOW)
 
     forced_actions: list[str] = []
     forced_errors: list[str] = []
@@ -8911,9 +8911,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         log(f"[WARN] {symbol}: fallback take-profit errors ({'; '.join(forced_errors)})", Fore.YELLOW)
 
     if created_log_parts:
-        log(f"?? {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)
+        log(f"?? {symbol}: РѕР±РЅРѕРІР»РµРЅР° Р·Р°С‰РёС‚Р° РїРѕР·РёС†РёРё {created_log_parts}", Fore.LIGHTBLUE_EX)
         send_tg(
-            f"?? {symbol}: обновлена защита позиции\n"
+            f"?? {symbol}: РѕР±РЅРѕРІР»РµРЅР° Р·Р°С‰РёС‚Р° РїРѕР·РёС†РёРё\n"
             + "\n".join(f"- {entry}" for entry in created_log_parts)
         )
     return fetch_open_orders_for_symbol(exchange, symbol)
@@ -9372,7 +9372,7 @@ def execute_extra_orders(
     actions_performed = bool(executed or cancelled_success or cancel_errors)
     return executed, actions_performed
 
-# --- Решение модели (2 прохода, русский лог) ---
+# --- Р РµС€РµРЅРёРµ РјРѕРґРµР»Рё (2 РїСЂРѕС…РѕРґР°, СЂСѓСЃСЃРєРёР№ Р»РѕРі) ---
 def ai_decision(
     symbol,
     df_primary,
@@ -9387,7 +9387,7 @@ def ai_decision(
     initial_decision=None
 ):
     if not AI_KEY:
-        log("?? Не указан OPENAI_API_KEY", Fore.RED)
+        log("?? РќРµ СѓРєР°Р·Р°РЅ OPENAI_API_KEY", Fore.RED)
         return None
 
     df_30m = df_primary
@@ -9404,7 +9404,7 @@ def ai_decision(
     higher_tf = get_higher_tf(exchange, symbol, "4h")
 
     higher_trend_bias = None
-    higher_trend_label = "неопределён"
+    higher_trend_label = "РЅРµРѕРїСЂРµРґРµР»С‘РЅ"
     if higher_tf:
         last_higher = higher_tf[-1]
         ema20_ht = last_higher.get("ema20")
@@ -9412,10 +9412,10 @@ def ai_decision(
         if ema20_ht is not None and ema50_ht is not None:
             if ema20_ht > ema50_ht:
                 higher_trend_bias = "buy"
-                higher_trend_label = "восходящий"
+                higher_trend_label = "РІРѕСЃС…РѕРґСЏС‰РёР№"
             elif ema20_ht < ema50_ht:
                 higher_trend_bias = "sell"
-                higher_trend_label = "нисходящий"
+                higher_trend_label = "РЅРёСЃС…РѕРґСЏС‰РёР№"
 
     context_counts = {
         "30m": min(DEFAULT_CONTEXT_30M, len(df_30m)),
@@ -9451,26 +9451,26 @@ def ai_decision(
         }
     open_orders = open_orders or []
 
-    # >>>>>>>>>>>> ИСПРАВЛЕНО: system_msg как тройная строка без \u-escape <<<<<<<<<<<<
-    system_msg = """Ты — ИИ-помощник по трейдингу в сбалансированном интрадей стиле. 
-Работаешь по сценарию: (1) если тренды 30m и 4h совпадают и RSI не в экстремумах — входи по тренду; 
-(2) если 30m показывает зарождающийся разворот против слабого тренда на 4h — допускается контртренд с короткой целью; 
-(3) skip используется только при реальном конфликте сигналов или явной неопределённости. 
-Обязательно анализируй EMA20/EMA50, RSI(14), ATR(14) на 30m и 4h, формируй понятный риск/идею. 
-Если уверенность < 70% или сигналы расходятся — сначала запроси дополнительные данные через поле 'needs' 
-(доступно: higher_tf:<tf>, funding, open_interest, news, а также {"timeframes":["1h"],"indicators":[{"indicator":"ema","length":55}, "atr14"]}), и только после доп. проверки выбирай конечное действие. 
-Если позиция уже открыта, не открывай её заново: оцени необходимость частичного сокращения, закрытия или удержания. 
-Если по символу есть активные лимитные/стоп-ордера (open_orders), не дублируй их без пересмотра. 
-Для отмены/замены ордеров передавай cancel_orders и replace_orders. 
-Для частичных закрытий, дополнительных лимитов/стопов, трейлингов и других операций используй массив 'orders', 
-описывая ордера в стиле CCXT (type, side, amount/percent, price, params). 
-Если выбираешь action="skip", обязательно укажи причину, опираясь на показания этих индикаторов. 
-Ответ строго в формате JSON без текста.
+    # >>>>>>>>>>>> РРЎРџР РђР’Р›Р•РќРћ: system_msg РєР°Рє С‚СЂРѕР№РЅР°СЏ СЃС‚СЂРѕРєР° Р±РµР· \u-escape <<<<<<<<<<<<
+    system_msg = """РўС‹ вЂ” РР-РїРѕРјРѕС‰РЅРёРє РїРѕ С‚СЂРµР№РґРёРЅРіСѓ РІ СЃР±Р°Р»Р°РЅСЃРёСЂРѕРІР°РЅРЅРѕРј РёРЅС‚СЂР°РґРµР№ СЃС‚РёР»Рµ. 
+Р Р°Р±РѕС‚Р°РµС€СЊ РїРѕ СЃС†РµРЅР°СЂРёСЋ: (1) РµСЃР»Рё С‚СЂРµРЅРґС‹ 30m Рё 4h СЃРѕРІРїР°РґР°СЋС‚ Рё RSI РЅРµ РІ СЌРєСЃС‚СЂРµРјСѓРјР°С… вЂ” РІС…РѕРґРё РїРѕ С‚СЂРµРЅРґСѓ; 
+(2) РµСЃР»Рё 30m РїРѕРєР°Р·С‹РІР°РµС‚ Р·Р°СЂРѕР¶РґР°СЋС‰РёР№СЃСЏ СЂР°Р·РІРѕСЂРѕС‚ РїСЂРѕС‚РёРІ СЃР»Р°Р±РѕРіРѕ С‚СЂРµРЅРґР° РЅР° 4h вЂ” РґРѕРїСѓСЃРєР°РµС‚СЃСЏ РєРѕРЅС‚СЂС‚СЂРµРЅРґ СЃ РєРѕСЂРѕС‚РєРѕР№ С†РµР»СЊСЋ; 
+(3) skip РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ С‚РѕР»СЊРєРѕ РїСЂРё СЂРµР°Р»СЊРЅРѕРј РєРѕРЅС„Р»РёРєС‚Рµ СЃРёРіРЅР°Р»РѕРІ РёР»Рё СЏРІРЅРѕР№ РЅРµРѕРїСЂРµРґРµР»С‘РЅРЅРѕСЃС‚Рё. 
+РћР±СЏР·Р°С‚РµР»СЊРЅРѕ Р°РЅР°Р»РёР·РёСЂСѓР№ EMA20/EMA50, RSI(14), ATR(14) РЅР° 30m Рё 4h, С„РѕСЂРјРёСЂСѓР№ РїРѕРЅСЏС‚РЅС‹Р№ СЂРёСЃРє/РёРґРµСЋ. 
+Р•СЃР»Рё СѓРІРµСЂРµРЅРЅРѕСЃС‚СЊ < 70% РёР»Рё СЃРёРіРЅР°Р»С‹ СЂР°СЃС…РѕРґСЏС‚СЃСЏ вЂ” СЃРЅР°С‡Р°Р»Р° Р·Р°РїСЂРѕСЃРё РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ С‡РµСЂРµР· РїРѕР»Рµ 'needs' 
+(РґРѕСЃС‚СѓРїРЅРѕ: higher_tf:<tf>, funding, open_interest, news, Р° С‚Р°РєР¶Рµ {"timeframes":["1h"],"indicators":[{"indicator":"ema","length":55}, "atr14"]}), Рё С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РґРѕРї. РїСЂРѕРІРµСЂРєРё РІС‹Р±РёСЂР°Р№ РєРѕРЅРµС‡РЅРѕРµ РґРµР№СЃС‚РІРёРµ. 
+Р•СЃР»Рё РїРѕР·РёС†РёСЏ СѓР¶Рµ РѕС‚РєСЂС‹С‚Р°, РЅРµ РѕС‚РєСЂС‹РІР°Р№ РµС‘ Р·Р°РЅРѕРІРѕ: РѕС†РµРЅРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚СЊ С‡Р°СЃС‚РёС‡РЅРѕРіРѕ СЃРѕРєСЂР°С‰РµРЅРёСЏ, Р·Р°РєСЂС‹С‚РёСЏ РёР»Рё СѓРґРµСЂР¶Р°РЅРёСЏ. 
+Р•СЃР»Рё РїРѕ СЃРёРјРІРѕР»Сѓ РµСЃС‚СЊ Р°РєС‚РёРІРЅС‹Рµ Р»РёРјРёС‚РЅС‹Рµ/СЃС‚РѕРї-РѕСЂРґРµСЂР° (open_orders), РЅРµ РґСѓР±Р»РёСЂСѓР№ РёС… Р±РµР· РїРµСЂРµСЃРјРѕС‚СЂР°. 
+Р”Р»СЏ РѕС‚РјРµРЅС‹/Р·Р°РјРµРЅС‹ РѕСЂРґРµСЂРѕРІ РїРµСЂРµРґР°РІР°Р№ cancel_orders Рё replace_orders. 
+Р”Р»СЏ С‡Р°СЃС‚РёС‡РЅС‹С… Р·Р°РєСЂС‹С‚РёР№, РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹С… Р»РёРјРёС‚РѕРІ/СЃС‚РѕРїРѕРІ, С‚СЂРµР№Р»РёРЅРіРѕРІ Рё РґСЂСѓРіРёС… РѕРїРµСЂР°С†РёР№ РёСЃРїРѕР»СЊР·СѓР№ РјР°СЃСЃРёРІ 'orders', 
+РѕРїРёСЃС‹РІР°СЏ РѕСЂРґРµСЂР° РІ СЃС‚РёР»Рµ CCXT (type, side, amount/percent, price, params). 
+Р•СЃР»Рё РІС‹Р±РёСЂР°РµС€СЊ action="skip", РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ СѓРєР°Р¶Рё РїСЂРёС‡РёРЅСѓ, РѕРїРёСЂР°СЏСЃСЊ РЅР° РїРѕРєР°Р·Р°РЅРёСЏ СЌС‚РёС… РёРЅРґРёРєР°С‚РѕСЂРѕРІ. 
+РћС‚РІРµС‚ СЃС‚СЂРѕРіРѕ РІ С„РѕСЂРјР°С‚Рµ JSON Р±РµР· С‚РµРєСЃС‚Р°.
 Decide decisively. Always include a numeric "confidence" between 0 and 1 and target values >=0.70 when signals align. If confidence would fall below the threshold, request the missing context via "needs" with concrete items instead of hesitating. Make recommendations with clear reasoning."""
-    # >>>>>>>>>>>> конец исправления <<<<<<<<<<<<
+    # >>>>>>>>>>>> РєРѕРЅРµС† РёСЃРїСЂР°РІР»РµРЅРёСЏ <<<<<<<<<<<<
 
     ema_trend_bias = None
-    ema_trend_label = "неопределён"
+    ema_trend_label = "РЅРµРѕРїСЂРµРґРµР»С‘РЅ"
     ema_slope = None
     if not df_30m.empty:
         last_row = df_30m.iloc[-1]
@@ -9479,10 +9479,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         if pd.notna(ema20_last) and pd.notna(ema50_last):
             if ema20_last > ema50_last:
                 ema_trend_bias = "buy"
-                ema_trend_label = "восходящий"
+                ema_trend_label = "РІРѕСЃС…РѕРґСЏС‰РёР№"
             elif ema20_last < ema50_last:
                 ema_trend_bias = "sell"
-                ema_trend_label = "нисходящий"
+                ema_trend_label = "РЅРёСЃС…РѕРґСЏС‰РёР№"
         if len(df_30m) >= 3 and pd.notna(df_30m.iloc[-1].get("ema20")) and pd.notna(df_30m.iloc[-3].get("ema20")):
             ema_slope = df_30m.iloc[-1]["ema20"] - df_30m.iloc[-3]["ema20"]
 
@@ -9511,8 +9511,8 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         else:
             news_desc = "CryptoCompare + RSS headlines"
         prompt = {
-            "символ": symbol,
-            "финансы": {
+            "СЃРёРјРІРѕР»": symbol,
+            "С„РёРЅР°РЅСЃС‹": {
                 "equity_total": equity,
                 "available_margin": available_margin,
                 "risk_pct": RISK_PCT,
@@ -9521,57 +9521,57 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "sl_atr_mult": SL_ATR,
                 "tp_atr_mult": TP_ATR
             },
-            "капитал": equity,
-            "индикаторы": current_context,
-            "текущая_позиция": position_payload or {"статус": "нет позиции"},
-            "открытые_ордера": open_orders,
-            "как_создавать_ордеры": [
-                "Возвращай массив 'orders', если нужно выставить дополнительные заявки.",
-                "Пример: orders=[{\"type\":\"limit\",\"side\":\"sell\",\"amount\":0.001,\"price\":111500,\"reduceOnly\":true,\"note\":\"частичный тейк\"}].",
-                "Для частичного закрытия можно указать amountPercent вместо amount; trailing_stop передавай через params (например, {'trailingStop':50}).",
-                "Учитывай open_orders (см. поле 'open_orders'): избегай дублирования существующих лимитов/стопов.",
-                "Для обновления тейков/стопов используй cancel_orders или replace_orders (сначала укажи id заявки, затем опиши новый ордер)."
+            "РєР°РїРёС‚Р°Р»": equity,
+            "РёРЅРґРёРєР°С‚РѕСЂС‹": current_context,
+            "С‚РµРєСѓС‰Р°СЏ_РїРѕР·РёС†РёСЏ": position_payload or {"СЃС‚Р°С‚СѓСЃ": "РЅРµС‚ РїРѕР·РёС†РёРё"},
+            "РѕС‚РєСЂС‹С‚С‹Рµ_РѕСЂРґРµСЂР°": open_orders,
+            "РєР°Рє_СЃРѕР·РґР°РІР°С‚СЊ_РѕСЂРґРµСЂС‹": [
+                "Р’РѕР·РІСЂР°С‰Р°Р№ РјР°СЃСЃРёРІ 'orders', РµСЃР»Рё РЅСѓР¶РЅРѕ РІС‹СЃС‚Р°РІРёС‚СЊ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ Р·Р°СЏРІРєРё.",
+                "РџСЂРёРјРµСЂ: orders=[{\"type\":\"limit\",\"side\":\"sell\",\"amount\":0.001,\"price\":111500,\"reduceOnly\":true,\"note\":\"С‡Р°СЃС‚РёС‡РЅС‹Р№ С‚РµР№Рє\"}].",
+                "Р”Р»СЏ С‡Р°СЃС‚РёС‡РЅРѕРіРѕ Р·Р°РєСЂС‹С‚РёСЏ РјРѕР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ amountPercent РІРјРµСЃС‚Рѕ amount; trailing_stop РїРµСЂРµРґР°РІР°Р№ С‡РµСЂРµР· params (РЅР°РїСЂРёРјРµСЂ, {'trailingStop':50}).",
+                "РЈС‡РёС‚С‹РІР°Р№ open_orders (СЃРј. РїРѕР»Рµ 'open_orders'): РёР·Р±РµРіР°Р№ РґСѓР±Р»РёСЂРѕРІР°РЅРёСЏ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… Р»РёРјРёС‚РѕРІ/СЃС‚РѕРїРѕРІ.",
+                "Р”Р»СЏ РѕР±РЅРѕРІР»РµРЅРёСЏ С‚РµР№РєРѕРІ/СЃС‚РѕРїРѕРІ РёСЃРїРѕР»СЊР·СѓР№ cancel_orders РёР»Рё replace_orders (СЃРЅР°С‡Р°Р»Р° СѓРєР°Р¶Рё id Р·Р°СЏРІРєРё, Р·Р°С‚РµРј РѕРїРёС€Рё РЅРѕРІС‹Р№ РѕСЂРґРµСЂ)."
             ],
-            "сценарий": {
-                "алгоритм": [
-                    "1) Проверь тренды 30m/4h и RSI.",
-                    "2) Если уверенность <70% или сигналы расходятся — запроси needs (higher_tf:<tf>, funding, open_interest, news).",
-                    "3) После получения дополнительных данных выбери окончательное действие."
+            "СЃС†РµРЅР°СЂРёР№": {
+                "Р°Р»РіРѕСЂРёС‚Рј": [
+                    "1) РџСЂРѕРІРµСЂСЊ С‚СЂРµРЅРґС‹ 30m/4h Рё RSI.",
+                    "2) Р•СЃР»Рё СѓРІРµСЂРµРЅРЅРѕСЃС‚СЊ <70% РёР»Рё СЃРёРіРЅР°Р»С‹ СЂР°СЃС…РѕРґСЏС‚СЃСЏ вЂ” Р·Р°РїСЂРѕСЃРё needs (higher_tf:<tf>, funding, open_interest, news).",
+                    "3) РџРѕСЃР»Рµ РїРѕР»СѓС‡РµРЅРёСЏ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹С… РґР°РЅРЅС‹С… РІС‹Р±РµСЂРё РѕРєРѕРЅС‡Р°С‚РµР»СЊРЅРѕРµ РґРµР№СЃС‚РІРёРµ."
                 ],
-                "базовый_тренд": {
-                    "рекомендуемое_действие": "open" if ema_trend_bias else "skip",
-                    "сторона": ema_trend_bias,
-                    "описание": (
-                        f"Доминирующий тренд {ema_trend_label} по EMA20/EMA50 на 30m."
-                        f" На 4h тренд {higher_trend_label}. При их совпадении отдавай предпочтение входу."
+                "Р±Р°Р·РѕРІС‹Р№_С‚СЂРµРЅРґ": {
+                    "СЂРµРєРѕРјРµРЅРґСѓРµРјРѕРµ_РґРµР№СЃС‚РІРёРµ": "open" if ema_trend_bias else "skip",
+                    "СЃС‚РѕСЂРѕРЅР°": ema_trend_bias,
+                    "РѕРїРёСЃР°РЅРёРµ": (
+                        f"Р”РѕРјРёРЅРёСЂСѓСЋС‰РёР№ С‚СЂРµРЅРґ {ema_trend_label} РїРѕ EMA20/EMA50 РЅР° 30m."
+                        f" РќР° 4h С‚СЂРµРЅРґ {higher_trend_label}. РџСЂРё РёС… СЃРѕРІРїР°РґРµРЅРёРё РѕС‚РґР°РІР°Р№ РїСЂРµРґРїРѕС‡С‚РµРЅРёРµ РІС…РѕРґСѓ."
                     ),
-                    "наклон_ema20": ema_slope
+                    "РЅР°РєР»РѕРЅ_ema20": ema_slope
                 },
-                "контртренд": {
-                    "условие": "RSI выходит из экстремума 30m, а ATR падает",
-                    "напоминание": "если 4h тренд сильный, уменьши размер и ставь плотный SL"
+                "РєРѕРЅС‚СЂС‚СЂРµРЅРґ": {
+                    "СѓСЃР»РѕРІРёРµ": "RSI РІС‹С…РѕРґРёС‚ РёР· СЌРєСЃС‚СЂРµРјСѓРјР° 30m, Р° ATR РїР°РґР°РµС‚",
+                    "РЅР°РїРѕРјРёРЅР°РЅРёРµ": "РµСЃР»Рё 4h С‚СЂРµРЅРґ СЃРёР»СЊРЅС‹Р№, СѓРјРµРЅСЊС€Рё СЂР°Р·РјРµСЂ Рё СЃС‚Р°РІСЊ РїР»РѕС‚РЅС‹Р№ SL"
                 },
-                "пороговые_значения": {
+                "РїРѕСЂРѕРіРѕРІС‹Рµ_Р·РЅР°С‡РµРЅРёСЏ": {
                     "long": {"rsi_30m": "<=55", "rsi_4h": "<=60"},
                     "short": {"rsi_30m": ">=45", "rsi_4h": ">=40"},
-                    "atr": "избегай входа, если текущий ATR выше среднего за 14?1.8"
+                    "atr": "РёР·Р±РµРіР°Р№ РІС…РѕРґР°, РµСЃР»Рё С‚РµРєСѓС‰РёР№ ATR РІС‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р·Р° 14?1.8"
                 },
-                "skip": "используй только при конфликте трендов или резком росте ATR/новостях"
+                "skip": "РёСЃРїРѕР»СЊР·СѓР№ С‚РѕР»СЊРєРѕ РїСЂРё РєРѕРЅС„Р»РёРєС‚Рµ С‚СЂРµРЅРґРѕРІ РёР»Рё СЂРµР·РєРѕРј СЂРѕСЃС‚Рµ ATR/РЅРѕРІРѕСЃС‚СЏС…"
             },
-            "доступные_данные": {
+            "РґРѕСЃС‚СѓРїРЅС‹Рµ_РґР°РЅРЅС‹Рµ": {
                 "higher_tf": ["higher_tf:4h", "higher_tf:1h", "higher_tf:30m"],
                 "funding": "fetchFundingRate",
                 "open_interest": "fetchOpenInterestHistory",
                 "news": news_desc
             },
-            "если_неуверен": {
+            "РµСЃР»Рё_РЅРµСѓРІРµСЂРµРЅ": {
                 "action": "open" if ema_trend_bias else "skip",
                 "side": ema_trend_bias,
                 "reason": (
-                    "следуем доминирующему тренду с умеренным риском после запроса needs"
-                    if ema_trend_bias else "недостаточно уверенности — запроси needs"
+                    "СЃР»РµРґСѓРµРј РґРѕРјРёРЅРёСЂСѓСЋС‰РµРјСѓ С‚СЂРµРЅРґСѓ СЃ СѓРјРµСЂРµРЅРЅС‹Рј СЂРёСЃРєРѕРј РїРѕСЃР»Рµ Р·Р°РїСЂРѕСЃР° needs"
+                    if ema_trend_bias else "РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё вЂ” Р·Р°РїСЂРѕСЃРё needs"
                 ),
-                "до_решения": "обязательно запроси дополнительные данные через needs перед финальным выбором",
+                "РґРѕ_СЂРµС€РµРЅРёСЏ": "РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ Р·Р°РїСЂРѕСЃРё РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ С‡РµСЂРµР· needs РїРµСЂРµРґ С„РёРЅР°Р»СЊРЅС‹Рј РІС‹Р±РѕСЂРѕРј",
                 "sl_atr": SL_ATR,
                 "tp_atr": TP_ATR
             }
@@ -9582,8 +9582,8 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             prompt["requested_context"] = extra_context_payload
         if news_payload_payload:
             prompt["news_focus"] = news_payload_payload
-        if extra: prompt["доп_контекст"] = extra
-        if bias: prompt["режим"] = "чуть более уверенный после допконтекста"
+        if extra: prompt["РґРѕРї_РєРѕРЅС‚РµРєСЃС‚"] = extra
+        if bias: prompt["СЂРµР¶РёРј"] = "С‡СѓС‚СЊ Р±РѕР»РµРµ СѓРІРµСЂРµРЅРЅС‹Р№ РїРѕСЃР»Рµ РґРѕРїРєРѕРЅС‚РµРєСЃС‚Р°"
         return json.dumps(prompt, ensure_ascii=False)
 
     def prepare_messages(stage="initial", extra=None, bias=False):
@@ -9627,20 +9627,20 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             trim_sources.append(trim_reason)
             attempts += 1
             if attempts > 50:
-                log(f"? Обрезка контекста не укладывается в лимит ({stage}) для {symbol}", Fore.YELLOW)
+                log(f"? РћР±СЂРµР·РєР° РєРѕРЅС‚РµРєСЃС‚Р° РЅРµ СѓРєР»Р°РґС‹РІР°РµС‚СЃСЏ РІ Р»РёРјРёС‚ ({stage}) РґР»СЏ {symbol}", Fore.YELLOW)
                 break
         trimmed = trimmed or (context_counts != prev_counts)
         if trimmed:
             reasons_text = "/".join(sorted(set(trim_sources))) if trim_sources else "unknown"
             trim_text = (
-                f"?? контекст обрезан ({reasons_text}) до "
-                f"{context_counts['30m']}?30m и {context_counts['4h']}?4h "
-                f"из-за лимита ({tokens} токенов, этап: {stage}) для {symbol}"
+                f"?? РєРѕРЅС‚РµРєСЃС‚ РѕР±СЂРµР·Р°РЅ ({reasons_text}) РґРѕ "
+                f"{context_counts['30m']}?30m Рё {context_counts['4h']}?4h "
+                f"РёР·-Р·Р° Р»РёРјРёС‚Р° ({tokens} С‚РѕРєРµРЅРѕРІ, СЌС‚Р°Рї: {stage}) РґР»СЏ {symbol}"
             )
             log(trim_text, Fore.MAGENTA)
             send_tg(trim_text)
         if hard_limit and tokens > hard_limit:
-            log(f"? Лимит токенов превышен даже после обрезки ({tokens}>{TOKEN_LIMIT}, этап: {stage}) для {symbol}", Fore.YELLOW)
+            log(f"? Р›РёРјРёС‚ С‚РѕРєРµРЅРѕРІ РїСЂРµРІС‹С€РµРЅ РґР°Р¶Рµ РїРѕСЃР»Рµ РѕР±СЂРµР·РєРё ({tokens}>{TOKEN_LIMIT}, СЌС‚Р°Рї: {stage}) РґР»СЏ {symbol}", Fore.YELLOW)
         return messages, tokens, user_payload
 
     def ensure_skip_reason(decision_obj):
@@ -9652,7 +9652,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         if any(key in reason_lower for key in ("ema", "rsi", "atr")):
             return decision_obj
         if df_30m.empty:
-            details = "данные индикаторов отсутствуют"
+            details = "РґР°РЅРЅС‹Рµ РёРЅРґРёРєР°С‚РѕСЂРѕРІ РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚"
         else:
             last_row = df_30m.iloc[-1]
             parts = []
@@ -9661,17 +9661,17 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             rsi_val = last_row.get("rsi")
             atr_val = last_row.get("atr")
             if pd.notna(ema20_val) and pd.notna(ema50_val):
-                relation = "ниже" if ema20_val < ema50_val else "выше"
+                relation = "РЅРёР¶Рµ" if ema20_val < ema50_val else "РІС‹С€Рµ"
                 parts.append(f"EMA20 {ema20_val:.2f} {relation} EMA50 {ema50_val:.2f}")
             elif pd.notna(ema20_val) or pd.notna(ema50_val):
-                parts.append(f"EMA данные неполные (EMA20={ema20_val}, EMA50={ema50_val})")
+                parts.append(f"EMA РґР°РЅРЅС‹Рµ РЅРµРїРѕР»РЅС‹Рµ (EMA20={ema20_val}, EMA50={ema50_val})")
             if pd.notna(rsi_val):
                 parts.append(f"RSI14 {rsi_val:.1f}")
             if pd.notna(atr_val):
                 parts.append(f"ATR14 {atr_val:.2f}")
-            details = "; ".join(parts) if parts else "нет валидных значений EMA/RSI/ATR"
-        decision_obj["reason"] = (reason + " — " if reason else "") + f"индикаторы: {details}"
-        log(f"?? Причина skip дополнена индикаторами для {symbol}", Fore.LIGHTBLACK_EX)
+            details = "; ".join(parts) if parts else "РЅРµС‚ РІР°Р»РёРґРЅС‹С… Р·РЅР°С‡РµРЅРёР№ EMA/RSI/ATR"
+        decision_obj["reason"] = (reason + " вЂ” " if reason else "") + f"РёРЅРґРёРєР°С‚РѕСЂС‹: {details}"
+        log(f"?? РџСЂРёС‡РёРЅР° skip РґРѕРїРѕР»РЅРµРЅР° РёРЅРґРёРєР°С‚РѕСЂР°РјРё РґР»СЏ {symbol}", Fore.LIGHTBLACK_EX)
         return decision_obj
 
     decision = (
@@ -9688,23 +9688,23 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
     needs = []
     if decision is None:
         messages_init, tokens_init, _ = prepare_messages(stage="initial")
-        log(f"?? Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
+        log(f"?? РўРѕРєРµРЅС‹ Р·Р°РїСЂРѕСЃР° (initial) РґР»СЏ {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
         per_cap_init = _current_request_token_cap()
         if per_cap_init and tokens_init > per_cap_init:
-            log(f"? {symbol}: запрос initial превышает кап {per_cap_init} токенов", Fore.YELLOW)
+            log(f"? {symbol}: Р·Р°РїСЂРѕСЃ initial РїСЂРµРІС‹С€Р°РµС‚ РєР°Рї {per_cap_init} С‚РѕРєРµРЅРѕРІ", Fore.YELLOW)
             fallback_option = fallback_due_to("token cap exceeded (initial)")
             if fallback_option:
                 return fallback_option
             return {"symbol": symbol, "action": "skip", "reason": "token cap exceeded"}
         if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
-            log(f"? {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
+            log(f"? {symbol}: РїСЂРѕРїСѓСЃРє initial-Р·Р°РїСЂРѕСЃР° РёР·-Р·Р° Р»РёРјРёС‚Р° С‚РѕРєРµРЅРѕРІ", Fore.YELLOW)
             fallback_option = fallback_due_to("token budget exhausted (initial)")
             if fallback_option:
                 return fallback_option
             return {"symbol": symbol, "action": "skip", "reason": "token budget exceeded"}
         _log_ai_request(AI_MODEL, tokens_init, f"{symbol} initial decision")
 
-        # --- Первый проход ---
+        # --- РџРµСЂРІС‹Р№ РїСЂРѕС…РѕРґ ---
         start_init = time.perf_counter()
         res = client.chat.completions.create(
             model=AI_MODEL,
@@ -9713,7 +9713,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             messages=messages_init
         )
         duration_init = time.perf_counter() - start_init
-        log(f"?? OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
+        log(f"?? OpenAI initial Р·Р°РїСЂРѕСЃ РґР»СЏ {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
         _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
         msg = res.choices[0].message.content
         decision = json.loads(msg)
@@ -9738,7 +9738,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             decision["needs"] = needs
         if not needs and action_initial == "skip":
             reason_text = (decision.get("reason") or "").lower()
-            keywords_auto_needs = ("запрос", "needs", "дополнитель", "подтвержд")
+            keywords_auto_needs = ("Р·Р°РїСЂРѕСЃ", "needs", "РґРѕРїРѕР»РЅРёС‚РµР»СЊ", "РїРѕРґС‚РІРµСЂР¶Рґ")
             if any(word in reason_text for word in keywords_auto_needs):
                 auto_needs = ["funding", "open_interest", "news"]
                 decision["needs"] = auto_needs
@@ -9833,7 +9833,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             log(msg_auto, Fore.LIGHTBLACK_EX)
             send_tg(msg_auto)
 
-    # --- Если запрошен контекст ---
+    # --- Р•СЃР»Рё Р·Р°РїСЂРѕС€РµРЅ РєРѕРЅС‚РµРєСЃС‚ ---
     if needs:
         if auto_low_confidence_needs_triggered:
             display = confidence_display or "n/a"
@@ -10004,7 +10004,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         stats_report = []
         for key,val in extra.items():
             if isinstance(val, list):
-                stats_report.append(f"{key}: {len(val)} записей")
+                stats_report.append(f"{key}: {len(val)} Р·Р°РїРёСЃРµР№")
             elif isinstance(val, dict) and val:
                 if key == "higher_tf":
                     inner = {k: len(v) for k,v in val.items()}
@@ -10014,7 +10014,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                     for tf_name, payload in (val.get("timeframes") or {}).items():
                         indicators = payload.get("indicators") or {}
                         tf_entries.append(
-                            f"{tf_name}: индикаторы {', '.join(indicators.keys()) or 'нет'}"
+                            f"{tf_name}: РёРЅРґРёРєР°С‚РѕСЂС‹ {', '.join(indicators.keys()) or 'РЅРµС‚'}"
                         )
                     if tf_entries:
                         stats_report.append(f"{key}: " + "; ".join(tf_entries))
@@ -10026,24 +10026,24 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                     if summary:
                         stats_report.append(f"{key}: {summary}")
                     else:
-                        stats_report.append(f"{key}: найдено")
+                        stats_report.append(f"{key}: РЅР°Р№РґРµРЅРѕ")
             else:
-                stats_report.append(f"{key}: нет данных")
+                stats_report.append(f"{key}: РЅРµС‚ РґР°РЅРЅС‹С…")
 
-        log("?? Контекст собран: " + ", ".join(stats_report), Fore.LIGHTBLACK_EX)
-        send_tg("?? Контекст собран для " + symbol + ":\n" + "\n".join(stats_report))
+        log("?? РљРѕРЅС‚РµРєСЃС‚ СЃРѕР±СЂР°РЅ: " + ", ".join(stats_report), Fore.LIGHTBLACK_EX)
+        send_tg("?? РљРѕРЅС‚РµРєСЃС‚ СЃРѕР±СЂР°РЅ РґР»СЏ " + symbol + ":\n" + "\n".join(stats_report))
 
         if False:
-            log(f"? {symbol}: пропуск допконтекста из-за достигнутого лимита токенов", Fore.YELLOW)
+            log(f"? {symbol}: РїСЂРѕРїСѓСЃРє РґРѕРїРєРѕРЅС‚РµРєСЃС‚Р° РёР·-Р·Р° РґРѕСЃС‚РёРіРЅСѓС‚РѕРіРѕ Р»РёРјРёС‚Р° С‚РѕРєРµРЅРѕРІ", Fore.YELLOW)
             decision["needs_followup"] = needs
             decision.pop("needs", None)
             return ensure_skip_reason(decision)
         bias_flag = bool(AI_AFTER_NEEDS_BIAS)
         messages_extra, tokens_extra, _ = prepare_messages(stage="extra", extra=extra, bias=bias_flag)
-        log(f"?? Токены запроса (extra) для {symbol}: {tokens_extra}", Fore.LIGHTBLACK_EX)
+        log(f"?? РўРѕРєРµРЅС‹ Р·Р°РїСЂРѕСЃР° (extra) РґР»СЏ {symbol}: {tokens_extra}", Fore.LIGHTBLACK_EX)
         per_cap_extra = _current_request_token_cap()
         if per_cap_extra and tokens_extra > per_cap_extra:
-            log(f"? {symbol}: запрос extra превышает кап {per_cap_extra} токенов", Fore.YELLOW)
+            log(f"? {symbol}: Р·Р°РїСЂРѕСЃ extra РїСЂРµРІС‹С€Р°РµС‚ РєР°Рї {per_cap_extra} С‚РѕРєРµРЅРѕРІ", Fore.YELLOW)
             decision["needs_followup"] = needs
             decision.pop("needs", None)
             fallback_option = fallback_due_to(
@@ -10054,7 +10054,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 return fallback_option
             return ensure_skip_reason(decision)
         if not _ensure_token_budget(tokens_extra, AI_MODEL, f"{symbol} extra decision"):
-            log(f"? {symbol}: пропуск extra-запроса из-за лимита токенов", Fore.YELLOW)
+            log(f"? {symbol}: РїСЂРѕРїСѓСЃРє extra-Р·Р°РїСЂРѕСЃР° РёР·-Р·Р° Р»РёРјРёС‚Р° С‚РѕРєРµРЅРѕРІ", Fore.YELLOW)
             decision["needs_followup"] = needs
             fallback_option = fallback_due_to(
                 "token budget exhausted (extra)",
@@ -10072,13 +10072,13 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             messages=messages_extra
         )
         duration_extra = time.perf_counter() - start_extra
-        log(f"?? OpenAI extra запрос для {symbol}: {duration_extra:.2f} c", Fore.LIGHTBLACK_EX)
+        log(f"?? OpenAI extra Р·Р°РїСЂРѕСЃ РґР»СЏ {symbol}: {duration_extra:.2f} c", Fore.LIGHTBLACK_EX)
         _register_ai_usage(AI_MODEL, getattr(res2, "usage", None), f"{symbol} extra decision")
         msg2 = res2.choices[0].message.content
         decision = json.loads(msg2)
         needs_followup = decision.get("needs", [])
         if needs_followup:
-            log(f"?? После допконтекста модель все ещё запрашивает {needs_followup} для {symbol}", Fore.LIGHTBLACK_EX)
+            log(f"?? РџРѕСЃР»Рµ РґРѕРїРєРѕРЅС‚РµРєСЃС‚Р° РјРѕРґРµР»СЊ РІСЃРµ РµС‰С‘ Р·Р°РїСЂР°С€РёРІР°РµС‚ {needs_followup} РґР»СЏ {symbol}", Fore.LIGHTBLACK_EX)
             decision["needs_followup"] = needs_followup
             decision.pop("needs", None)
         save_json_line(
@@ -10097,13 +10097,13 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "needs_followup": needs_followup
             }
         )
-        log(f"?? Второй проход завершён для {symbol}", Fore.CYAN)
-        send_tg(f"?? Второй проход завершён для {symbol}")
+        log(f"?? Р’С‚РѕСЂРѕР№ РїСЂРѕС…РѕРґ Р·Р°РІРµСЂС€С‘РЅ РґР»СЏ {symbol}", Fore.CYAN)
+        send_tg(f"?? Р’С‚РѕСЂРѕР№ РїСЂРѕС…РѕРґ Р·Р°РІРµСЂС€С‘РЅ РґР»СЏ {symbol}")
 
     decision = ensure_skip_reason(decision)
     return decision
 
-# --- Основная логика ---
+# --- РћСЃРЅРѕРІРЅР°СЏ Р»РѕРіРёРєР° ---
 def build_trade_plan_snapshot(
     exchange,
     *,
@@ -10376,7 +10376,7 @@ def run_cycle():
     if isinstance(metadata_state, dict) and metadata_state.get("reload_required"):
         new_hash = metadata_state.get("current_hash")
         short_hash = (new_hash or "")[:8] if isinstance(new_hash, str) else "?"
-        reason = f"? Обнаружен новый коммит {short_hash}, перезапускаем бота для загрузки обновлений."
+        reason = f"? РћР±РЅР°СЂСѓР¶РµРЅ РЅРѕРІС‹Р№ РєРѕРјРјРёС‚ {short_hash}, РїРµСЂРµР·Р°РїСѓСЃРєР°РµРј Р±РѕС‚Р° РґР»СЏ Р·Р°РіСЂСѓР·РєРё РѕР±РЅРѕРІР»РµРЅРёР№."
         _restart_with_latest_code(reason)
     ex = init_exchange()
     
@@ -10483,7 +10483,7 @@ def run_cycle():
     base_max_positions = max(0, MAX_OPEN_POSITIONS or 0)
     max_positions_limit = base_max_positions
     if max_positions_limit > 0 and open_positions is None:
-        log("?? Не удалось определить количество открытых позиций — лимит по позициям отключён на этот цикл", Fore.YELLOW)
+        log("?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ РєРѕР»РёС‡РµСЃС‚РІРѕ РѕС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ вЂ” Р»РёРјРёС‚ РїРѕ РїРѕР·РёС†РёСЏРј РѕС‚РєР»СЋС‡С‘РЅ РЅР° СЌС‚РѕС‚ С†РёРєР»", Fore.YELLOW)
         open_positions = None
     equity, available_margin, balance_snapshot_start = fetch_usdt_equity(ex)
     realized_start = None
@@ -10652,8 +10652,8 @@ def run_cycle():
     )
     last_equity = equity
     last_available_margin = available_margin
-    log(f"? Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
-    send_tg(f"? Бот запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT")
+    log(f"? Р‘РѕС‚ v{BOT_VERSION} Р·Р°РїСѓС‰РµРЅ. Р‘Р°Р»Р°РЅСЃ: {equity:.2f} USDT, РґРѕСЃС‚СѓРїРЅРѕ {available_margin:.2f} USDT", Fore.GREEN)
+    send_tg(f"? Р‘РѕС‚ Р·Р°РїСѓС‰РµРЅ. Р‘Р°Р»Р°РЅСЃ: {equity:.2f} USDT, РґРѕСЃС‚СѓРїРЅРѕ {available_margin:.2f} USDT")
 
     position_symbols: set[str] = set()
     for sym_pos, payload in positions_map.items():
@@ -11206,7 +11206,7 @@ def run_cycle():
     trade_plan_failed = trade_plan is None
     for i,sym in enumerate(symbols_sequence,1):
         if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
-            log(f"? Достигнут лимит {AI_HARD_STOP_BUDGET} токенов — дальнейший анализ остановлен", Fore.YELLOW)
+            log(f"? Р”РѕСЃС‚РёРіРЅСѓС‚ Р»РёРјРёС‚ {AI_HARD_STOP_BUDGET} С‚РѕРєРµРЅРѕРІ вЂ” РґР°Р»СЊРЅРµР№С€РёР№ Р°РЅР°Р»РёР· РѕСЃС‚Р°РЅРѕРІР»РµРЅ", Fore.YELLOW)
             break
         log(f"[{i}/{len(symbols_sequence)}] {sym}", Fore.LIGHTBLUE_EX)
         try:
@@ -11242,7 +11242,7 @@ def run_cycle():
                 try:
                     tf_df = fetch_df(ex, sym, tf)
                 except Exception as exc_fetch:
-                    log(f"?? не удалось получить {tf} для {sym}: {exc_fetch}", Fore.YELLOW)
+                    log(f"?? РЅРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ {tf} РґР»СЏ {sym}: {exc_fetch}", Fore.YELLOW)
                     continue
                 for ind_name in requested_indicators:
                     _apply_indicator_to_df(tf_df, ind_name)
@@ -11253,7 +11253,7 @@ def run_cycle():
                     tf_df = fetch_df(ex, sym, primary_tf)
                     timeframe_dfs[primary_tf] = tf_df
                 except Exception as exc_fetch:
-                    log(f"?? не удалось получить базовый таймфрейм {primary_tf} для {sym}: {exc_fetch}", Fore.RED)
+                    log(f"?? РЅРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ Р±Р°Р·РѕРІС‹Р№ С‚Р°Р№РјС„СЂРµР№Рј {primary_tf} РґР»СЏ {sym}: {exc_fetch}", Fore.RED)
                     continue
             df_primary = timeframe_dfs[primary_tf]
             df = df_primary.copy()
@@ -11291,7 +11291,7 @@ def run_cycle():
                 try:
                     news_payload_symbol = get_news(sym)
                 except Exception as news_exc:
-                    log(f"?? Не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
+                    log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РЅРѕРІРѕСЃС‚Рё РґР»СЏ {sym}: {news_exc}", Fore.YELLOW)
                     news_payload_symbol = None
             current_position = positions_map.get(sym)
             initial_position_amount = safe_float(
@@ -11311,7 +11311,7 @@ def run_cycle():
                 try:
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
                 except Exception as fetch_exc:
-                    log(f"?? Не удалось получить открытые ордера для {sym}: {fetch_exc}", Fore.YELLOW)
+                    log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РѕС‚РєСЂС‹С‚С‹Рµ РѕСЂРґРµСЂР° РґР»СЏ {sym}: {fetch_exc}", Fore.YELLOW)
                     open_orders_symbol = []
                 open_orders_prefetch[sym] = open_orders_symbol
             open_orders_symbol = _cleanup_excess_non_reduce_limits(
@@ -11660,10 +11660,10 @@ def run_cycle():
                     cancelled_ids.add(oid)
                     cancelled_success.append((oid, source))
                     orders_activity = True
-                    log(f"?? Отменён ордер {oid} для {sym} (источник {source})", Fore.LIGHTBLUE_EX)
+                    log(f"?? РћС‚РјРµРЅС‘РЅ РѕСЂРґРµСЂ {oid} РґР»СЏ {sym} (РёСЃС‚РѕС‡РЅРёРє {source})", Fore.LIGHTBLUE_EX)
                 else:
                     cancel_failures.append((oid, err))
-                    log(f"?? Не удалось отменить ордер {oid} для {sym}: {err}", Fore.YELLOW)
+                    log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РјРµРЅРёС‚СЊ РѕСЂРґРµСЂ {oid} РґР»СЏ {sym}: {err}", Fore.YELLOW)
 
             for oid in cancel_candidates:
                 try_cancel(oid, "cancel_orders")
@@ -11680,12 +11680,12 @@ def run_cycle():
 
             if cancelled_success:
                 summary = ", ".join(oid for oid, _ in cancelled_success)
-                send_tg(f"?? Отменены ордера по {sym}: {summary}")
-                # Обновляем список открытых ордеров после отмены
+                send_tg(f"?? РћС‚РјРµРЅРµРЅС‹ РѕСЂРґРµСЂР° РїРѕ {sym}: {summary}")
+                # РћР±РЅРѕРІР»СЏРµРј СЃРїРёСЃРѕРє РѕС‚РєСЂС‹С‚С‹С… РѕСЂРґРµСЂРѕРІ РїРѕСЃР»Рµ РѕС‚РјРµРЅС‹
                 open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
             if cancel_failures:
                 errors = "; ".join(f"{oid}: {err}" for oid, err in cancel_failures)
-                send_tg(f"?? Не удалось отменить ордера по {sym}: {errors}")
+                send_tg(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РјРµРЅРёС‚СЊ РѕСЂРґРµСЂР° РїРѕ {sym}: {errors}")
 
             # Downgrade low-confidence opens to skip before handling branches
             if action == "open" and not has_position:
@@ -11695,27 +11695,27 @@ def run_cycle():
                     conf_val = 0.0
                 if conf_val < OPEN_MIN_CONFIDENCE:
                     log(
-                        f"?? Пропуск {sym}: confidence {conf_val:.3f} ниже порога {OPEN_MIN_CONFIDENCE:.3f} для открытия",
+                        f"?? РџСЂРѕРїСѓСЃРє {sym}: confidence {conf_val:.3f} РЅРёР¶Рµ РїРѕСЂРѕРіР° {OPEN_MIN_CONFIDENCE:.3f} РґР»СЏ РѕС‚РєСЂС‹С‚РёСЏ",
                         Fore.WHITE,
                     )
                     send_tg(
-                        f"?? {sym}: сигнал OPEN пропущен — confidence {conf_val:.3f} ниже порога {OPEN_MIN_CONFIDENCE:.3f}"
+                        f"?? {sym}: СЃРёРіРЅР°Р» OPEN РїСЂРѕРїСѓС‰РµРЅ вЂ” confidence {conf_val:.3f} РЅРёР¶Рµ РїРѕСЂРѕРіР° {OPEN_MIN_CONFIDENCE:.3f}"
                     )
                     action = "skip"
                     dec["action"] = "skip"
 
             if action == "skip":
-                log(f"?? Пропуск {sym} ({reason})", Fore.WHITE)
-                send_tg(f"?? Пропуск {sym} — {reason or 'причина не указана'}")
+                log(f"?? РџСЂРѕРїСѓСЃРє {sym} ({reason})", Fore.WHITE)
+                send_tg(f"?? РџСЂРѕРїСѓСЃРє {sym} вЂ” {reason or 'РїСЂРёС‡РёРЅР° РЅРµ СѓРєР°Р·Р°РЅР°'}")
             elif action == "close":
                 if not current_position or abs(float(current_position.get("amount") or 0)) == 0:
-                    log(f"?? Позиция по {sym} отсутствует, нечего закрывать ({reason})", Fore.YELLOW)
-                    send_tg(f"?? {sym}: закрытие пропущено — нет открытой позиции")
+                    log(f"?? РџРѕР·РёС†РёСЏ РїРѕ {sym} РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚, РЅРµС‡РµРіРѕ Р·Р°РєСЂС‹РІР°С‚СЊ ({reason})", Fore.YELLOW)
+                    send_tg(f"?? {sym}: Р·Р°РєСЂС‹С‚РёРµ РїСЂРѕРїСѓС‰РµРЅРѕ вЂ” РЅРµС‚ РѕС‚РєСЂС‹С‚РѕР№ РїРѕР·РёС†РёРё")
                 else:
                     close_side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
                     qty = abs(float(current_position.get("amount") or 0))
                     if qty == 0:
-                        log(f"?? Объём позиции {sym} равен нулю, пропускаем закрытие", Fore.YELLOW)
+                        log(f"?? РћР±СЉС‘Рј РїРѕР·РёС†РёРё {sym} СЂР°РІРµРЅ РЅСѓР»СЋ, РїСЂРѕРїСѓСЃРєР°РµРј Р·Р°РєСЂС‹С‚РёРµ", Fore.YELLOW)
                     else:
                         params = {"reduceOnly": True}
                         position_idx = get_position_idx(close_side)
@@ -11723,8 +11723,8 @@ def run_cycle():
                             params["positionIdx"] = position_idx
                         try:
                             ex.create_order(sym, "market", close_side, qty, None, params)
-                            log(f"?? Закрыть позицию {sym} ({reason})", Fore.YELLOW)
-                            send_tg(f"?? Закрыт {sym} {close_side.upper()} {qty:.4f} — {reason or 'причина не указана'}")
+                            log(f"?? Р—Р°РєСЂС‹С‚СЊ РїРѕР·РёС†РёСЋ {sym} ({reason})", Fore.YELLOW)
+                            send_tg(f"?? Р—Р°РєСЂС‹С‚ {sym} {close_side.upper()} {qty:.4f} вЂ” {reason or 'РїСЂРёС‡РёРЅР° РЅРµ СѓРєР°Р·Р°РЅР°'}")
                             positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                             base_asset_after_close = _extract_base_asset(sym)
                             if base_asset_after_close:
@@ -11735,11 +11735,11 @@ def run_cycle():
                             current_position = positions_map.get(sym)
                         except Exception as e:
                             err_text = str(e)
-                            log(f"?? Ошибка закрытия {sym}: {err_text}", Fore.RED)
-                            send_tg(f"?? Ошибка закрытия для {sym}: {err_text}")
+                            log(f"?? РћС€РёР±РєР° Р·Р°РєСЂС‹С‚РёСЏ {sym}: {err_text}", Fore.RED)
+                            send_tg(f"?? РћС€РёР±РєР° Р·Р°РєСЂС‹С‚РёСЏ РґР»СЏ {sym}: {err_text}")
             elif action == "hold":
-                log(f"?? Удерживаем {sym} ({reason})", Fore.BLUE)
-                send_tg(f"?? {sym}: удерживаем позицию — {reason or 'причина не указана'}")
+                log(f"?? РЈРґРµСЂР¶РёРІР°РµРј {sym} ({reason})", Fore.BLUE)
+                send_tg(f"?? {sym}: СѓРґРµСЂР¶РёРІР°РµРј РїРѕР·РёС†РёСЋ вЂ” {reason or 'РїСЂРёС‡РёРЅР° РЅРµ СѓРєР°Р·Р°РЅР°'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
                     updated_orders = ensure_position_protection(ex, sym, current_position, df, open_orders_symbol, config=symbol_meta)
                     if updated_orders is not None:
@@ -11758,13 +11758,13 @@ def run_cycle():
                 context_desc = ", ".join(context_parts) if context_parts else "context not specified"
                 log(f"?? Needs data for {sym}: {reason} (requested {context_desc})", Fore.WHITE)
                 send_tg(
-                    f"?? {sym}: needs additional data — {reason or 'reason not provided'} (requested {context_desc})"
+                    f"?? {sym}: needs additional data вЂ” {reason or 'reason not provided'} (requested {context_desc})"
                 )
                 continue
             elif action == "open":
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
-                    log(f"?? Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
-                    send_tg(f"?? {sym}: позиция уже открыта, сигнал open пропущен")
+                    log(f"?? РџРѕР·РёС†РёСЏ РїРѕ {sym} СѓР¶Рµ РѕС‚РєСЂС‹С‚Р° (side={current_position.get('side')}, amount={current_position.get('amount')}), РїСЂРѕРїСѓСЃРєР°РµРј РїРѕРІС‚РѕСЂРЅРѕРµ РѕС‚РєСЂС‹С‚РёРµ", Fore.YELLOW)
+                    send_tg(f"?? {sym}: РїРѕР·РёС†РёСЏ СѓР¶Рµ РѕС‚РєСЂС‹С‚Р°, СЃРёРіРЅР°Р» open РїСЂРѕРїСѓС‰РµРЅ")
                     protection_df = df.copy() if isinstance(df, pd.DataFrame) else None
                     if protection_df is None or protection_df.empty:
                         protection_df = df_primary.copy() if isinstance(df_primary, pd.DataFrame) else None
@@ -11788,14 +11788,14 @@ def run_cycle():
                             open_orders_cache[sym] = updated_orders
                     continue
                 elif max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
-                    log(f"? Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), пропускаем {sym}", Fore.YELLOW)
-                    send_tg(f"? Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), {sym} пропущен")
+                    log(f"? Р›РёРјРёС‚ РѕС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ РґРѕСЃС‚РёРіРЅСѓС‚ ({open_positions}/{max_positions_limit}), РїСЂРѕРїСѓСЃРєР°РµРј {sym}", Fore.YELLOW)
+                    send_tg(f"? Р›РёРјРёС‚ РѕС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ РґРѕСЃС‚РёРіРЅСѓС‚ ({open_positions}/{max_positions_limit}), {sym} РїСЂРѕРїСѓС‰РµРЅ")
                 else:
-                    log(f"?? Сигнал {side.upper()} ({reason})", Fore.GREEN)
-                    send_tg(f"?? {sym} {side.upper()} — {reason or 'причина не указана'}")
+                    log(f"?? РЎРёРіРЅР°Р» {side.upper()} ({reason})", Fore.GREEN)
+                    send_tg(f"?? {sym} {side.upper()} вЂ” {reason or 'РїСЂРёС‡РёРЅР° РЅРµ СѓРєР°Р·Р°РЅР°'}")
                     if df.empty:
-                        log(f"?? Нет данных 30m для {sym}, пропускаем открытие", Fore.YELLOW)
-                        send_tg(f"?? {sym}: недостаточно данных для открытия позиции")
+                        log(f"?? РќРµС‚ РґР°РЅРЅС‹С… 30m РґР»СЏ {sym}, РїСЂРѕРїСѓСЃРєР°РµРј РѕС‚РєСЂС‹С‚РёРµ", Fore.YELLOW)
+                        send_tg(f"?? {sym}: РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ РѕС‚РєСЂС‹С‚РёСЏ РїРѕР·РёС†РёРё")
                         continue
                     df["atr"] = atr(df,14)
                     trade_rules = _get_symbol_trade_rules(ex, sym)
@@ -11814,8 +11814,8 @@ def run_cycle():
                     price = float(last_row.get("close") or 0)
                     atrv = float(last_row.get("atr") or 0)
                     if not (math.isfinite(price) and math.isfinite(atrv) and atrv > 0):
-                        log(f"?? Не удалось рассчитать ATR/цену для {sym}, пропуск сигнала", Fore.YELLOW)
-                        send_tg(f"?? {sym}: нет валидных значений ATR для расчёта размера")
+                        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ СЂР°СЃСЃС‡РёС‚Р°С‚СЊ ATR/С†РµРЅСѓ РґР»СЏ {sym}, РїСЂРѕРїСѓСЃРє СЃРёРіРЅР°Р»Р°", Fore.YELLOW)
+                        send_tg(f"?? {sym}: РЅРµС‚ РІР°Р»РёРґРЅС‹С… Р·РЅР°С‡РµРЅРёР№ ATR РґР»СЏ СЂР°СЃС‡С‘С‚Р° СЂР°Р·РјРµСЂР°")
                         continue
                     sl = price - SL_ATR * atrv if side == "buy" else price + SL_ATR * atrv
                     tp = price + TP_ATR * atrv if side == "buy" else price - TP_ATR * atrv
@@ -11897,8 +11897,8 @@ def run_cycle():
                             alloc = 1.0
                         alloc = max(0.0, min(1.0, alloc))
                         risk_budget_base *= alloc
-                        # Используем динамический риск, если он включён и валиден,
-                        # иначе возвращаемся к базовому RISK_PCT.
+                        # РСЃРїРѕР»СЊР·СѓРµРј РґРёРЅР°РјРёС‡РµСЃРєРёР№ СЂРёСЃРє, РµСЃР»Рё РѕРЅ РІРєР»СЋС‡С‘РЅ Рё РІР°Р»РёРґРµРЅ,
+                        # РёРЅР°С‡Рµ РІРѕР·РІСЂР°С‰Р°РµРјСЃСЏ Рє Р±Р°Р·РѕРІРѕРјСѓ RISK_PCT.
                         raw_risk_pct = (
                             CURRENT_RISK_PCT
                             if DYNAMIC_RISK_ENABLED
@@ -12003,7 +12003,7 @@ def run_cycle():
                     except Exception:
                         qty = float(round(qty, 8))
                     if qty <= 0:
-                        log(f"?? После округления объём стал ? 0 для {sym}", Fore.YELLOW)
+                        log(f"?? РџРѕСЃР»Рµ РѕРєСЂСѓРіР»РµРЅРёСЏ РѕР±СЉС‘Рј СЃС‚Р°Р» ? 0 РґР»СЏ {sym}", Fore.YELLOW)
                         continue
                     notional = qty * price
                     if notional + NOTIONAL_EPSILON < min_notional_required:
@@ -12192,11 +12192,11 @@ def run_cycle():
                             remaining_qty = max(0.0, qty - precise_qty)
                             total_margin_used = fallback_notional / symbol_leverage if symbol_leverage else fallback_notional
                             entry_summaries.append(f"{precise_qty:.4f} @ {fallback_price:.2f} (fallback, margin {total_margin_used:.2f} USDT)")
-                        log(f"?? Ордеры {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
+                        log(f"?? РћСЂРґРµСЂС‹ {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
-                            f"?? {sym} {side.upper()} входы:\n"
+                            f"?? {sym} {side.upper()} РІС…РѕРґС‹:\n"
                             + "\n".join(f"- {summary}" for summary in entry_summaries)
-                            + f"\nSL {sl:.2f} TP {tp:.2f}\nМаржа {total_margin_used:.2f} USDT, плечо x{symbol_leverage}"
+                            + f"\nSL {sl:.2f} TP {tp:.2f}\nРњР°СЂР¶Р° {total_margin_used:.2f} USDT, РїР»РµС‡Рѕ x{symbol_leverage}"
                         )
                         open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
                         positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
@@ -12208,8 +12208,8 @@ def run_cycle():
                     except Exception as e:
                         err_text = str(e)
                         open_error = err_text
-                        log(f"?? Ошибка ордера: {err_text}", Fore.RED)
-                        send_tg(f"?? Ошибка ордера для {sym}: {err_text}")
+                        log(f"?? РћС€РёР±РєР° РѕСЂРґРµСЂР°: {err_text}", Fore.RED)
+                        send_tg(f"?? РћС€РёР±РєР° РѕСЂРґРµСЂР° РґР»СЏ {sym}: {err_text}")
                 if preallocated_base_asset:
                     pending_val = pending_base_allocations.get(preallocated_base_asset, 0)
                     if pending_val > 0:
@@ -12218,7 +12218,7 @@ def run_cycle():
                         base_exposure_counts[preallocated_base_asset] = base_exposure_counts.get(preallocated_base_asset, 0) + 1
             else:
                 if action not in ("hold", "manage", "none", "", None):
-                    log(f"?? Неизвестное действие \"{action}\" для {sym}, обработка только дополнительных ордеров", Fore.YELLOW)
+                    log(f"?? РќРµРёР·РІРµСЃС‚РЅРѕРµ РґРµР№СЃС‚РІРёРµ \"{action}\" РґР»СЏ {sym}, РѕР±СЂР°Р±РѕС‚РєР° С‚РѕР»СЊРєРѕ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹С… РѕСЂРґРµСЂРѕРІ", Fore.YELLOW)
 
             current_amount_val = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts"))
             limit_blocks_new_orders = (
@@ -12243,7 +12243,7 @@ def run_cycle():
                 )
                 if executed:
                     orders_activity = True
-                    send_tg("?? " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
+                    send_tg("?? " + sym + " РґРѕРї. РѕСЂРґРµСЂР°:\n- " + "\n- ".join(executed))
                 if actions_performed:
                     orders_activity = True
                     positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
@@ -12306,9 +12306,9 @@ def run_cycle():
                         change_parts.append("no changes")
                     detail_entry = f"[{sym}] - holding position ({', '.join(change_parts)})"
                 elif action == "skip":
-                    detail_entry = f"[{sym}] - skip" + (f" — {reason}" if reason else "")
+                    detail_entry = f"[{sym}] - skip" + (f" вЂ” {reason}" if reason else "")
                 else:
-                    detail_entry = f"[{sym}] - skip" + (f" — {reason}" if reason else "")
+                    detail_entry = f"[{sym}] - skip" + (f" вЂ” {reason}" if reason else "")
             if detail_entry and sym_confidence_text:
                 tag_suffix = f" {sym_confidence_tag}" if sym_confidence_tag else ""
                 detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
@@ -12338,7 +12338,7 @@ def run_cycle():
                 counts[summary_outcome] = counts.get(summary_outcome, 0) + 1
 
         except Exception as e:
-            log(f"Ошибка {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
+            log(f"РћС€РёР±РєР° {sym}: {e}\n{traceback.format_exc()}", Fore.RED)
 
     global_open_orders = fetch_all_open_orders_grouped(ex, limit=200)
     cleanup_symbols = sorted(
@@ -12401,18 +12401,18 @@ def run_cycle():
     if cleanup_cancelled:
         for sym_cleanup, ids in cleanup_cancelled.items():
             summary = ", ".join(ids)
-            log(f"? Сняты reduce-only стоп-ордера по {sym_cleanup}: {summary}", Fore.LIGHTBLUE_EX)
-            send_tg(f"?? {sym_cleanup}: убраны reduce-only стопы (без позиции): {summary}")
+            log(f"? РЎРЅСЏС‚С‹ reduce-only СЃС‚РѕРї-РѕСЂРґРµСЂР° РїРѕ {sym_cleanup}: {summary}", Fore.LIGHTBLUE_EX)
+            send_tg(f"?? {sym_cleanup}: СѓР±СЂР°РЅС‹ reduce-only СЃС‚РѕРїС‹ (Р±РµР· РїРѕР·РёС†РёРё): {summary}")
     if cleanup_failures:
         details = "; ".join(f"{sym}:{oid} -> {err}" for sym, oid, err in cleanup_failures)
-        log(f"?? Не удалось отменить reduce-only стоп-ордера: {details}", Fore.YELLOW)
-        send_tg(f"?? Ошибка отмены reduce-only стоп-ордеров: {details}")
+        log(f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РјРµРЅРёС‚СЊ reduce-only СЃС‚РѕРї-РѕСЂРґРµСЂР°: {details}", Fore.YELLOW)
+        send_tg(f"?? РћС€РёР±РєР° РѕС‚РјРµРЅС‹ reduce-only СЃС‚РѕРї-РѕСЂРґРµСЂРѕРІ: {details}")
 
     if decisions_total>0:
         pct={k:(v/decisions_total)*100 for k,v in counts.items()}
-        summary=f"?? Итоги: открыто {counts['open']} ({pct['open']:.1f}%), " \
-                f"закрыто {counts['close']} ({pct['close']:.1f}%), " \
-                f"пропуск {counts['skip']} ({pct['skip']:.1f}%) — всего {decisions_total}"
+        summary=f"?? РС‚РѕРіРё: РѕС‚РєСЂС‹С‚Рѕ {counts['open']} ({pct['open']:.1f}%), " \
+                f"Р·Р°РєСЂС‹С‚Рѕ {counts['close']} ({pct['close']:.1f}%), " \
+                f"РїСЂРѕРїСѓСЃРє {counts['skip']} ({pct['skip']:.1f}%) вЂ” РІСЃРµРіРѕ {decisions_total}"
         log(summary, Fore.CYAN)
         send_tg(summary)
         try:
@@ -12463,7 +12463,7 @@ def run_cycle():
     try:
         if positions_summary:
             log(f"[DEBUG] positions_summary: {positions_summary}", Fore.LIGHTBLACK_EX)
-            status_lines = ["?? Открытые позиции:"]
+            status_lines = ["?? РћС‚РєСЂС‹С‚С‹Рµ РїРѕР·РёС†РёРё:"]
             total_unrealized = 0.0
             for pos in positions_summary[:20]:
                 entry_val = pos.get("entry")
@@ -12478,10 +12478,10 @@ def run_cycle():
                     f"- {pos.get('symbol')} {pos.get('side')} {amount_txt}{entry_txt} (PnL {unreal_val:+.2f} USDT)"
                 )
             if len(positions_summary) > 20:
-                status_lines.append(f"… ещё {len(positions_summary) - 20} позиций")
+                status_lines.append(f"вЂ¦ РµС‰С‘ {len(positions_summary) - 20} РїРѕР·РёС†РёР№")
             status_lines.append(f"? PnL: {total_unrealized:+.2f} USDT")
         else:
-            status_lines = ["?? Открытых позиций нет."]
+            status_lines = ["?? РћС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ РЅРµС‚."]
         cash_flows = fetch_unified_cash_flows(ex, limit=20)
         for warn in cash_flows.get("warnings", []):
             log(warn, Fore.YELLOW)
@@ -12491,17 +12491,17 @@ def run_cycle():
         withdrawals_total = totals.get("withdraw") or {}
         if deposits_total or withdrawals_total:
             status_lines.append("")
-            status_lines.append("?? Unified Trading (последние операции):")
+            status_lines.append("?? Unified Trading (РїРѕСЃР»РµРґРЅРёРµ РѕРїРµСЂР°С†РёРё):")
             if deposits_total:
                 deposit_summary = ", ".join(
                     f"{coin}:{amount:.4f}" for coin, amount in sorted(deposits_total.items())
                 )
-                status_lines.append(f"- Ввод: {deposit_summary}")
+                status_lines.append(f"- Р’РІРѕРґ: {deposit_summary}")
             else:
-                status_lines.append("- Ввод: нет")
+                status_lines.append("- Р’РІРѕРґ: РЅРµС‚")
         _send_status_notification("\n".join(status_lines))
     except Exception as exc_status:
-        log(f"[STATUS] Не удалось отправить список позиций: {exc_status}", Fore.YELLOW)
+        log(f"[STATUS] РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ СЃРїРёСЃРѕРє РїРѕР·РёС†РёР№: {exc_status}", Fore.YELLOW)
 
     no_active_positions = final_positions_available and final_positions_count == 0
     flat_skipped_all = (
@@ -12629,10 +12629,10 @@ def run_cycle():
 
     if AI_TOKEN_USAGE_BY_MODEL:
         usage_lines = [
-            f"- модель {model}: {stats['total']} токенов (prompt {stats['prompt']}, completion {stats['completion']}, запросов {stats['requests']})"
+            f"- РјРѕРґРµР»СЊ {model}: {stats['total']} С‚РѕРєРµРЅРѕРІ (prompt {stats['prompt']}, completion {stats['completion']}, Р·Р°РїСЂРѕСЃРѕРІ {stats['requests']})"
             for model, stats in sorted(AI_TOKEN_USAGE_BY_MODEL.items())
         ]
-        usage_report = "AI токены за цикл:\n" + "\n".join(usage_lines)
+        usage_report = "AI С‚РѕРєРµРЅС‹ Р·Р° С†РёРєР»:\n" + "\n".join(usage_lines)
         log(usage_report, Fore.LIGHTBLACK_EX)
         send_tg(usage_report)
 
@@ -12681,7 +12681,7 @@ def run_cycle():
     elif next_run_dt is None:
         next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=next_delay_minutes)
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
-    send_tg("? Цикл завершён.")
+    send_tg("? Р¦РёРєР» Р·Р°РІРµСЂС€С‘РЅ.")
     changelog_state = ensure_changelog_announcement()
     version_display = BOT_VERSION
     send_kwargs: dict[str, Any] = {}
@@ -12696,21 +12696,21 @@ def run_cycle():
     release_thread = TELEGRAM_RELEASE_THREAD_ID if TELEGRAM_RELEASE_THREAD_ID is not None else TG_TOPIC_ID
     send_kwargs.setdefault("thread_id", release_thread)
     if changelog_message_id or link:
-        send_tg(f"?? Версия {version_display}", **send_kwargs)
+        send_tg(f"?? Р’РµСЂСЃРёСЏ {version_display}", **send_kwargs)
     else:
-        send_tg(f"?? Версия {BOT_VERSION}. {BOT_CHANGELOG}", thread_id=release_thread)
+        send_tg(f"?? Р’РµСЂСЃРёСЏ {BOT_VERSION}. {BOT_CHANGELOG}", thread_id=release_thread)
     balance_snapshot_end: dict[str, Any] | None = None
     closed_order_details: list[dict[str, Any]] = []
     try:
         equity_end, available_end, balance_snapshot_end = fetch_usdt_equity(ex)
     except Exception as exc_equity:
-        end_balance_text = f"?? Не удалось обновить баланс: {exc_equity}"
+        end_balance_text = f"?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ Р±Р°Р»Р°РЅСЃ: {exc_equity}"
         log(end_balance_text, Fore.YELLOW)
         send_tg(end_balance_text)
     else:
-        end_balance_text = f"Баланс: {equity_end:.2f} USDT, доступно {available_end:.2f} USDT"
-        log(f"?? Завершение сессии. {end_balance_text}", Fore.GREEN)
-        send_tg(f"?? Завершение сессии. {end_balance_text}")
+        end_balance_text = f"Р‘Р°Р»Р°РЅСЃ: {equity_end:.2f} USDT, РґРѕСЃС‚СѓРїРЅРѕ {available_end:.2f} USDT"
+        log(f"?? Р—Р°РІРµСЂС€РµРЅРёРµ СЃРµСЃСЃРёРё. {end_balance_text}", Fore.GREEN)
+        send_tg(f"?? Р—Р°РІРµСЂС€РµРЅРёРµ СЃРµСЃСЃРёРё. {end_balance_text}")
         realized_end = None
         if isinstance(balance_snapshot_end, dict):
             realized_end = balance_snapshot_end.get("_realizedPnl")
@@ -12830,15 +12830,15 @@ def run_cycle():
                                 send_tg(baseline_msg)
                             except Exception:
                                 pass
-            results_lines: list[str] = ["?? Итоги последних 6 часов"]
+            results_lines: list[str] = ["?? РС‚РѕРіРё РїРѕСЃР»РµРґРЅРёС… 6 С‡Р°СЃРѕРІ"]
             if closed_pnl_value is not None:
-                results_lines.append(f"PnL (закрытые ордера): {closed_pnl_value:+.2f} USDT ({closed_pnl_count} ордеров)")
+                results_lines.append(f"PnL (Р·Р°РєСЂС‹С‚С‹Рµ РѕСЂРґРµСЂР°): {closed_pnl_value:+.2f} USDT ({closed_pnl_count} РѕСЂРґРµСЂРѕРІ)")
             elif pnl_value is not None:
                 basis_label = pnl_basis or "equity"
                 extra = f", ref {reference_value:.2f}" if reference_value is not None and math.isfinite(reference_value) else ""
                 results_lines.append(f"PnL ({basis_label}): {pnl_value:+.2f} USDT{extra}")
             else:
-                results_lines.append("PnL: данные недоступны.")
+                results_lines.append("PnL: РґР°РЅРЅС‹Рµ РЅРµРґРѕСЃС‚СѓРїРЅС‹.")
 
             latest_equity_point: tuple[datetime.datetime, float, float | None] | None = None
             if isinstance(equity_end, (int, float)) and math.isfinite(equity_end):
@@ -12867,11 +12867,11 @@ def run_cycle():
                     for day, pct in daily_points[-3:]
                 )
                 if legend_tail:
-                    results_lines.append(f"?? Ежесуточный PnL (%): {daily_chart} ({legend_tail})")
+                    results_lines.append(f"?? Р•Р¶РµСЃСѓС‚РѕС‡РЅС‹Р№ PnL (%): {daily_chart} ({legend_tail})")
                 else:
-                    results_lines.append(f"?? Ежесуточный PnL (%): {daily_chart}")
+                    results_lines.append(f"?? Р•Р¶РµСЃСѓС‚РѕС‡РЅС‹Р№ PnL (%): {daily_chart}")
             else:
-                results_lines.append("?? Ежесуточный PnL (%): недостаточно данных.")
+                results_lines.append("?? Р•Р¶РµСЃСѓС‚РѕС‡РЅС‹Р№ PnL (%): РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С….")
 
             reported_ids = set(results_state.get("closed_order_ids") or [])
             new_orders: list[dict[str, Any]] = []
@@ -12886,16 +12886,16 @@ def run_cycle():
                 total_new_pnl = sum(
                     detail.get("pnl", 0.0) for detail in new_orders if isinstance(detail.get("pnl"), (int, float))
                 )
-                results_lines.append(f"? новых закрытий: {total_new_pnl:+.2f} USDT ({len(new_orders)} ордеров)")
+                results_lines.append(f"? РЅРѕРІС‹С… Р·Р°РєСЂС‹С‚РёР№: {total_new_pnl:+.2f} USDT ({len(new_orders)} РѕСЂРґРµСЂРѕРІ)")
                 for detail in new_orders[:RESULTS_CLOSED_ORDER_DISPLAY_LIMIT]:
                     results_lines.append(_format_closed_order_line(detail))
                 if len(new_orders) > RESULTS_CLOSED_ORDER_DISPLAY_LIMIT:
-                    results_lines.append(f"… ещё {len(new_orders) - RESULTS_CLOSED_ORDER_DISPLAY_LIMIT} ордер(ов)")
+                    results_lines.append(f"вЂ¦ РµС‰С‘ {len(new_orders) - RESULTS_CLOSED_ORDER_DISPLAY_LIMIT} РѕСЂРґРµСЂ(РѕРІ)")
                 if _update_daily_closed_pnl_map(daily_closed_map, new_orders):
                     results_state["daily_closed_pnl"] = daily_closed_map
                     results_state_dirty = True
             else:
-                results_lines.append("?? Новых закрытых ордеров за 6ч нет.")
+                results_lines.append("?? РќРѕРІС‹С… Р·Р°РєСЂС‹С‚С‹С… РѕСЂРґРµСЂРѕРІ Р·Р° 6С‡ РЅРµС‚.")
             _send_results_notification("\n".join(results_lines))
             if new_keys:
                 updated_ids = list(reported_ids) + new_keys
@@ -12985,8 +12985,8 @@ def main():
             local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
             next_local = target_dt.astimezone(local_tz)
             eta_msg = (
-                f"?? Следующая сессия запланирована на {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
-                f"(~{delay_minutes:.1f} мин)"
+                f"?? РЎР»РµРґСѓСЋС‰Р°СЏ СЃРµСЃСЃРёСЏ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅР° РЅР° {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                f"(~{delay_minutes:.1f} РјРёРЅ)"
             )
             log(eta_msg, Fore.LIGHTBLACK_EX)
             send_tg(eta_msg)
@@ -13011,7 +13011,7 @@ def main():
                     eta_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
                     eta_local = eta_dt.astimezone(local_tz)
                     progress_msg = (
-                        f"?? Осталось ~{minutes_left:.1f} мин до следующей сессии "
+                        f"?? РћСЃС‚Р°Р»РѕСЃСЊ ~{minutes_left:.1f} РјРёРЅ РґРѕ СЃР»РµРґСѓСЋС‰РµР№ СЃРµСЃСЃРёРё "
                         f"({eta_local.strftime('%H:%M:%S %Z')})"
                     )
                     log(progress_msg, Fore.LIGHTBLACK_EX)
@@ -13068,46 +13068,46 @@ def _handle_tokens_command(args: list[str]) -> str:
     if action in {"reset"}:
         AI_TOKEN_USAGE_TOTAL = 0
         AI_TOKEN_USAGE_BY_MODEL.clear()
-        return "?? Счётчики токенов сброшены для текущего цикла."
+        return "?? РЎС‡С‘С‚С‡РёРєРё С‚РѕРєРµРЅРѕРІ СЃР±СЂРѕС€РµРЅС‹ РґР»СЏ С‚РµРєСѓС‰РµРіРѕ С†РёРєР»Р°."
     if action in {"budget", "soft"}:
         value_token = args[1] if len(args) > 1 else None
         parsed = _parse_minutes_argument(value_token or "") if value_token else None
         if parsed is None:
-            return "? Укажите числовой лимит токенов. Пример: /tokens budget 150000"
+            return "? РЈРєР°Р¶РёС‚Рµ С‡РёСЃР»РѕРІРѕР№ Р»РёРјРёС‚ С‚РѕРєРµРЅРѕРІ. РџСЂРёРјРµСЂ: /tokens budget 150000"
         AI_TOKEN_BUDGET_CYCLE = max(1000, int(parsed))
         os.environ["OPENAI_TOKEN_BUDGET_PER_CYCLE"] = str(AI_TOKEN_BUDGET_CYCLE)
         _persist_env_values({"OPENAI_TOKEN_BUDGET_PER_CYCLE": str(AI_TOKEN_BUDGET_CYCLE)})
-        return f"? Лимит токенов на цикл обновлён: {AI_TOKEN_BUDGET_CYCLE}"
+        return f"? Р›РёРјРёС‚ С‚РѕРєРµРЅРѕРІ РЅР° С†РёРєР» РѕР±РЅРѕРІР»С‘РЅ: {AI_TOKEN_BUDGET_CYCLE}"
     if action in {"hard", "stop"}:
         value_token = args[1] if len(args) > 1 else None
         if not value_token or value_token.lower() in {"off", "none", "0"}:
             AI_HARD_STOP_BUDGET = 0
             os.environ.pop("OPENAI_HARD_STOP_BUDGET", None)
             _persist_env_values({"OPENAI_HARD_STOP_BUDGET": ""})
-            return "? Жёсткий стоп отключён."
+            return "? Р–С‘СЃС‚РєРёР№ СЃС‚РѕРї РѕС‚РєР»СЋС‡С‘РЅ."
         parsed = _parse_minutes_argument(value_token)
         if parsed is None:
-            return "? Укажите числовое значение. Пример: /tokens hard 200000"
+            return "? РЈРєР°Р¶РёС‚Рµ С‡РёСЃР»РѕРІРѕРµ Р·РЅР°С‡РµРЅРёРµ. РџСЂРёРјРµСЂ: /tokens hard 200000"
         AI_HARD_STOP_BUDGET = max(0, int(parsed))
         os.environ["OPENAI_HARD_STOP_BUDGET"] = str(AI_HARD_STOP_BUDGET)
         _persist_env_values({"OPENAI_HARD_STOP_BUDGET": str(AI_HARD_STOP_BUDGET)})
-        return f"? Жёсткий стоп обновлён: {AI_HARD_STOP_BUDGET}"
+        return f"? Р–С‘СЃС‚РєРёР№ СЃС‚РѕРї РѕР±РЅРѕРІР»С‘РЅ: {AI_HARD_STOP_BUDGET}"
     if action in {"secondary", "cheap"}:
         value_token = args[1] if len(args) > 1 else None
         if not value_token or value_token.lower() in {"off", "none", "0"}:
             AI_SECONDARY_BUDGET_START = 0
             os.environ.pop("OPENAI_SECONDARY_BUDGET_START", None)
             _persist_env_values({"OPENAI_SECONDARY_BUDGET_START": ""})
-            return "? Порог переключения на дешёвую модель отключён."
+            return "? РџРѕСЂРѕРі РїРµСЂРµРєР»СЋС‡РµРЅРёСЏ РЅР° РґРµС€С‘РІСѓСЋ РјРѕРґРµР»СЊ РѕС‚РєР»СЋС‡С‘РЅ."
         parsed = _parse_minutes_argument(value_token)
         if parsed is None:
-            return "? Укажите числовое значение. Пример: /tokens secondary 70000"
+            return "? РЈРєР°Р¶РёС‚Рµ С‡РёСЃР»РѕРІРѕРµ Р·РЅР°С‡РµРЅРёРµ. РџСЂРёРјРµСЂ: /tokens secondary 70000"
         AI_SECONDARY_BUDGET_START = max(0, int(parsed))
         os.environ["OPENAI_SECONDARY_BUDGET_START"] = str(AI_SECONDARY_BUDGET_START)
         _persist_env_values({"OPENAI_SECONDARY_BUDGET_START": str(AI_SECONDARY_BUDGET_START)})
-        return f"? Порог переключения обновлён: {AI_SECONDARY_BUDGET_START}"
+        return f"? РџРѕСЂРѕРі РїРµСЂРµРєР»СЋС‡РµРЅРёСЏ РѕР±РЅРѕРІР»С‘РЅ: {AI_SECONDARY_BUDGET_START}"
     return (
-        "?? Использование: /tokens, /tokens budget 150000, "
+        "?? РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /tokens, /tokens budget 150000, "
         "/tokens hard 200000, /tokens hard off, "
         "/tokens secondary 70000, /tokens reset"
     )
@@ -13115,23 +13115,23 @@ def _handle_tokens_command(args: list[str]) -> str:
 
 def _handle_bybit_key_command(args: list[str]) -> str:
     if not args:
-        return "Использование: /bybitkey <apiKey> <apiSecret> или /bybitkey clear"
+        return "РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /bybitkey <apiKey> <apiSecret> РёР»Рё /bybitkey clear"
     action = args[0].strip().lower()
     if action in {"clear", "reset"}:
         _store_bybit_credentials(None, None)
-        return "??? Ключи Bybit удалены. Добавьте новые ключи перед следующим запуском."
+        return "??? РљР»СЋС‡Рё Bybit СѓРґР°Р»РµРЅС‹. Р”РѕР±Р°РІСЊС‚Рµ РЅРѕРІС‹Рµ РєР»СЋС‡Рё РїРµСЂРµРґ СЃР»РµРґСѓСЋС‰РёРј Р·Р°РїСѓСЃРєРѕРј."
     if len(args) < 2:
-        return "Укажите apiKey и apiSecret: /bybitkey <apiKey> <apiSecret>"
+        return "РЈРєР°Р¶РёС‚Рµ apiKey Рё apiSecret: /bybitkey <apiKey> <apiSecret>"
     api_key = args[0].strip()
     api_secret = args[1].strip()
     if not api_key or not api_secret:
-        return "Ключ и секрет не должны быть пустыми."
+        return "РљР»СЋС‡ Рё СЃРµРєСЂРµС‚ РЅРµ РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ РїСѓСЃС‚С‹РјРё."
     _store_bybit_credentials(api_key, api_secret)
     masked_key = _mask_api_value(api_key)
     masked_secret = _mask_api_value(api_secret)
     return (
-        f"? Ключи Bybit обновлены (apiKey {masked_key}, secret {masked_secret}). "
-        "Перезапустите цикл или дождитесь следующего запуска, чтобы применить их."
+        f"? РљР»СЋС‡Рё Bybit РѕР±РЅРѕРІР»РµРЅС‹ (apiKey {masked_key}, secret {masked_secret}). "
+        "РџРµСЂРµР·Р°РїСѓСЃС‚РёС‚Рµ С†РёРєР» РёР»Рё РґРѕР¶РґРёС‚РµСЃСЊ СЃР»РµРґСѓСЋС‰РµРіРѕ Р·Р°РїСѓСЃРєР°, С‡С‚РѕР±С‹ РїСЂРёРјРµРЅРёС‚СЊ РёС…."
     )
 
 
@@ -13169,7 +13169,7 @@ def _persist_env_file(path: Path, updates: dict[str, str | None]) -> bool:
         path.write_text("\n".join(new_lines).strip() + "\n", encoding="utf-8")
         return True
     except Exception as exc:
-        log(f"[CONFIG] Не удалось обновить {path}: {exc}", Fore.YELLOW)
+        log(f"[CONFIG] РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ {path}: {exc}", Fore.YELLOW)
         return False
 
 
@@ -13200,33 +13200,33 @@ def _resolve_config_scope(scope: str, user_id: Optional[int], bot_id: str) -> tu
     if scope_lower.startswith("sandbox"):
         parts = scope_lower.split(":", 1)
         if len(parts) == 1 or not parts[1]:
-            raise ValueError("Укажите идентификатор песочницы: sandbox:<id>")
+            raise ValueError("РЈРєР°Р¶РёС‚Рµ РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїРµСЃРѕС‡РЅРёС†С‹: sandbox:<id>")
         sandbox_id = parts[1]
         entry = _find_sandbox_entry(sandbox_id)
         if not entry:
-            raise ValueError(f"Песочница {sandbox_id} не найдена.")
+            raise ValueError(f"РџРµСЃРѕС‡РЅРёС†Р° {sandbox_id} РЅРµ РЅР°Р№РґРµРЅР°.")
         path = Path(entry.get("path") or "")
         if not path.exists():
-            raise ValueError(f"Каталог песочницы {sandbox_id} недоступен.")
+            raise ValueError(f"РљР°С‚Р°Р»РѕРі РїРµСЃРѕС‡РЅРёС†С‹ {sandbox_id} РЅРµРґРѕСЃС‚СѓРїРµРЅ.")
         entry_bot = entry.get("bot_id") or bot_id
         return "sandbox", path, entry, entry_bot
-    raise ValueError("Неизвестная область. Используйте prod или sandbox:<id>.")
+    raise ValueError("РќРµРёР·РІРµСЃС‚РЅР°СЏ РѕР±Р»Р°СЃС‚СЊ. РСЃРїРѕР»СЊР·СѓР№С‚Рµ prod РёР»Рё sandbox:<id>.")
 
 
 def _config_list_scopes(user_id: Optional[int], bot_id: str) -> str:
-    lines = ["Доступные области:"]
+    lines = ["Р”РѕСЃС‚СѓРїРЅС‹Рµ РѕР±Р»Р°СЃС‚Рё:"]
     if is_bot_owner(user_id, bot_id):
-        lines.append("- prod — текущее прод-окружение бота")
+        lines.append("- prod вЂ” С‚РµРєСѓС‰РµРµ РїСЂРѕРґ-РѕРєСЂСѓР¶РµРЅРёРµ Р±РѕС‚Р°")
     sandboxes = []
     if user_id is not None:
         sandboxes = _get_user_sandboxes(int(user_id))
     if sandboxes:
-        lines.append("- sandbox:<id> — одна из ваших песочниц")
+        lines.append("- sandbox:<id> вЂ” РѕРґРЅР° РёР· РІР°С€РёС… РїРµСЃРѕС‡РЅРёС†")
         for entry in sandboxes:
-            status = "да" if entry.get("promotable") else "нет"
-            lines.append(f"  • {entry.get('id')}: бот {entry.get('bot_id')} (promote={status})")
+            status = "РґР°" if entry.get("promotable") else "РЅРµС‚"
+            lines.append(f"  вЂў {entry.get('id')}: Р±РѕС‚ {entry.get('bot_id')} (promote={status})")
     else:
-        lines.append("- У вас нет активных песочниц. Создайте их через Support.")
+        lines.append("- РЈ РІР°СЃ РЅРµС‚ Р°РєС‚РёРІРЅС‹С… РїРµСЃРѕС‡РЅРёС†. РЎРѕР·РґР°Р№С‚Рµ РёС… С‡РµСЂРµР· Support.")
     return "\n".join(lines)
 
 
@@ -13237,18 +13237,18 @@ def _config_set(scope: str, key: str, value: str, *, user_id: Optional[int], bot
         return f"?? {exc}"
     if scope_type == "prod":
         if not is_bot_owner(user_id, target_bot_id):
-            return "?? У вас нет прав изменять прод-окружение этого бота."
+            return "?? РЈ РІР°СЃ РЅРµС‚ РїСЂР°РІ РёР·РјРµРЅСЏС‚СЊ РїСЂРѕРґ-РѕРєСЂСѓР¶РµРЅРёРµ СЌС‚РѕРіРѕ Р±РѕС‚Р°."
     else:
         entry_user = safe_int(sandbox_entry.get("user_id")) if sandbox_entry else None
         if user_id is None or (entry_user != user_id and not is_main_owner(user_id)):
-            return "?? Вы можете менять параметры только в своих песочницах."
+            return "?? Р’С‹ РјРѕР¶РµС‚Рµ РјРµРЅСЏС‚СЊ РїР°СЂР°РјРµС‚СЂС‹ С‚РѕР»СЊРєРѕ РІ СЃРІРѕРёС… РїРµСЃРѕС‡РЅРёС†Р°С…."
         target_bot_id = sandbox_entry.get("bot_id") or target_bot_id
     target_path = _get_bot_config_path(target_bot_id, root_path)
     updates = {key: value if value.lower() != "null" else None}
     if not _persist_env_file(target_path, updates):
-        return "?? Не удалось обновить файл настроек."
-    location = "проде" if scope_type == "prod" else f"песочнице {sandbox_entry.get('id')}"
-    return f"? Параметр {key} обновлён в {location} ({target_path})."
+        return "?? РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ С„Р°Р№Р» РЅР°СЃС‚СЂРѕРµРє."
+    location = "РїСЂРѕРґРµ" if scope_type == "prod" else f"РїРµСЃРѕС‡РЅРёС†Рµ {sandbox_entry.get('id')}"
+    return f"? РџР°СЂР°РјРµС‚СЂ {key} РѕР±РЅРѕРІР»С‘РЅ РІ {location} ({target_path})."
 
 
 def _config_get(scope: str, key: str, *, user_id: Optional[int], bot_id: str) -> str:
@@ -13258,35 +13258,35 @@ def _config_get(scope: str, key: str, *, user_id: Optional[int], bot_id: str) ->
         return f"?? {exc}"
     if scope_type == "prod":
         if not is_bot_owner(user_id, target_bot_id):
-            return "?? У вас нет прав читать параметры этого прод-окружения."
+            return "?? РЈ РІР°СЃ РЅРµС‚ РїСЂР°РІ С‡РёС‚Р°С‚СЊ РїР°СЂР°РјРµС‚СЂС‹ СЌС‚РѕРіРѕ РїСЂРѕРґ-РѕРєСЂСѓР¶РµРЅРёСЏ."
     else:
         entry_user = safe_int(sandbox_entry.get("user_id")) if sandbox_entry else None
         if user_id is None or (entry_user != user_id and not is_main_owner(user_id)):
-            return "?? Эта песочница вам не принадлежит."
+            return "?? Р­С‚Р° РїРµСЃРѕС‡РЅРёС†Р° РІР°Рј РЅРµ РїСЂРёРЅР°РґР»РµР¶РёС‚."
         target_bot_id = sandbox_entry.get("bot_id") or target_bot_id
     target_path = _get_bot_config_path(target_bot_id, root_path)
     value = _read_env_value(target_path, key)
     if value is None:
-        return f"?? {key} не задан в {target_path}."
+        return f"?? {key} РЅРµ Р·Р°РґР°РЅ РІ {target_path}."
     return f"{key} = {value}"
 
 
 def _config_help(bot_id: str, user_id: Optional[int]) -> str:
     parts = [
-        "Команда /config управляет параметрами бота.",
-        "Примеры:",
-        "  /config list — показать доступные области",
+        "РљРѕРјР°РЅРґР° /config СѓРїСЂР°РІР»СЏРµС‚ РїР°СЂР°РјРµС‚СЂР°РјРё Р±РѕС‚Р°.",
+        "РџСЂРёРјРµСЂС‹:",
+        "  /config list вЂ” РїРѕРєР°Р·Р°С‚СЊ РґРѕСЃС‚СѓРїРЅС‹Рµ РѕР±Р»Р°СЃС‚Рё",
     ]
     if is_bot_owner(user_id, bot_id):
-        parts.append("  /config set prod KEY VALUE — изменить параметр в прод-окружении")
-        parts.append("    например: /config set prod AUTO_UPDATE 0 — отключить автообновление")
-        parts.append("    или: /config set prod TARGET_VERSION 2025.11.06")
-    parts.append("  /config set sandbox:<id> KEY VALUE — изменить параметр в песочнице")
-    parts.append("  /config get sandbox:<id> KEY — посмотреть значение в песочнице")
+        parts.append("  /config set prod KEY VALUE вЂ” РёР·РјРµРЅРёС‚СЊ РїР°СЂР°РјРµС‚СЂ РІ РїСЂРѕРґ-РѕРєСЂСѓР¶РµРЅРёРё")
+        parts.append("    РЅР°РїСЂРёРјРµСЂ: /config set prod AUTO_UPDATE 0 вЂ” РѕС‚РєР»СЋС‡РёС‚СЊ Р°РІС‚РѕРѕР±РЅРѕРІР»РµРЅРёРµ")
+        parts.append("    РёР»Рё: /config set prod TARGET_VERSION 2025.11.06")
+    parts.append("  /config set sandbox:<id> KEY VALUE вЂ” РёР·РјРµРЅРёС‚СЊ РїР°СЂР°РјРµС‚СЂ РІ РїРµСЃРѕС‡РЅРёС†Рµ")
+    parts.append("  /config get sandbox:<id> KEY вЂ” РїРѕСЃРјРѕС‚СЂРµС‚СЊ Р·РЅР°С‡РµРЅРёРµ РІ РїРµСЃРѕС‡РЅРёС†Рµ")
     if is_bot_owner(user_id, bot_id):
-        parts.append("Для прод-окружения обязательно указывайте область (prod или sandbox).")
+        parts.append("Р”Р»СЏ РїСЂРѕРґ-РѕРєСЂСѓР¶РµРЅРёСЏ РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ СѓРєР°Р·С‹РІР°Р№С‚Рµ РѕР±Р»Р°СЃС‚СЊ (prod РёР»Рё sandbox).")
     else:
-        parts.append("Невладельцам доступны только песочницы.")
+        parts.append("РќРµРІР»Р°РґРµР»СЊС†Р°Рј РґРѕСЃС‚СѓРїРЅС‹ С‚РѕР»СЊРєРѕ РїРµСЃРѕС‡РЅРёС†С‹.")
     return "\n".join(parts)
 
 
@@ -13297,7 +13297,7 @@ def _handle_config_command(
     bot_id: str,
 ) -> Optional[str]:
     if user_id is None:
-        return "Команда доступна только после начала диалога с ботом. Откройте личный чат и нажмите Start."
+        return "РљРѕРјР°РЅРґР° РґРѕСЃС‚СѓРїРЅР° С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РЅР°С‡Р°Р»Р° РґРёР°Р»РѕРіР° СЃ Р±РѕС‚РѕРј. РћС‚РєСЂРѕР№С‚Рµ Р»РёС‡РЅС‹Р№ С‡Р°С‚ Рё РЅР°Р¶РјРёС‚Рµ Start."
     if not args:
         return _config_help(bot_id, user_id)
     action = args[0].lower()
@@ -13311,13 +13311,13 @@ def _handle_config_command(
         value = " ".join(args[3:])
         if scope.lower() in {"prod", "production"} and not is_bot_owner(user_id, bot_id):
             return (
-                "Уточните песочницу: /config set sandbox:<id> KEY VALUE. "
-                "Невладельцы не могут менять прод-окружение."
+                "РЈС‚РѕС‡РЅРёС‚Рµ РїРµСЃРѕС‡РЅРёС†Сѓ: /config set sandbox:<id> KEY VALUE. "
+                "РќРµРІР»Р°РґРµР»СЊС†С‹ РЅРµ РјРѕРіСѓС‚ РјРµРЅСЏС‚СЊ РїСЂРѕРґ-РѕРєСЂСѓР¶РµРЅРёРµ."
             )
         return _config_set(scope, key, value, user_id=user_id, bot_id=bot_id)
     if action == "get":
         if len(args) < 3:
-            return "Использование: /config get <scope> <key>"
+            return "РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /config get <scope> <key>"
         scope = args[1]
         key = args[2]
         return _config_get(scope, key, user_id=user_id, bot_id=bot_id)
@@ -13328,19 +13328,19 @@ def _delete_sandbox_directory(path: Path) -> tuple[bool, str]:
     try:
         if path.exists():
             shutil.rmtree(path)
-        return True, "Песочница удалена."
+        return True, "РџРµСЃРѕС‡РЅРёС†Р° СѓРґР°Р»РµРЅР°."
     except Exception as exc:
-        return False, f"Не удалось удалить каталог песочницы: {exc}"
+        return False, f"РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ РєР°С‚Р°Р»РѕРі РїРµСЃРѕС‡РЅРёС†С‹: {exc}"
 
 
 def _promote_sandbox_entry(entry: dict[str, Any], user_id: Optional[int]) -> tuple[bool, str]:
     sandbox_id = entry.get("id")
     bot_id = entry.get("bot_id") or USER_ID
     if not is_bot_owner(user_id, bot_id):
-        return False, "У вас нет прав переносить изменения этого бота."
+        return False, "РЈ РІР°СЃ РЅРµС‚ РїСЂР°РІ РїРµСЂРµРЅРѕСЃРёС‚СЊ РёР·РјРµРЅРµРЅРёСЏ СЌС‚РѕРіРѕ Р±РѕС‚Р°."
     sandbox_path = Path(entry.get("path") or "")
     if not sandbox_path.exists():
-        return False, "Каталог песочницы недоступен."
+        return False, "РљР°С‚Р°Р»РѕРі РїРµСЃРѕС‡РЅРёС†С‹ РЅРµРґРѕСЃС‚СѓРїРµРЅ."
     targets: list[tuple[Path, Path]] = []
     if bot_id == "default":
         src = sandbox_path / ".env"
@@ -13363,7 +13363,7 @@ def _promote_sandbox_entry(entry: dict[str, Any], user_id: Optional[int]) -> tup
         shutil.copy2(src, dest)
         copied += 1
     if copied == 0:
-        return False, "В песочнице не найдено нужных файлов для переноса."
+        return False, "Р’ РїРµСЃРѕС‡РЅРёС†Рµ РЅРµ РЅР°Р№РґРµРЅРѕ РЅСѓР¶РЅС‹С… С„Р°Р№Р»РѕРІ РґР»СЏ РїРµСЂРµРЅРѕСЃР°."
     entry["promoted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     state = _load_sandbox_state()
     sandboxes = state.get("sandboxes") or []
@@ -13373,58 +13373,58 @@ def _promote_sandbox_entry(entry: dict[str, Any], user_id: Optional[int]) -> tup
             break
     state["sandboxes"] = sandboxes
     _save_sandbox_state(state)
-    return True, "Изменения из песочницы перенесены в прод."
+    return True, "РР·РјРµРЅРµРЅРёСЏ РёР· РїРµСЃРѕС‡РЅРёС†С‹ РїРµСЂРµРЅРµСЃРµРЅС‹ РІ РїСЂРѕРґ."
 
 
 def _handle_sandbox_command(args: list[str], *, user_id: Optional[int]) -> Optional[str]:
     if user_id is None:
-        return "Команда доступна только после начала диалога с ботом. Откройте личный чат и нажмите Start."
+        return "РљРѕРјР°РЅРґР° РґРѕСЃС‚СѓРїРЅР° С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РЅР°С‡Р°Р»Р° РґРёР°Р»РѕРіР° СЃ Р±РѕС‚РѕРј. РћС‚РєСЂРѕР№С‚Рµ Р»РёС‡РЅС‹Р№ С‡Р°С‚ Рё РЅР°Р¶РјРёС‚Рµ Start."
     user_id_int = int(user_id)
     action = args[0].lower() if args else "list"
     if action in {"list", "ls"}:
         entries = _get_user_sandboxes(user_id_int)
         if not entries:
-            return "У вас нет активных песочниц."
-        lines = ["Ваши песочницы:"]
+            return "РЈ РІР°СЃ РЅРµС‚ Р°РєС‚РёРІРЅС‹С… РїРµСЃРѕС‡РЅРёС†."
+        lines = ["Р’Р°С€Рё РїРµСЃРѕС‡РЅРёС†С‹:"]
         for entry in sorted(entries, key=lambda e: e.get("created_at", ""), reverse=True):
             lines.append(
-                f"- {entry.get('id')}: бот {entry.get('bot_id')} "
-                f"(promote={'да' if entry.get('promotable') else 'нет'}, создана {entry.get('created_at')})"
+                f"- {entry.get('id')}: Р±РѕС‚ {entry.get('bot_id')} "
+                f"(promote={'РґР°' if entry.get('promotable') else 'РЅРµС‚'}, СЃРѕР·РґР°РЅР° {entry.get('created_at')})"
             )
-        lines.append("Удаление: /sandbox delete <id>")
-        lines.append("Перенос в прод (если доступно): /sandbox promote <id>")
+        lines.append("РЈРґР°Р»РµРЅРёРµ: /sandbox delete <id>")
+        lines.append("РџРµСЂРµРЅРѕСЃ РІ РїСЂРѕРґ (РµСЃР»Рё РґРѕСЃС‚СѓРїРЅРѕ): /sandbox promote <id>")
         return "\n".join(lines)
     if action in {"delete", "rm"}:
         if len(args) < 2:
-            return "Использование: /sandbox delete <id>"
+            return "РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /sandbox delete <id>"
         sandbox_id = args[1]
         entry = _find_sandbox_entry(sandbox_id)
         if not entry:
-            return f"Песочница {sandbox_id} не найдена."
+            return f"РџРµСЃРѕС‡РЅРёС†Р° {sandbox_id} РЅРµ РЅР°Р№РґРµРЅР°."
         entry_user = safe_int(entry.get("user_id"))
         if entry_user != user_id_int and not is_main_owner(user_id):
-            return "Вы можете удалять только свои песочницы."
+            return "Р’С‹ РјРѕР¶РµС‚Рµ СѓРґР°Р»СЏС‚СЊ С‚РѕР»СЊРєРѕ СЃРІРѕРё РїРµСЃРѕС‡РЅРёС†С‹."
         success, message = _delete_sandbox_directory(Path(entry.get("path") or ""))
         if success:
             _remove_sandbox_entry(sandbox_id)
         return message
     if action == "promote":
         if len(args) < 2:
-            return "Использование: /sandbox promote <id>"
+            return "РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /sandbox promote <id>"
         sandbox_id = args[1]
         entry = _find_sandbox_entry(sandbox_id)
         if not entry:
-            return f"Песочница {sandbox_id} не найдена."
+            return f"РџРµСЃРѕС‡РЅРёС†Р° {sandbox_id} РЅРµ РЅР°Р№РґРµРЅР°."
         if not entry.get("promotable"):
-            return "Перенос изменений из этой песочницы запрещён."
+            return "РџРµСЂРµРЅРѕСЃ РёР·РјРµРЅРµРЅРёР№ РёР· СЌС‚РѕР№ РїРµСЃРѕС‡РЅРёС†С‹ Р·Р°РїСЂРµС‰С‘РЅ."
         entry_user = safe_int(entry.get("user_id"))
         if entry_user != user_id_int and not is_main_owner(user_id):
-            return "Вы можете переносить изменения только из собственных песочниц."
+            return "Р’С‹ РјРѕР¶РµС‚Рµ РїРµСЂРµРЅРѕСЃРёС‚СЊ РёР·РјРµРЅРµРЅРёСЏ С‚РѕР»СЊРєРѕ РёР· СЃРѕР±СЃС‚РІРµРЅРЅС‹С… РїРµСЃРѕС‡РЅРёС†."
         success, message = _promote_sandbox_entry(entry, user_id)
         return message
     return (
-        "Использование: /sandbox list, /sandbox delete <id>, /sandbox promote <id>\n"
-        "Песочницы создаются автоматически через Support."
+        "РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ: /sandbox list, /sandbox delete <id>, /sandbox promote <id>\n"
+        "РџРµСЃРѕС‡РЅРёС†С‹ СЃРѕР·РґР°СЋС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё С‡РµСЂРµР· Support."
     )
 
 
@@ -13457,11 +13457,11 @@ def _handle_add_user_command(
 ) -> Optional[str]:
     if user_id is None:
         return (
-            "Для использования команды /adduser откройте личный чат с ботом и отправьте команду там "
-            "(это необходимо, чтобы ключи не попали в общий чат)."
+            "Р”Р»СЏ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РєРѕРјР°РЅРґС‹ /adduser РѕС‚РєСЂРѕР№С‚Рµ Р»РёС‡РЅС‹Р№ С‡Р°С‚ СЃ Р±РѕС‚РѕРј Рё РѕС‚РїСЂР°РІСЊС‚Рµ РєРѕРјР°РЅРґСѓ С‚Р°Рј "
+            "(СЌС‚Рѕ РЅРµРѕР±С…РѕРґРёРјРѕ, С‡С‚РѕР±С‹ РєР»СЋС‡Рё РЅРµ РїРѕРїР°Р»Рё РІ РѕР±С‰РёР№ С‡Р°С‚)."
         )
     if user_id in PENDING_USERBOT_CREATION:
-        return "Вы уже начали добавление юзер-бота. Завершите текущий процесс или отправьте /cancel в личном чате."
+        return "Р’С‹ СѓР¶Рµ РЅР°С‡Р°Р»Рё РґРѕР±Р°РІР»РµРЅРёРµ СЋР·РµСЂ-Р±РѕС‚Р°. Р—Р°РІРµСЂС€РёС‚Рµ С‚РµРєСѓС‰РёР№ РїСЂРѕС†РµСЃСЃ РёР»Рё РѕС‚РїСЂР°РІСЊС‚Рµ /cancel РІ Р»РёС‡РЅРѕРј С‡Р°С‚Рµ."
     target_id_default = str(user_id)
     label_default = args[0].strip() if args else ""
     flow_state = {
@@ -13485,34 +13485,34 @@ def _handle_add_user_command(
         "state_dir": str(Path("runtime") / target_id_default),
     }
     label_prompt = (
-        f"ID бота будет `{target_id_default}`.\n"
-        "Введите отображаемое имя бота (или оставьте пустым, чтобы использовать тот же ID)."
+        f"ID Р±РѕС‚Р° Р±СѓРґРµС‚ `{target_id_default}`.\n"
+        "Р’РІРµРґРёС‚Рµ РѕС‚РѕР±СЂР°Р¶Р°РµРјРѕРµ РёРјСЏ Р±РѕС‚Р° (РёР»Рё РѕСЃС‚Р°РІСЊС‚Рµ РїСѓСЃС‚С‹Рј, С‡С‚РѕР±С‹ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ С‚РѕС‚ Р¶Рµ ID)."
     )
     start_prompt = (
-        "?? Создание юзер-бота.\n"
-        "Ответьте на вопросы последовательно; сообщения с чувствительными данными будут удалены.\n"
-        "Для отмены отправьте /cancel.\n\n"
+        "?? РЎРѕР·РґР°РЅРёРµ СЋР·РµСЂ-Р±РѕС‚Р°.\n"
+        "РћС‚РІРµС‚СЊС‚Рµ РЅР° РІРѕРїСЂРѕСЃС‹ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕ; СЃРѕРѕР±С‰РµРЅРёСЏ СЃ С‡СѓРІСЃС‚РІРёС‚РµР»СЊРЅС‹РјРё РґР°РЅРЅС‹РјРё Р±СѓРґСѓС‚ СѓРґР°Р»РµРЅС‹.\n"
+        "Р”Р»СЏ РѕС‚РјРµРЅС‹ РѕС‚РїСЂР°РІСЊС‚Рµ /cancel.\n\n"
         + (
             label_prompt
             if flow_state["stage"] == "await_label"
-            else "Введите API Key одной строкой. Сообщение будет удалено."
+            else "Р’РІРµРґРёС‚Рµ API Key РѕРґРЅРѕР№ СЃС‚СЂРѕРєРѕР№. РЎРѕРѕР±С‰РµРЅРёРµ Р±СѓРґРµС‚ СѓРґР°Р»РµРЅРѕ."
         )
     )
     dm_ready = _send_adduser_prompt(user_id, start_prompt)
     if not dm_ready:
         return (
-            "Не удалось отправить личное сообщение. Убедитесь, что вы начали диалог с ботом (нажмите Start в личном чате), "
-            "и повторите /adduser."
+            "РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ Р»РёС‡РЅРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ. РЈР±РµРґРёС‚РµСЃСЊ, С‡С‚Рѕ РІС‹ РЅР°С‡Р°Р»Рё РґРёР°Р»РѕРі СЃ Р±РѕС‚РѕРј (РЅР°Р¶РјРёС‚Рµ Start РІ Р»РёС‡РЅРѕРј С‡Р°С‚Рµ), "
+            "Рё РїРѕРІС‚РѕСЂРёС‚Рµ /adduser."
         )
     PENDING_USERBOT_CREATION[user_id] = flow_state
-    return "?? Продолжение — в личных сообщениях."
+    return "?? РџСЂРѕРґРѕР»Р¶РµРЅРёРµ вЂ” РІ Р»РёС‡РЅС‹С… СЃРѕРѕР±С‰РµРЅРёСЏС…."
 def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
     target_id = flow_state.get("target_id")
     label = flow_state.get("label") or target_id
     api_key = flow_state.get("api_key")
     api_secret = flow_state.get("api_secret")
     if not target_id or not api_key or not api_secret:
-        return False, "Недостаточно данных для создания профиля."
+        return False, "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РїСЂРѕС„РёР»СЏ."
     try:
         _write_user_secrets(target_id, api_key, api_secret)
     except Exception as exc:
@@ -13528,7 +13528,7 @@ def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
             owner_id=safe_int(flow_state.get("owner_id")),
         )
     except Exception as exc:
-        return False, f"Не удалось обновить users.json: {exc}"
+        return False, f"РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±РЅРѕРІРёС‚СЊ users.json: {exc}"
     env_updates = {
         "LOG_TIMEZONE": flow_state.get("timezone") or USERBOT_DEFAULTS["timezone"],
         "ORDER_MARGIN_UTILIZATION": f"{float(flow_state.get('order_margin') or USERBOT_DEFAULTS['order_margin']):.6f}",
@@ -13541,7 +13541,7 @@ def _finalize_userbot_profile(flow_state: dict[str, Any]) -> tuple[bool, str]:
     }
     public_env_abs = USERS_DIR / target_id / USERS_PUBLIC_ENV_FILE
     _persist_env_file(public_env_abs, env_updates)
-    return True, "Профиль создан."
+    return True, "РџСЂРѕС„РёР»СЊ СЃРѕР·РґР°РЅ."
 
 
 def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: dict) -> bool:
@@ -13555,7 +13555,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         return True
     if text.startswith("/cancel"):
         PENDING_USERBOT_CREATION.pop(from_user_id, None)
-        send_tg("?? Создание юзер-бота отменено.", chat_id_override=from_user_id, no_log_forward=True, no_prefix=True)
+        send_tg("?? РЎРѕР·РґР°РЅРёРµ СЋР·РµСЂ-Р±РѕС‚Р° РѕС‚РјРµРЅРµРЅРѕ.", chat_id_override=from_user_id, no_log_forward=True, no_prefix=True)
         return True
     message_id = message.get("message_id")
     if isinstance(message_id, int):
@@ -13568,7 +13568,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_api_key"
         _send_adduser_prompt(
             from_user_id,
-            "?? Теперь отправьте API Key одной строкой. Сообщение будет удалено.",
+            "?? РўРµРїРµСЂСЊ РѕС‚РїСЂР°РІСЊС‚Рµ API Key РѕРґРЅРѕР№ СЃС‚СЂРѕРєРѕР№. РЎРѕРѕР±С‰РµРЅРёРµ Р±СѓРґРµС‚ СѓРґР°Р»РµРЅРѕ.",
         )
         return True
     if stage == "await_api_key":
@@ -13576,7 +13576,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_api_secret"
         _send_adduser_prompt(
             from_user_id,
-            "?? API Key сохранён.\nТеперь отправьте *API Secret* (сообщение тоже будет удалено).",
+            "?? API Key СЃРѕС…СЂР°РЅС‘РЅ.\nРўРµРїРµСЂСЊ РѕС‚РїСЂР°РІСЊС‚Рµ *API Secret* (СЃРѕРѕР±С‰РµРЅРёРµ С‚РѕР¶Рµ Р±СѓРґРµС‚ СѓРґР°Р»РµРЅРѕ).",
         )
         return True
     if stage == "await_api_secret":
@@ -13584,7 +13584,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_timezone"
         _send_adduser_prompt(
             from_user_id,
-            "?? Укажите часовой пояс бота (например, `UTC+3`). Оставьте пустым для UTC.",
+            "?? РЈРєР°Р¶РёС‚Рµ С‡Р°СЃРѕРІРѕР№ РїРѕСЏСЃ Р±РѕС‚Р° (РЅР°РїСЂРёРјРµСЂ, `UTC+3`). РћСЃС‚Р°РІСЊС‚Рµ РїСѓСЃС‚С‹Рј РґР»СЏ UTC.",
         )
         return True
     if stage == "await_timezone":
@@ -13593,8 +13593,8 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_order_margin"
         _send_adduser_prompt(
             from_user_id,
-            f"?? Максимальный процент использования депозита (ORDER_MARGIN_UTILIZATION).\n"
-            f"Введите число от 0 до 1 (например, 0.75). По умолчанию {USERBOT_DEFAULTS['order_margin']}.",
+            f"?? РњР°РєСЃРёРјР°Р»СЊРЅС‹Р№ РїСЂРѕС†РµРЅС‚ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РґРµРїРѕР·РёС‚Р° (ORDER_MARGIN_UTILIZATION).\n"
+            f"Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ РѕС‚ 0 РґРѕ 1 (РЅР°РїСЂРёРјРµСЂ, 0.75). РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ {USERBOT_DEFAULTS['order_margin']}.",
         )
         return True
     if stage == "await_order_margin":
@@ -13607,14 +13607,14 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             except ValueError:
                 _send_adduser_prompt(
                     from_user_id,
-                    "? Введите число от 0 до 1 (например, 0.75). Попробуйте ещё раз.",
+                    "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ РѕС‚ 0 РґРѕ 1 (РЅР°РїСЂРёРјРµСЂ, 0.75). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                     parse_mode=None,
                 )
                 return True
         if val < 0 or val > 1:
             _send_adduser_prompt(
                 from_user_id,
-                "? Введите число от 0 до 1 (например, 0.75). Попробуйте ещё раз.",
+                "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ РѕС‚ 0 РґРѕ 1 (РЅР°РїСЂРёРјРµСЂ, 0.75). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                 parse_mode=None,
             )
             return True
@@ -13622,8 +13622,8 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_risk_pct"
         _send_adduser_prompt(
             from_user_id,
-            f"?? Максимальный риск на сделку (RISK_PCT).\n"
-            f"Введите долю от депозита (например, 0.005 для 0.5%). По умолчанию {USERBOT_DEFAULTS['risk_pct']}.",
+            f"?? РњР°РєСЃРёРјР°Р»СЊРЅС‹Р№ СЂРёСЃРє РЅР° СЃРґРµР»РєСѓ (RISK_PCT).\n"
+            f"Р’РІРµРґРёС‚Рµ РґРѕР»СЋ РѕС‚ РґРµРїРѕР·РёС‚Р° (РЅР°РїСЂРёРјРµСЂ, 0.005 РґР»СЏ 0.5%). РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ {USERBOT_DEFAULTS['risk_pct']}.",
         )
         return True
     if stage == "await_risk_pct":
@@ -13636,14 +13636,14 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             except ValueError:
                 _send_adduser_prompt(
                     from_user_id,
-                    "? Введите число (например, 0.005). Попробуйте ещё раз.",
+                    "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 0.005). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                     parse_mode=None,
                 )
                 return True
         if val <= 0 or val > 1:
             _send_adduser_prompt(
                 from_user_id,
-                "? Введите число (например, 0.005). Попробуйте ещё раз.",
+                "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 0.005). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                 parse_mode=None,
             )
             return True
@@ -13651,7 +13651,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_leverage"
         _send_adduser_prompt(
             from_user_id,
-            f"?? Плечо (LEVERAGE). Введите целое число, например 5. По умолчанию {USERBOT_DEFAULTS['leverage']}.",
+            f"?? РџР»РµС‡Рѕ (LEVERAGE). Р’РІРµРґРёС‚Рµ С†РµР»РѕРµ С‡РёСЃР»Рѕ, РЅР°РїСЂРёРјРµСЂ 5. РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ {USERBOT_DEFAULTS['leverage']}.",
         )
         return True
     if stage == "await_leverage":
@@ -13664,14 +13664,14 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             except ValueError:
                 _send_adduser_prompt(
                     from_user_id,
-                    "? Введите целое число (например, 5). Попробуйте ещё раз.",
+                    "? Р’РІРµРґРёС‚Рµ С†РµР»РѕРµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 5). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                     parse_mode=None,
                 )
                 return True
         if leverage <= 0 or leverage > 100:
             _send_adduser_prompt(
                 from_user_id,
-                "? Введите целое число (например, 5). Попробуйте ещё раз.",
+                "? Р’РІРµРґРёС‚Рµ С†РµР»РѕРµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 5). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                 parse_mode=None,
             )
             return True
@@ -13679,7 +13679,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_min_notional"
         _send_adduser_prompt(
             from_user_id,
-            f"?? Минимальный размер позиции (MIN_NOTIONAL_USDT). Введите число в USDT (может быть 0). По умолчанию "
+            f"?? РњРёРЅРёРјР°Р»СЊРЅС‹Р№ СЂР°Р·РјРµСЂ РїРѕР·РёС†РёРё (MIN_NOTIONAL_USDT). Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ РІ USDT (РјРѕР¶РµС‚ Р±С‹С‚СЊ 0). РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ "
             f"{USERBOT_DEFAULTS['min_notional']}.",
         )
         return True
@@ -13693,14 +13693,14 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             except ValueError:
                 _send_adduser_prompt(
                     from_user_id,
-                    "? Введите число (например, 5). Попробуйте ещё раз.",
+                    "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 5). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                     parse_mode=None,
                 )
                 return True
         if min_notional < 0:
             _send_adduser_prompt(
                 from_user_id,
-                "? Введите число (например, 5). Попробуйте ещё раз.",
+                "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 5). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                 parse_mode=None,
             )
             return True
@@ -13708,7 +13708,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_position_mode"
         _send_adduser_prompt(
             from_user_id,
-            f"?? Режим позиций (BYBIT_POSITION_MODE).\nВведите `hedged` (хедж) или `oneway` (по умолчанию {USERBOT_DEFAULTS['position_mode']}).",
+            f"?? Р РµР¶РёРј РїРѕР·РёС†РёР№ (BYBIT_POSITION_MODE).\nР’РІРµРґРёС‚Рµ `hedged` (С…РµРґР¶) РёР»Рё `oneway` (РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ {USERBOT_DEFAULTS['position_mode']}).",
         )
         return True
     if stage == "await_position_mode":
@@ -13722,7 +13722,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         else:
             _send_adduser_prompt(
                 from_user_id,
-                "? Допустимые значения: hedged или oneway. Попробуйте ещё раз.",
+                "? Р”РѕРїСѓСЃС‚РёРјС‹Рµ Р·РЅР°С‡РµРЅРёСЏ: hedged РёР»Рё oneway. РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                 parse_mode=None,
             )
             return True
@@ -13730,7 +13730,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_max_positions"
         _send_adduser_prompt(
             from_user_id,
-            "?? Максимальное число открытых позиций (MAX_OPEN_POSITIONS). Введите целое число.",
+            "?? РњР°РєСЃРёРјР°Р»СЊРЅРѕРµ С‡РёСЃР»Рѕ РѕС‚РєСЂС‹С‚С‹С… РїРѕР·РёС†РёР№ (MAX_OPEN_POSITIONS). Р’РІРµРґРёС‚Рµ С†РµР»РѕРµ С‡РёСЃР»Рѕ.",
         )
         return True
     if stage == "await_max_positions":
@@ -13743,14 +13743,14 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             except ValueError:
                 _send_adduser_prompt(
                     from_user_id,
-                    "? Введите целое число (например, 4). Попробуйте ещё раз.",
+                    "? Р’РІРµРґРёС‚Рµ С†РµР»РѕРµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 4). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                     parse_mode=None,
                 )
                 return True
         if max_positions <= 0 or max_positions > 20:
             _send_adduser_prompt(
                 from_user_id,
-                "? Введите целое число (например, 4). Попробуйте ещё раз.",
+                "? Р’РІРµРґРёС‚Рµ С†РµР»РѕРµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 4). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                 parse_mode=None,
             )
             return True
@@ -13758,8 +13758,8 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
         flow_state["stage"] = "await_default_next_run"
         _send_adduser_prompt(
             from_user_id,
-            f"? Дефолтный интервал между циклами (DEFAULT_NEXT_RUN_MINUTES). Введите минуты (может быть дробным числом). "
-            f"По умолчанию {USERBOT_DEFAULTS['default_next_run']}.",
+            f"? Р”РµС„РѕР»С‚РЅС‹Р№ РёРЅС‚РµСЂРІР°Р» РјРµР¶РґСѓ С†РёРєР»Р°РјРё (DEFAULT_NEXT_RUN_MINUTES). Р’РІРµРґРёС‚Рµ РјРёРЅСѓС‚С‹ (РјРѕР¶РµС‚ Р±С‹С‚СЊ РґСЂРѕР±РЅС‹Рј С‡РёСЃР»РѕРј). "
+            f"РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ {USERBOT_DEFAULTS['default_next_run']}.",
         )
         return True
     if stage == "await_default_next_run":
@@ -13772,14 +13772,14 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             except ValueError:
                 _send_adduser_prompt(
                     from_user_id,
-                    "? Введите число (например, 45). Попробуйте ещё раз.",
+                    "? Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ, 45). РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·.",
                     parse_mode=None,
                 )
                 return True
         if default_run < 0:
             _send_adduser_prompt(
                 from_user_id,
-                "? Значение не может быть отрицательным.",
+                "? Р—РЅР°С‡РµРЅРёРµ РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Рј.",
                 parse_mode=None,
             )
             return True
@@ -13802,7 +13802,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             preview_max_positions = flow_state.get("max_positions") or USERBOT_DEFAULTS["max_positions"]
             preview_default_next = flow_state.get("default_next_run") or USERBOT_DEFAULTS["default_next_run"]
             config_preview = (
-                f"?? Параметры:\n"
+                f"?? РџР°СЂР°РјРµС‚СЂС‹:\n"
                 f"- timezone: {preview_timezone}\n"
                 f"- margin: {preview_margin}\n"
                 f"- risk_pct: {preview_risk}\n"
@@ -13813,7 +13813,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
                 f"- default_next_run: {preview_default_next}"
             )
             send_tg(
-                f"? Юзер-бот `{target_id}` создан.\nКлючи безопасно сохранены.\n{config_preview}",
+                f"? Р®Р·РµСЂ-Р±РѕС‚ `{target_id}` СЃРѕР·РґР°РЅ.\nРљР»СЋС‡Рё Р±РµР·РѕРїР°СЃРЅРѕ СЃРѕС…СЂР°РЅРµРЅС‹.\n{config_preview}",
                 chat_id_override=from_user_id,
                 no_log_forward=True,
                 no_prefix=True,
@@ -13821,7 +13821,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
             )
             if origin_chat is not None:
                 summary = (
-                    f"? Пользователь `{target_id}` ({label}) добавлен.\n"
+                    f"? РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ `{target_id}` ({label}) РґРѕР±Р°РІР»РµРЅ.\n"
                     f"API Key: {_mask_sensitive(flow_state.get('api_key', ''))}\n"
                     f"API Secret: {_mask_sensitive(flow_state.get('api_secret', ''))}"
                 )
@@ -13834,7 +13834,7 @@ def _process_pending_userbot_message(from_user_id: int, chat_id: int, message: d
                 )
         else:
             send_tg(
-                f"?? Не удалось создать юзер-бота: {detail}",
+                f"?? РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР·РґР°С‚СЊ СЋР·РµСЂ-Р±РѕС‚Р°: {detail}",
                 chat_id_override=from_user_id,
                 no_log_forward=True,
                 no_prefix=True,
