@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # Version: 12.2
 """
-Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
-Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
+Bybit Intraday AI Trading Bot вЂ” 30m, 5 РїР°СЂ USDT Perpetual
+РЎР±Р°Р»Р°РЅСЃРёСЂРѕРІР°РЅРЅС‹Р№ РёРЅС‚СЂР°РґРµР№-Р±РѕС‚ СЃ РїРѕРґРґРµСЂР¶РєРѕР№ OpenAI GPT, Telegram Рё СЂР°СЃС€РёСЂРµРЅРЅС‹Рј РєРѕРЅС‚РµРєСЃС‚РѕРј.
+
 """
 
 import os
