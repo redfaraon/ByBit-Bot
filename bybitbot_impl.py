@@ -106,6 +106,62 @@ def _configure_state_paths() -> None:
 
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
 
+
+def _bytes_from_env(env_name: str, default_mb: float) -> int:
+    raw_value = os.getenv(env_name)
+    if raw_value:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = float(default_mb)
+    else:
+        value = float(default_mb)
+    return max(0, int(value * 1024 * 1024))
+
+
+def _float_from_env(env_name: str, default_value: float) -> float:
+    raw_value = os.getenv(env_name)
+    if raw_value:
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return float(default_value)
+    return float(default_value)
+
+
+DEFAULT_USER_LOG_MAX_MB = 2.5
+USER_LOG_MAX_BYTES = _bytes_from_env("BYBIT_USER_LOG_MAX_MB", DEFAULT_USER_LOG_MAX_MB)
+USER_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_USER_LOG_BACKUPS", "3")))
+DEFAULT_MAIN_LOG_MAX_MB = 12.0
+_main_log_path_raw = os.getenv("BYBIT_MAIN_LOG")
+if _main_log_path_raw:
+    try:
+        MAIN_LOG_PATH = Path(_main_log_path_raw).expanduser()
+    except Exception:
+        MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+else:
+    MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+MAIN_LOG_MAX_BYTES = _bytes_from_env("BYBIT_MAIN_LOG_MAX_MB", DEFAULT_MAIN_LOG_MAX_MB)
+MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", "5")))
+MAIN_LOG_ENABLED = str(os.getenv("BYBIT_MAIN_LOG_DISABLE", "0")).lower() not in {"1", "true", "yes"}
+DEFAULT_ATR_GUARD_MAX_RATIO = 0.055
+DEFAULT_ATR_GUARD_MIN_RATIO = 0.018
+DEFAULT_ATR_GUARD_LOW_BOOST = 1.15
+VOL_GUARD_ENABLED = str(os.getenv("ATR_GUARD_ENABLED", "1")).lower() not in {"0", "false", "no"}
+ATR_GUARD_MAX_RATIO = max(0.0, _float_from_env("ATR_GUARD_MAX_RATIO", DEFAULT_ATR_GUARD_MAX_RATIO))
+ATR_GUARD_MIN_RATIO = max(0.0, _float_from_env("ATR_GUARD_MIN_RATIO", DEFAULT_ATR_GUARD_MIN_RATIO))
+if ATR_GUARD_MAX_RATIO > 0 and ATR_GUARD_MIN_RATIO > ATR_GUARD_MAX_RATIO:
+    ATR_GUARD_MIN_RATIO = ATR_GUARD_MAX_RATIO * 0.75
+ATR_GUARD_LOW_BOOST = max(1.0, _float_from_env("ATR_GUARD_LOW_BOOST", DEFAULT_ATR_GUARD_LOW_BOOST))
+DRAWDOWN_CONTROL_ENABLED: bool = True
+DRAWDOWN_WINDOW_HOURS: float = 24.0 * 7.0
+DRAWDOWN_RULES: tuple[tuple[float, float, float, float], ...] = (
+    (50.0, 0.35, 0.55, 0.45),
+    (40.0, 0.50, 0.65, 0.60),
+    (30.0, 0.70, 0.75, 0.80),
+)
+
+
 def _format_tz_suffix(dt: datetime.datetime) -> str:
     if not LOG_TZINFO:
         return ""
@@ -136,8 +192,57 @@ def log(msg: str, color=Fore.WHITE):
     record = f"[{stamp}] {msg}"
     _LOG_HISTORY.append(record)
     print(color + record + Style.RESET_ALL)
+    _append_main_log(record)
     if TELEGRAM_FORWARD_LOGS:
         _enqueue_tg_log(record)
+
+
+def _maybe_rotate_file(path: Path, max_bytes: int, backups: int) -> None:
+    if max_bytes <= 0 or backups <= 0:
+        return
+    try:
+        if not path.exists():
+            return
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < max_bytes:
+        return
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    rotated = path.with_name(f"{path.name}.{timestamp}")
+    try:
+        path.rename(rotated)
+    except OSError:
+        return
+    try:
+        rotated_files = sorted(
+            [candidate for candidate in path.parent.glob(f"{path.name}.*") if candidate.is_file()],
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for old_file in rotated_files[backups:]:
+        try:
+            old_file.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _append_main_log(text: str) -> None:
+    if not MAIN_LOG_ENABLED:
+        return
+    path = MAIN_LOG_PATH
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _maybe_rotate_file(path, MAIN_LOG_MAX_BYTES, MAIN_LOG_BACKUPS)
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(text + "\n")
+    except Exception:
+        pass
+
 
 def _append_user_bybit_log(user_id: str | None, text: str) -> None:
     if not user_id:
@@ -145,6 +250,7 @@ def _append_user_bybit_log(user_id: str | None, text: str) -> None:
     try:
         p = Path("runtime") / str(user_id) / "bybit.log"
         p.parent.mkdir(parents=True, exist_ok=True)
+        _maybe_rotate_file(p, USER_LOG_MAX_BYTES, USER_LOG_BACKUPS)
         with p.open("a", encoding="utf-8") as fp:
             fp.write(text + "\n")
     except Exception:
@@ -560,6 +666,7 @@ BASE_INDICATOR_CANDIDATES = [
 
 BASE_TIMEFRAME_CANDIDATES = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"]
 PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BASE_PAIR_CANDIDATES}
+RECOGNIZED_STABLE_QUOTES = ("USDT", "USDC")
 TICKER_TO_SYMBOL: dict[str, str] = {}
 for pair, ticker in PAIR_TICKER_MAP.items():
     if not pair:
@@ -838,6 +945,50 @@ def safe_int(val):
     return None
 
 
+def _round_qty_up(value: float, step: float) -> float:
+    if step is None or step <= 0:
+        return value
+    if value <= 0:
+        return 0.0
+    steps = math.ceil(value / step)
+    return max(0.0, steps * step)
+
+
+def _round_qty_down(value: float, step: float) -> float:
+    if step is None or step <= 0:
+        return value
+    if value <= 0:
+        return 0.0
+    steps = math.floor(value / step)
+    return max(0.0, steps * step)
+
+
+def _apply_qty_rules(qty: float, *, min_qty: float = 0.0, qty_step: float = 0.0) -> float:
+    result = max(0.0, qty)
+    if min_qty and result < min_qty:
+        result = min_qty
+    if qty_step and qty_step > 0:
+        result = _round_qty_up(result, qty_step)
+    return result
+
+
+def _clamp_qty_to_max_notional(
+    qty: float,
+    price: float,
+    max_notional: float,
+    qty_step: float = 0.0,
+) -> float:
+    if price <= 0 or max_notional <= 0 or qty <= 0:
+        return 0.0 if max_notional <= 0 else max(0.0, min(qty, max_notional / price if price > 0 else qty))
+    max_qty = max_notional / price
+    if qty <= max_qty + NOTIONAL_EPSILON:
+        return qty
+    if qty_step and qty_step > 0:
+        clamped = _round_qty_down(max_qty, qty_step)
+        return clamped
+    return max(0.0, max_qty)
+
+
 def is_main_owner(user_id: Optional[int]) -> bool:
     return user_id == MAIN_OWNER_CHAT_ID if user_id is not None else False
 
@@ -1037,19 +1188,37 @@ def _pick_positive_float(*values) -> float | None:
 
 
 def _get_symbol_trade_rules(exchange, symbol: str) -> dict[str, float | None]:
-    cache_key = symbol
+    canonical_symbol = _resolve_symbol_alias(symbol) or symbol
+    cache_key = canonical_symbol
     cached = SYMBOL_RULES_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    symbols_to_try = []
+    for candidate in (symbol, canonical_symbol):
+        if candidate and candidate not in symbols_to_try:
+            symbols_to_try.append(candidate)
+            if isinstance(candidate, str) and candidate.upper().endswith(":USDT"):
+                without_settle = candidate.split(":")[0]
+                if without_settle and without_settle not in symbols_to_try:
+                    symbols_to_try.append(without_settle)
+    markets = getattr(exchange, "markets", {}) or {}
     market = None
-    try:
-        market = exchange.market(symbol)
-    except Exception:
-        market = None
+    for candidate in symbols_to_try:
+        try:
+            market = exchange.market(candidate)
+        except Exception:
+            market = None
+        if isinstance(market, dict):
+            break
+        market = markets.get(candidate)
+        if isinstance(market, dict):
+            break
     if not isinstance(market, dict):
-        markets = getattr(exchange, "markets", {}) or {}
-        if isinstance(markets, dict):
-            market = markets.get(symbol)
+        for candidate in symbols_to_try:
+            match = next((markets[key] for key in markets if key and key.upper() == candidate.upper()), None)
+            if isinstance(match, dict):
+                market = match
+                break
     rules: dict[str, float | None] = {
         "min_qty": None,
         "min_notional": None,
@@ -1115,6 +1284,8 @@ def _get_symbol_trade_rules(exchange, symbol: str) -> dict[str, float | None]:
         if contract_size:
             rules["contract_size"] = float(contract_size)
     SYMBOL_RULES_CACHE[cache_key] = rules
+    if cache_key != symbol:
+        SYMBOL_RULES_CACHE[symbol] = rules
     return rules
 
 
@@ -2602,6 +2773,8 @@ def refresh_settings():
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
+    global USER_LOG_MAX_BYTES, USER_LOG_BACKUPS, DRAWDOWN_CONTROL_ENABLED, DRAWDOWN_WINDOW_HOURS
+    global MAIN_LOG_PATH, MAIN_LOG_MAX_BYTES, MAIN_LOG_BACKUPS, MAIN_LOG_ENABLED
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
     global SUPPORT_CONTEXT_TIMEFRAMES, SUPPORT_CONTEXT_INDICATORS, SUPPORT_CONTEXT_LIMIT
@@ -2609,6 +2782,7 @@ def refresh_settings():
     global NEEDS_MAX_TIMEFRAMES, NEEDS_MAX_INDICATORS, NEEDS_SERIALIZE_DEFAULT_LIMIT
     global PARTIAL_TP_SCHEME, ENTRY_LADDER_SCHEME
     global AUTO_MIN_NOTIONAL, AUTO_MARGIN_SCALE, AUTO_MARGIN_SCALE_RATIO
+    global VOL_GUARD_ENABLED, ATR_GUARD_MAX_RATIO, ATR_GUARD_MIN_RATIO, ATR_GUARD_LOW_BOOST
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_RATE_LIMIT_WINDOW, TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW, TELEGRAM_LOG_THREAD_ID
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
@@ -2773,6 +2947,48 @@ def refresh_settings():
     if not math.isfinite(AUTO_MARGIN_CONFIDENCE_MULT) or AUTO_MARGIN_CONFIDENCE_MULT < 1.0:
         AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
     AUTO_MARGIN_CONFIDENCE_MULT = float(os.getenv("AUTO_MARGIN_CONFIDENCE_MULT") or DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT)
+    USER_LOG_MAX_BYTES = _bytes_from_env("BYBIT_USER_LOG_MAX_MB", DEFAULT_USER_LOG_MAX_MB)
+    USER_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_USER_LOG_BACKUPS", str(USER_LOG_BACKUPS))))
+    main_log_override = os.getenv("BYBIT_MAIN_LOG")
+    if main_log_override:
+        try:
+            MAIN_LOG_PATH = Path(main_log_override).expanduser()
+        except Exception:
+            MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+    else:
+        MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+    MAIN_LOG_MAX_BYTES = _bytes_from_env("BYBIT_MAIN_LOG_MAX_MB", DEFAULT_MAIN_LOG_MAX_MB)
+    MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", str(MAIN_LOG_BACKUPS))))
+    MAIN_LOG_ENABLED = not env_bool("BYBIT_MAIN_LOG_DISABLE", False)
+    VOL_GUARD_ENABLED = env_bool("ATR_GUARD_ENABLED", VOL_GUARD_ENABLED)
+    ATR_GUARD_MAX_RATIO = max(
+        0.0,
+        _float_from_env(
+            "ATR_GUARD_MAX_RATIO",
+            ATR_GUARD_MAX_RATIO if ATR_GUARD_MAX_RATIO > 0 else DEFAULT_ATR_GUARD_MAX_RATIO,
+        ),
+    )
+    ATR_GUARD_MIN_RATIO = max(
+        0.0,
+        _float_from_env(
+            "ATR_GUARD_MIN_RATIO",
+            ATR_GUARD_MIN_RATIO if ATR_GUARD_MIN_RATIO > 0 else DEFAULT_ATR_GUARD_MIN_RATIO,
+        ),
+    )
+    if ATR_GUARD_MAX_RATIO > 0 and ATR_GUARD_MIN_RATIO > ATR_GUARD_MAX_RATIO:
+        ATR_GUARD_MIN_RATIO = ATR_GUARD_MAX_RATIO * 0.75
+    ATR_GUARD_LOW_BOOST = max(
+        1.0,
+        _float_from_env(
+            "ATR_GUARD_LOW_BOOST",
+            ATR_GUARD_LOW_BOOST if ATR_GUARD_LOW_BOOST > 0 else DEFAULT_ATR_GUARD_LOW_BOOST,
+        ),
+    )
+    DRAWDOWN_CONTROL_ENABLED = env_bool("DRAWDOWN_CONTROL_ENABLED", DRAWDOWN_CONTROL_ENABLED)
+    try:
+        DRAWDOWN_WINDOW_HOURS = float(os.getenv("DRAWDOWN_WINDOW_HOURS", str(DRAWDOWN_WINDOW_HOURS)))
+    except (TypeError, ValueError):
+        DRAWDOWN_WINDOW_HOURS = 24.0 * 7.0
     if not math.isfinite(AUTO_MARGIN_CONFIDENCE_MULT) or AUTO_MARGIN_CONFIDENCE_MULT < 1.0:
         AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
@@ -4256,6 +4472,7 @@ def _collect_live_status_snapshot() -> dict[str, Any]:
     realized = None
     if isinstance(balance_payload, dict):
         realized = safe_float(balance_payload.get("_realizedPnl"))
+    stable_label = _stable_currency_label(balance_payload)
     return {
         "equity": equity,
         "available": available,
@@ -4263,6 +4480,7 @@ def _collect_live_status_snapshot() -> dict[str, Any]:
         "positions_unrealized": total_unrealized,
         "orders": open_orders,
         "orders_count": orders_count,
+        "stable_label": stable_label,
         "realized": realized,
     }
 
@@ -4880,9 +5098,10 @@ def _format_status_message(live: bool = False) -> str:
         except Exception as exc:
             log(f"[WARN] Не удалось получить live-статус: {exc}", Fore.YELLOW)
         else:
+            stable_label = snapshot.get("stable_label") or "USDT"
             lines = [
                 "Статус (live):",
-                f"Баланс: {snapshot.get('equity', 0.0):.2f} USDT, доступно {snapshot.get('available', 0.0):.2f} USDT",
+                f"Баланс: {snapshot.get('equity', 0.0):.2f} {stable_label}, доступно {snapshot.get('available', 0.0):.2f} {stable_label}",
                 f"Открытых позиций: {len(snapshot.get('positions') or [])}",
                 f"Открытых ордеров: {snapshot.get('orders_count', 0)}",
                 f"? PnL по позициям: {snapshot.get('positions_unrealized', 0.0):+.2f} USDT",
@@ -4893,6 +5112,7 @@ def _format_status_message(live: bool = False) -> str:
             return "\n".join(lines)
     if not LATEST_STATUS:
         return "Статус пока недоступен."
+    stable_label = LATEST_STATUS.get("stable_label") or "USDT"
     lines = [
         f"Цикл #{LATEST_STATUS.get('cycle', '?')} ({LATEST_STATUS.get('cycle_kind', 'normal')}/{LATEST_STATUS.get('cycle_mode', 'last')})",
     ]
@@ -4900,11 +5120,11 @@ def _format_status_message(live: bool = False) -> str:
         lines.append(f"Обновлено: {LATEST_STATUS['timestamp']}")
     if LATEST_STATUS.get("equity_end") is not None:
         lines.append(
-            f"Баланс: {LATEST_STATUS.get('equity_end', 0.0):.2f} USDT, доступно {LATEST_STATUS.get('available_end', 0.0):.2f} USDT"
+            f"Баланс: {LATEST_STATUS.get('equity_end', 0.0):.2f} {stable_label}, доступно {LATEST_STATUS.get('available_end', 0.0):.2f} {stable_label}"
         )
     elif LATEST_STATUS.get("equity_start") is not None:
         lines.append(
-            f"Баланс: {LATEST_STATUS.get('equity_start', 0.0):.2f} USDT, доступно {LATEST_STATUS.get('available_start', 0.0):.2f} USDT"
+            f"Баланс: {LATEST_STATUS.get('equity_start', 0.0):.2f} {stable_label}, доступно {LATEST_STATUS.get('available_start', 0.0):.2f} {stable_label}"
         )
     if LATEST_STATUS.get("closed_pnl") is not None:
         lines.append(f"PnL (6h closed): {LATEST_STATUS['closed_pnl']:+.2f} USDT")
@@ -5595,6 +5815,7 @@ def simplify_position(position):
     }
 
 def fetch_positions_snapshot(exchange, symbols_filter=None):
+    global DYNAMIC_SYMBOL_ALIASES
     try:
         positions = exchange.fetch_positions()
     except Exception as e:
@@ -5604,12 +5825,17 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     simplified = {}
     symbols_filter = set(symbols_filter) if symbols_filter else None
     for pos in positions or []:
-        symbol = pos.get("symbol")
-        if symbols_filter and symbol not in symbols_filter:
+        source_symbol = pos.get("symbol")
+        canonical_symbol = _resolve_symbol_alias(source_symbol) or source_symbol
+        if not canonical_symbol:
+            continue
+        if symbols_filter and canonical_symbol not in symbols_filter and source_symbol not in symbols_filter:
             continue
         simp = simplify_position(pos)
         if simp:
-            simplified[symbol] = simp
+            simplified[canonical_symbol] = simp
+            if source_symbol and source_symbol != canonical_symbol:
+                DYNAMIC_SYMBOL_ALIASES[source_symbol] = canonical_symbol
             count += 1
     return simplified, count
 
@@ -6382,6 +6608,85 @@ def _save_equity_history(history: list[dict]) -> None:
         )
     except Exception:
         pass
+
+
+def _parse_timestamp(value: str | None) -> Optional[datetime.datetime]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _compute_drawdown_pct(history: list[dict], window_hours: float) -> float:
+    if not history:
+        return 0.0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(hours=window_hours)
+    window: list[tuple[datetime.datetime, float]] = []
+    for entry in history:
+        ts = _parse_timestamp(entry.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        equity_val = entry.get("equity")
+        try:
+            equity_float = float(equity_val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(equity_float) or equity_float <= 0:
+            continue
+        window.append((ts, equity_float))
+    if len(window) < 2:
+        return 0.0
+    window.sort(key=lambda item: item[0])
+    peak = window[0][1]
+    max_drawdown = 0.0
+    for _, equity_val in window:
+        if equity_val > peak:
+            peak = equity_val
+        if peak <= 0:
+            continue
+        drawdown = (equity_val - peak) / peak * 100.0
+        if drawdown < max_drawdown:
+            max_drawdown = drawdown
+    return max_drawdown
+
+
+def _maybe_apply_drawdown_controls(
+    history: list[dict],
+    base_margin_utilization: float,
+    base_auto_margin_ratio: float,
+) -> tuple[Optional[str], Optional[float], Optional[float], Optional[float]]:
+    if not DRAWDOWN_CONTROL_ENABLED or not history:
+        return None, None, None, None
+    drawdown_pct = _compute_drawdown_pct(history, DRAWDOWN_WINDOW_HOURS)
+    if drawdown_pct >= 0:
+        return None, None, None, None
+    severity = abs(drawdown_pct)
+    selected_rule: tuple[float, float, float, float] | None = None
+    for threshold, risk_mult, margin_cap, auto_ratio in DRAWDOWN_RULES:
+        if severity >= threshold:
+            selected_rule = (threshold, risk_mult, margin_cap, auto_ratio)
+            break
+    if not selected_rule:
+        return None, None, None, None
+    threshold, risk_mult, margin_cap, auto_ratio = selected_rule
+    margin_override = min(base_margin_utilization, margin_cap)
+    auto_ratio_override = min(base_auto_margin_ratio, auto_ratio)
+    risk_override = max(MIN_DYNAMIC_RISK_PCT, RISK_PCT * risk_mult)
+    message = (
+        f"[RISK] Drawdown {drawdown_pct:.1f}% >= {threshold:.0f}% -> "
+        f"risk {risk_override:.4f}, margin_util {margin_override:.2f}, ladder ratio {auto_ratio_override:.2f}"
+    )
+    return message, margin_override, auto_ratio_override, risk_override
 
 
 def _update_equity_history(
@@ -7257,13 +7562,24 @@ def get_bybit_retcode(error) -> int | None:
     return None
 
 
-def fetch_usdt_equity(exchange):
-    try:
-        balance = exchange.fetch_balance()
-    except Exception as e:
-        log(f"⚠️ Не удалось получить баланс: {e}", Fore.YELLOW)
-        return 0.0, 0.0, {}
-    usdt = balance.get("USDT") or balance.get("USDT:USDT") or {}
+def _stable_wallet_for_symbol(balance: dict | None, symbol: str) -> dict[str, Any] | None:
+    if not isinstance(balance, dict):
+        return None
+    symbol_upper = symbol.upper()
+    for key, wallet in balance.items():
+        if not isinstance(key, str):
+            continue
+        if not isinstance(wallet, dict):
+            continue
+        head = key.upper().split(":", 1)[0]
+        if head == symbol_upper:
+            return wallet
+    return None
+
+
+def _extract_wallet_totals(wallet: dict | None) -> tuple[float, float]:
+    if not isinstance(wallet, dict):
+        wallet = {}
 
     def to_float(val):
         try:
@@ -7271,10 +7587,10 @@ def fetch_usdt_equity(exchange):
         except (TypeError, ValueError):
             return None
 
-    total_val = to_float(usdt.get("total") or usdt.get("equity") or usdt.get("walletBalance"))
-    free_val = to_float(usdt.get("free") or usdt.get("available") or usdt.get("availableBalance"))
+    total_val = to_float(wallet.get("total") or wallet.get("equity") or wallet.get("walletBalance"))
+    free_val = to_float(wallet.get("free") or wallet.get("available") or wallet.get("availableBalance"))
     if free_val is None:
-        used_val = to_float(usdt.get("used"))
+        used_val = to_float(wallet.get("used"))
         if used_val is not None and total_val is not None:
             free_val = total_val - used_val
     if total_val is None and free_val is not None:
@@ -7283,13 +7599,74 @@ def fetch_usdt_equity(exchange):
         free_val = total_val
     total_val = float(total_val) if total_val is not None else 0.0
     free_val = float(free_val) if free_val is not None else 0.0
+    return total_val, free_val
+
+
+def _stable_symbols_from_balance(balance: dict | None) -> list[str]:
+    if not isinstance(balance, dict):
+        return []
+    summary = balance.get("_stable_summary")
+    if isinstance(summary, dict):
+        detected = [
+            symbol
+            for symbol in RECOGNIZED_STABLE_QUOTES
+            if isinstance(summary.get(symbol), dict) and summary[symbol].get("present")
+        ]
+        if detected:
+            return detected
+    detected: list[str] = []
+    for symbol in RECOGNIZED_STABLE_QUOTES:
+        wallet = _stable_wallet_for_symbol(balance, symbol)
+        if wallet is not None:
+            detected.append(symbol)
+    return detected
+
+
+def _stable_currency_label(balance: dict | None) -> str:
+    detected = _stable_symbols_from_balance(balance)
+    if not detected:
+        return RECOGNIZED_STABLE_QUOTES[0]
+    return "/".join(detected)
+
+
+def fetch_usdt_equity(exchange):
+    try:
+        balance = exchange.fetch_balance()
+    except Exception as e:
+        log(f"⚠️ Не удалось получить баланс: {e}", Fore.YELLOW)
+        return 0.0, 0.0, {}
+    if not isinstance(balance, dict):
+        return 0.0, 0.0, balance
+
+    total_val = 0.0
+    free_val = 0.0
+    stable_summary: dict[str, dict[str, Any]] = {}
+    stable_symbols: list[str] = []
+    for symbol in RECOGNIZED_STABLE_QUOTES:
+        wallet = _stable_wallet_for_symbol(balance, symbol)
+        present = wallet is not None
+        wallet_totals = _extract_wallet_totals(wallet)
+        stable_summary[symbol] = {
+            "total": wallet_totals[0],
+            "free": wallet_totals[1],
+            "present": present,
+        }
+        if present:
+            stable_symbols.append(symbol)
+        total_val += wallet_totals[0]
+        free_val += wallet_totals[1]
+
+    balance["_stable_summary"] = stable_summary
+    balance["_stable_symbols"] = stable_symbols or [RECOGNIZED_STABLE_QUOTES[0]]
+    balance["_stable_label"] = _stable_currency_label(balance)
+    balance["_stable_equity_total"] = total_val
+    balance["_stable_available_total"] = free_val
     if total_val < 0:
         total_val = 0.0
     if free_val < 0:
         free_val = 0.0
     realized_val = _extract_realized_pnl(balance)
-    if isinstance(balance, dict):
-        balance["_realizedPnl"] = realized_val
+    balance["_realizedPnl"] = realized_val
     return total_val, free_val, balance
 
 
@@ -7858,12 +8235,15 @@ def _resolve_symbol_alias(symbol: str | None) -> str | None:
             # Default to derivatives unless explicitly marked spot via :SPOT
             return f"{base}/USDT:USDT"
         return f"{base}/{quote}"
-    if sym_upper.endswith("USDT"):
-        base = sym_upper[:-4]
-        mapped = TICKER_TO_SYMBOL.get(base)
-        if mapped:
-            return mapped
-        return f"{base}/USDT:USDT"
+    for suffix in RECOGNIZED_STABLE_QUOTES:
+        if sym_upper.endswith(suffix):
+            base = sym_upper[: -len(suffix)]
+            if not base:
+                continue
+            mapped = TICKER_TO_SYMBOL.get(base)
+            if mapped:
+                return mapped
+            return f"{base}/{suffix}:{suffix}"
     return f"{sym_upper}/USDT:USDT"
 
 
@@ -10504,6 +10884,7 @@ def run_cycle():
     realized_start = None
     if isinstance(balance_snapshot_start, dict):
         realized_start = balance_snapshot_start.get("_realizedPnl")
+    start_stable_label = _stable_currency_label(balance_snapshot_start)
     if equity <= 0:
         equity = 64.0
     if available_margin <= 0:
@@ -10522,6 +10903,23 @@ def run_cycle():
             equity,
             realized_start,
         )
+        drawdown_msg, margin_override, auto_ratio_override, risk_override = _maybe_apply_drawdown_controls(
+            history_bootstrap,
+            base_margin_utilization,
+            base_auto_margin_ratio,
+        )
+        if margin_override is not None:
+            ORDER_MARGIN_UTILIZATION = margin_override
+        if auto_ratio_override is not None:
+            AUTO_MARGIN_SCALE_RATIO = auto_ratio_override
+        if risk_override is not None:
+            CURRENT_RISK_PCT = min(CURRENT_RISK_PCT, risk_override)
+        if drawdown_msg:
+            log(drawdown_msg, Fore.YELLOW)
+            try:
+                send_tg(drawdown_msg)
+            except Exception:
+                pass
     except Exception:
         pass
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
@@ -10549,6 +10947,7 @@ def run_cycle():
         "timestamp": session_dt.isoformat(),
         "equity_start": equity,
         "available_start": available_margin,
+        "stable_label": start_stable_label,
     })
     if DYNAMIC_RISK_ENABLED and abs(CURRENT_RISK_PCT - current_risk_baseline) > max(1e-5, current_risk_baseline * 0.01):
         risk_state_msg = (
@@ -10667,8 +11066,9 @@ def run_cycle():
     )
     last_equity = equity
     last_available_margin = available_margin
-    log(f"✅ Бот v{BOT_VERSION} запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT", Fore.GREEN)
-    send_tg(f"✅ Бот запущен. Баланс: {equity:.2f} USDT, доступно {available_margin:.2f} USDT")
+    start_balance_text = f"Баланс: {equity:.2f} {start_stable_label}, доступно {available_margin:.2f} {start_stable_label}"
+    log(f"✅ Бот v{BOT_VERSION} запущен. {start_balance_text}", Fore.GREEN)
+    send_tg(f"✅ Бот запущен. {start_balance_text}")
 
     position_symbols: set[str] = set()
     for sym_pos, payload in positions_map.items():
@@ -11814,7 +12214,10 @@ def run_cycle():
                         continue
                     df["atr"] = atr(df,14)
                     trade_rules = _get_symbol_trade_rules(ex, sym)
-                    min_qty_rule = trade_rules.get("min_qty") or 0.0
+                    min_qty_rule = float(trade_rules.get("min_qty") or 0.0)
+                    qty_step_rule = float(trade_rules.get("qty_step") or 0.0)
+                    if qty_step_rule > 0 and (min_qty_rule <= 0 or qty_step_rule > min_qty_rule):
+                        min_qty_rule = max(min_qty_rule, qty_step_rule)
                     exchange_min_notional = trade_rules.get("min_notional") or 0.0
                     min_notional_rule = trade_rules.get("min_notional") or 0.0
                     env_min_notional = float(MIN_NOTIONAL_USDT or 0.0)
@@ -11832,6 +12235,23 @@ def run_cycle():
                         log(f"⚠️ Не удалось рассчитать ATR/цену для {sym}, пропуск сигнала", Fore.YELLOW)
                         send_tg(f"ℹ️ {sym}: нет валидных значений ATR для расчёта размера")
                         continue
+                    atr_ratio = atrv / price if price > 0 else 0.0
+                    low_vol_multiplier = 1.0
+                    if VOL_GUARD_ENABLED and price > 0:
+                        if ATR_GUARD_MAX_RATIO > 0 and atr_ratio >= ATR_GUARD_MAX_RATIO:
+                            guard_msg = (
+                                f"[RISK] {sym}: ATR/price {atr_ratio:.2%} ≥ guard {ATR_GUARD_MAX_RATIO:.2%}, skip entry"
+                            )
+                            log(guard_msg, Fore.YELLOW)
+                            send_tg(guard_msg)
+                            log_open_skip(sym, f"atr ratio {atr_ratio:.2%} above guard")
+                            continue
+                        if (
+                            ATR_GUARD_LOW_BOOST > 1.0
+                            and ATR_GUARD_MIN_RATIO > 0
+                            and 0 < atr_ratio <= ATR_GUARD_MIN_RATIO
+                        ):
+                            low_vol_multiplier = ATR_GUARD_LOW_BOOST
                     sl = price - SL_ATR * atrv if side == "buy" else price + SL_ATR * atrv
                     tp = price + TP_ATR * atrv if side == "buy" else price - TP_ATR * atrv
                     duplicate_order = None
@@ -11933,21 +12353,29 @@ def run_cycle():
                             send_tg(f"[WARN] {user_tag} {sym}: insufficient free margin ({available_margin:.2f} USDT)")
                             log_open_skip(sym, "risk budget zero")
                             continue
-                        qty = risk_capital / risk_distance
-                        if min_qty_rule and qty < min_qty_rule:
-                            qty = min_qty_rule
-                        if not math.isfinite(qty) or qty <= 0:
-                            log(f"[WARN] {user_tag} {sym}: computed quantity is invalid", Fore.YELLOW)
-                            log_open_skip(sym, "quantity invalid")
-                            continue
-                        notional = qty * price
-                        if not math.isfinite(notional) or notional <= 0:
-                            log(f"[WARN] {user_tag} {sym}: computed notional is invalid", Fore.YELLOW)
-                            log_open_skip(sym, "notional invalid")
-                            continue
-                        log_user(
-                            f"OPEN PLAN {sym}: side={side or '?'} qty={qty:.6f} notional={notional:.2f} sl={sl:.2f} tp={tp:.2f}"
-                        )
+                    qty = risk_capital / risk_distance
+                    qty = _apply_qty_rules(qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
+                    if not math.isfinite(qty) or qty <= 0:
+                        log(f"[WARN] {user_tag} {sym}: computed quantity is invalid", Fore.YELLOW)
+                        log_open_skip(sym, "quantity invalid")
+                        continue
+                    notional = qty * price
+                    if not math.isfinite(notional) or notional <= 0:
+                        log(f"[WARN] {user_tag} {sym}: computed notional is invalid", Fore.YELLOW)
+                        log_open_skip(sym, "notional invalid")
+                        continue
+                    log_user(
+                        f"OPEN PLAN {sym}: side={side or '?'} qty={qty:.6f} notional={notional:.2f} sl={sl:.2f} tp={tp:.2f}"
+                    )
+                    if low_vol_multiplier > 1.0:
+                        boosted_qty = qty * low_vol_multiplier
+                        boosted_qty = _apply_qty_rules(boosted_qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
+                        if boosted_qty > qty * (1.0 + 1e-6):
+                            qty = boosted_qty
+                            notional = qty * price
+                            log_user(
+                                f"OPEN ADJUST {sym}: low-vol boost x{low_vol_multiplier:.2f} -> qty={qty:.6f}, notional={notional:.2f}"
+                            )
                     if notional + NOTIONAL_EPSILON < min_notional_required:
                         if AUTO_MIN_NOTIONAL:
                             min_qty_from_notional = (
@@ -11958,7 +12386,7 @@ def run_cycle():
                                 if min_qty_rule
                                 else min_qty_from_notional
                             )
-                            qty = target_qty
+                            qty = _apply_qty_rules(target_qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
                             notional = qty * price
                             log_user(
                                 f"OPEN ADJUST {sym}: increasing qty to meet min notional {min_notional_required:.2f} USDT -> qty={qty:.6f}, notional={notional:.2f}"
@@ -11975,11 +12403,6 @@ def run_cycle():
                         log(f"[WARN] {user_tag} {sym}: usable margin exhausted", Fore.YELLOW)
                         send_tg(f"[WARN] {user_tag} {sym}: usable margin exhausted")
                         log_open_skip(sym, "usable margin exhausted")
-                        continue
-                    if max_notional + NOTIONAL_EPSILON < min_notional_required:
-                        log(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below exchange minimum order size", Fore.YELLOW)
-                        send_tg(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below minimum order size")
-                        log_open_skip(sym, "margin below exchange minimum order size")
                         continue
                     if (
                         AUTO_MARGIN_SCALE
@@ -12003,16 +12426,27 @@ def run_cycle():
                             log_user(
                                 f"OPEN ADJUST {sym}: scaling to margin {notional:.2f} USDT (ratio {ratio_to_use:.2f}) -> qty={qty:.6f}"
                             )
+                    if notional > max_notional + NOTIONAL_EPSILON:
+                        qty = _clamp_qty_to_max_notional(qty, price, max_notional, qty_step_rule)
+                        if qty <= 0:
+                            log(f"[WARN] {user_tag} {sym}: usable margin cannot satisfy minimum trade size", Fore.YELLOW)
+                            send_tg(f"[WARN] {user_tag} {sym}: margin too small for minimum order")
+                            log_open_skip(sym, "margin cannot satisfy minimum size")
+                            continue
+                        qty = _apply_qty_rules(qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
+                        notional = qty * price
+                    if notional + NOTIONAL_EPSILON < min_notional_required:
+                        log(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below exchange minimum order size", Fore.YELLOW)
+                        send_tg(f"[WARN] {user_tag} {sym}: margin {available_margin:.2f} USDT below minimum order size")
+                        log_open_skip(sym, "margin below exchange minimum order size")
+                        continue
                     margin_required = notional / symbol_leverage if symbol_leverage else notional
                     if margin_required > effective_margin:
                         log(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT (total {available_margin:.2f} USDT, ORDER_MARGIN_UTILIZATION={ORDER_MARGIN_UTILIZATION}), skipping order', Fore.YELLOW)
                         send_tg(f'[WARN] {user_tag} {sym}: required margin {margin_required:.2f} USDT exceeds usable {effective_margin:.2f} USDT, skipping')
                         log_open_skip(sym, f"required margin {margin_required:.2f} > usable {effective_margin:.2f}")
                         continue
-                    if notional > max_notional:
-                        qty = max_notional / price
-                        notional = max_notional
-                        log(f'[WARN] {user_tag} {sym}: trimmed size to {qty:.4f} (~{notional:.2f} USDT) due to margin cap (max_notional={max_notional:.2f}, effective_margin={effective_margin:.2f}, leverage={symbol_leverage})', Fore.YELLOW)
+                    qty = _apply_qty_rules(qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
                     try:
                         qty = float(ex.amount_to_precision(sym, qty))
                     except Exception:
@@ -12109,62 +12543,25 @@ def run_cycle():
                             layer_notional = precise_qty * layer_price
                             if layer_notional + NOTIONAL_EPSILON < min_notional_required:
                                 min_qty_needed = min_notional_required / layer_price if layer_price > 0 else min_notional_required
-                                min_qty_target = max(min_qty_rule, min_qty_needed) if min_qty_rule else min_qty_needed
-                                if idx < total_layers - 1 and min_qty_target > remaining_qty:
-                                    continue
-                                min_qty_target = min(min_qty_target, max(remaining_qty, 0.0))
+                                min_qty_target = _apply_qty_rules(min_qty_needed, min_qty=min_qty_rule, qty_step=qty_step_rule)
+                                min_qty_target = min(min_qty_target, remaining_qty)
                                 if min_qty_target <= 0:
-                                    continue
+                                    raise RuntimeError("no entry orders placed")
                                 try:
                                     precise_qty = float(ex.amount_to_precision(sym, min_qty_target))
                                 except Exception:
                                     precise_qty = float(round(min_qty_target, 8))
                                 if precise_qty <= 0:
-                                    continue
-                                if min_qty_rule and precise_qty < min_qty_rule:
-                                    if idx < total_layers - 1 and remaining_qty < min_qty_rule - 1e-8:
-                                        continue
-                                    try:
-                                        precise_qty = float(ex.amount_to_precision(sym, min_qty_rule))
-                                    except Exception:
-                                        precise_qty = float(round(min_qty_rule, 8))
+                                    raise RuntimeError("no entry orders placed")
+                                if min_qty_rule and precise_qty < min_qty_rule - 1e-8:
+                                    raise RuntimeError("no entry orders placed")
                                 layer_notional = precise_qty * layer_price
                                 if layer_notional + NOTIONAL_EPSILON < min_notional_required:
-                                    continue
-                            layer_params = dict(base_params)
-                            layer_params = _sanitize_order_params_for_category(layer_params, category)
-                            log(
-                                f"[EX] create {sym} {side_lower}/limit qty={precise_qty:.6f} price={layer_price:.4f} params={layer_params}",
-                                Fore.LIGHTBLACK_EX,
-                            )
-                            order_result = ex.create_order(sym, "limit", side, precise_qty, layer_price, layer_params)
-                            log(f"[EX] ok {sym} {side_lower}/limit -> {order_result}", Fore.LIGHTBLACK_EX)
-                            try:
-                                _append_user_bybit_log(
-                                    USER_ID,
-                                    f"ORDER: {sym} {side.upper()} {precise_qty:.6f}@{layer_price:.4f} -> {order_result}",
-                                )
-                            except Exception:
-                                pass
-                            _append_trade_log(f"{user_tag} ORDER {sym} {side.upper()} qty={precise_qty:.6f} price={layer_price:.4f} -> {order_result}")
-                            open_executed = True
-                            entry_created += 1
-                            remaining_qty = max(0.0, remaining_qty - precise_qty)
-                            layer_margin = layer_notional / symbol_leverage if symbol_leverage else layer_notional
-                            total_margin_used += layer_margin
-                            entry_summaries.append(f"{precise_qty:.4f} @ {layer_price:.2f} (margin {layer_margin:.2f} USDT)")
-                        if entry_created == 0:
-                            fallback_price = price
-                            try:
-                                precise_qty = float(ex.amount_to_precision(sym, qty))
-                            except Exception:
-                                precise_qty = float(round(qty, 8))
-                            if precise_qty <= 0:
-                                raise RuntimeError("no entry orders placed")
+                                    raise RuntimeError("no entry orders placed")
                             fallback_notional = precise_qty * fallback_price
                             if fallback_notional + NOTIONAL_EPSILON < min_notional_required:
                                 min_qty_needed = min_notional_required / fallback_price if fallback_price > 0 else min_notional_required
-                                min_qty_target = max(min_qty_rule, min_qty_needed) if min_qty_rule else min_qty_needed
+                                min_qty_target = _apply_qty_rules(min_qty_needed, min_qty=min_qty_rule, qty_step=qty_step_rule)
                                 min_qty_target = min(min_qty_target, qty)
                                 if min_qty_target <= 0:
                                     raise RuntimeError("no entry orders placed")
@@ -12174,13 +12571,8 @@ def run_cycle():
                                     precise_qty = float(round(min_qty_target, 8))
                                 if precise_qty <= 0:
                                     raise RuntimeError("no entry orders placed")
-                                if min_qty_rule and precise_qty < min_qty_rule:
-                                    if qty < min_qty_rule - 1e-8:
-                                        raise RuntimeError("no entry orders placed")
-                                    try:
-                                        precise_qty = float(ex.amount_to_precision(sym, min_qty_rule))
-                                    except Exception:
-                                        precise_qty = float(round(min_qty_rule, 8))
+                                if min_qty_rule and precise_qty < min_qty_rule - 1e-8:
+                                    raise RuntimeError("no entry orders placed")
                                 fallback_notional = precise_qty * fallback_price
                                 if fallback_notional + NOTIONAL_EPSILON < min_notional_required:
                                     raise RuntimeError("no entry orders placed")
@@ -12569,6 +12961,18 @@ def run_cycle():
         elif REQUIRE_TAKE_PROFIT and not has_take:
             needs_protection = True
         if needs_protection:
+            missing_parts: list[str] = []
+            if not has_stop:
+                missing_parts.append("stop")
+            if REQUIRE_TAKE_PROFIT and not has_take:
+                missing_parts.append("take")
+            reason = ", ".join(missing_parts) if missing_parts else "unknown"
+            warn_msg = f"[WARN] {sym_active}: protection missing ({reason}), attempting restore"
+            log(warn_msg, Fore.YELLOW)
+            try:
+                send_tg(warn_msg)
+            except Exception:
+                pass
             unprotected_positions.append((sym_active, amount_val))
 
     unresolved_unprotected: list[str] = []
@@ -12606,6 +13010,7 @@ def run_cycle():
         protective_orders_after = _extract_protection_orders(refreshed_orders)
         has_stop_after = any(_has_stop_flag(order) or _has_trailing_flag(order) for order in protective_orders_after)
         if has_stop_after:
+            log(f"[INFO] {sym_unprotected}: protection restored ({len(protective_orders_after)} orders)", Fore.CYAN)
             restored = True
             continue
 
@@ -12723,7 +13128,8 @@ def run_cycle():
         log(end_balance_text, Fore.YELLOW)
         send_tg(end_balance_text)
     else:
-        end_balance_text = f"Баланс: {equity_end:.2f} USDT, доступно {available_end:.2f} USDT"
+        end_stable_label = _stable_currency_label(balance_snapshot_end)
+        end_balance_text = f"Баланс: {equity_end:.2f} {end_stable_label}, доступно {available_end:.2f} {end_stable_label}"
         log(f"✅ Завершение сессии. {end_balance_text}", Fore.GREEN)
         send_tg(f"ℹ️ Завершение сессии. {end_balance_text}")
         realized_end = None
@@ -12939,6 +13345,7 @@ def run_cycle():
                     "available_end": available_end,
                     "closed_pnl": closed_pnl_value if closed_pnl_value is not None else pnl_value,
                     "unrealized": unreal_total,
+                    "stable_label": end_stable_label,
                 }
             )
             _update_equity_history(history_entries, now_utc, equity_end, realized_end)
@@ -12969,6 +13376,8 @@ def run_cycle():
 def main():
     ensure_version_backup()
     refresh_settings()
+    base_margin_utilization = ORDER_MARGIN_UTILIZATION
+    base_auto_margin_ratio = AUTO_MARGIN_SCALE_RATIO
     configure_telegram_bot()
     start_telegram_webhook_server()
     start_telegram_long_polling()
