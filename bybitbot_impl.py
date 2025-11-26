@@ -5847,6 +5847,38 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     global DYNAMIC_SYMBOL_ALIASES
     try:
         positions = exchange.fetch_positions()
+        try:
+            raw_entries: list[str] = []
+            total_positions = len(positions or [])
+            for pos in positions or []:
+                symbol_raw = pos.get("symbol")
+                amount_raw = safe_float(
+                    pos.get("contracts")
+                    or pos.get("positionAmt")
+                    or pos.get("size")
+                    or pos.get("amount")
+                )
+                display_amount = (
+                    f"{amount_raw:.4f}"
+                    if amount_raw is not None and math.isfinite(amount_raw)
+                    else "0"
+                )
+                if symbol_raw:
+                    if len(raw_entries) < 20:
+                        raw_entries.append(f"{symbol_raw}:{display_amount}")
+                    if "PEPE" in symbol_raw.upper():
+                        log(
+                            f"[DEBUG] PEPE raw position {symbol_raw}: amount={display_amount}, entry={pos.get('entryPrice')}",
+                            Fore.LIGHTCYAN_EX,
+                        )
+            if raw_entries:
+                log(
+                    f"[DEBUG] fetch_positions raw snapshot ({total_positions} total): "
+                    + ", ".join(raw_entries),
+                    Fore.LIGHTBLACK_EX,
+                )
+        except Exception:
+            pass
     except Exception as e:
         log(f"⚠️ Не удалось получить список позиций: {e}", Fore.YELLOW)
         return {}, None
@@ -5863,6 +5895,11 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
         simp = simplify_position(pos)
         if simp:
             simplified[canonical_symbol] = simp
+            if "PEPE" in canonical_symbol.upper() or (source_symbol and "PEPE" in source_symbol.upper()):
+                log(
+                    f"[DEBUG] PEPE canonical {source_symbol}->{canonical_symbol}: amount={simp.get('amount')} entry={simp.get('entryPrice')}",
+                    Fore.LIGHTCYAN_EX,
+                )
             if source_symbol and source_symbol != canonical_symbol:
                 DYNAMIC_SYMBOL_ALIASES[source_symbol] = canonical_symbol
             count += 1
