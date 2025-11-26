@@ -129,6 +129,17 @@ def _float_from_env(env_name: str, default_value: float) -> float:
     return float(default_value)
 
 
+def _parse_settle_list(raw: str | None, default: list[str]) -> list[str]:
+    if not raw:
+        return list(default)
+    parts: list[str] = []
+    for token in raw.split(","):
+        cleaned = token.strip()
+        if cleaned:
+            parts.append(cleaned.upper())
+    return parts or list(default)
+
+
 DEFAULT_USER_LOG_MAX_MB = 2.5
 USER_LOG_MAX_BYTES = _bytes_from_env("BYBIT_USER_LOG_MAX_MB", DEFAULT_USER_LOG_MAX_MB)
 USER_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_USER_LOG_BACKUPS", "3")))
@@ -156,6 +167,8 @@ ATR_GUARD_MIN_RATIO = max(0.0, _float_from_env("ATR_GUARD_MIN_RATIO", DEFAULT_AT
 if ATR_GUARD_MAX_RATIO > 0 and ATR_GUARD_MIN_RATIO > ATR_GUARD_MAX_RATIO:
     ATR_GUARD_MIN_RATIO = ATR_GUARD_MAX_RATIO * 0.75
 ATR_GUARD_LOW_BOOST = max(1.0, _float_from_env("ATR_GUARD_LOW_BOOST", DEFAULT_ATR_GUARD_LOW_BOOST))
+DEFAULT_EXTRA_POSITION_SETTLES = ["USDC"]
+EXTRA_POSITION_SETTLES: list[str] = list(DEFAULT_EXTRA_POSITION_SETTLES)
 DRAWDOWN_CONTROL_ENABLED: bool = True
 DRAWDOWN_WINDOW_HOURS: float = 24.0 * 7.0
 DRAWDOWN_RULES: tuple[tuple[float, float, float, float], ...] = (
@@ -2787,6 +2800,7 @@ def refresh_settings():
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
     global USER_LOG_MAX_BYTES, USER_LOG_BACKUPS, DRAWDOWN_CONTROL_ENABLED, DRAWDOWN_WINDOW_HOURS
     global AI_LOG_MAX_BYTES, AI_LOG_BACKUPS
+    global EXTRA_POSITION_SETTLES
     global MAIN_LOG_PATH, MAIN_LOG_MAX_BYTES, MAIN_LOG_BACKUPS, MAIN_LOG_ENABLED
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
@@ -3007,6 +3021,7 @@ def refresh_settings():
     AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
     AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    EXTRA_POSITION_SETTLES = _parse_settle_list(os.getenv("BYBIT_EXTRA_POSITION_SETTLES"), DEFAULT_EXTRA_POSITION_SETTLES)
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
@@ -5845,12 +5860,13 @@ def simplify_position(position):
 
 def fetch_positions_snapshot(exchange, symbols_filter=None):
     global DYNAMIC_SYMBOL_ALIASES
-    try:
-        positions = exchange.fetch_positions()
+    snapshots: list[dict[str, Any]] = []
+
+    def _log_raw_positions(payload: list[dict], settle_hint: Optional[str] = None) -> None:
         try:
-            raw_entries: list[str] = []
-            total_positions = len(positions or [])
-            for pos in positions or []:
+            entries: list[str] = []
+            total = len(payload or [])
+            for pos in payload or []:
                 symbol_raw = pos.get("symbol")
                 amount_raw = safe_float(
                     pos.get("contracts")
@@ -5864,28 +5880,43 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
                     else "0"
                 )
                 if symbol_raw:
-                    if len(raw_entries) < 20:
-                        raw_entries.append(f"{symbol_raw}:{display_amount}")
+                    if len(entries) < 20:
+                        entries.append(f"{symbol_raw}:{display_amount}")
                     if "PEPE" in symbol_raw.upper():
                         log(
-                            f"[DEBUG] PEPE raw position {symbol_raw}: amount={display_amount}, entry={pos.get('entryPrice')}",
+                            f"[DEBUG] PEPE raw position ({'settle='+settle_hint if settle_hint else 'default'}) {symbol_raw}: amount={display_amount}, entry={pos.get('entryPrice')}",
                             Fore.LIGHTCYAN_EX,
                         )
-            if raw_entries:
+            label = f" ({settle_hint})" if settle_hint else ""
+            if entries:
                 log(
-                    f"[DEBUG] fetch_positions raw snapshot ({total_positions} total): "
-                    + ", ".join(raw_entries),
+                    f"[DEBUG] fetch_positions raw snapshot{label} ({total} total): "
+                    + ", ".join(entries),
                     Fore.LIGHTBLACK_EX,
                 )
         except Exception:
             pass
+
+    try:
+        positions = exchange.fetch_positions()
+        snapshots.extend(positions or [])
+        _log_raw_positions(positions, None)
     except Exception as e:
         log(f"⚠️ Не удалось получить список позиций: {e}", Fore.YELLOW)
         return {}, None
+    extra_settles = [settle for settle in EXTRA_POSITION_SETTLES if settle and settle.upper() != "USDT"]
+    for settle in extra_settles:
+        try:
+            extra_positions = exchange.fetch_positions({"settle": settle})
+            if extra_positions:
+                snapshots.extend(extra_positions)
+            _log_raw_positions(extra_positions, settle)
+        except Exception as exc_extra:
+            log(f"[WARN] Failed to fetch positions for settle {settle}: {exc_extra}", Fore.YELLOW)
     count = 0
     simplified = {}
     symbols_filter = set(symbols_filter) if symbols_filter else None
-    for pos in positions or []:
+    for pos in snapshots or []:
         source_symbol = pos.get("symbol")
         canonical_symbol = _resolve_symbol_alias(source_symbol) or source_symbol
         if not canonical_symbol:
@@ -10812,6 +10843,9 @@ def run_cycle():
     global SYMBOL_RULES_CACHE
     global CURRENT_RISK_PCT
     global ORDER_MARGIN_UTILIZATION
+    global AUTO_MARGIN_SCALE
+    global AUTO_MARGIN_SCALE_RATIO
+    global AUTO_MARGIN_CONFIDENCE_MULT
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     user_tag = f"[user={active_user_id}]"
 
