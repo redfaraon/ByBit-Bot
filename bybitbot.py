@@ -631,6 +631,28 @@ def _materialize_commit_script(commit_hash: str) -> Path | None:
     return script_path
 
 
+def _locate_target_version_script(version: str) -> Path | None:
+    target = (version or "").strip()
+    if not target:
+        return None
+    search_dirs = [REPO_ROOT, REPO_ROOT / "backups"]
+    patterns = [f"{target}.py", f"{target}*.py", f"*{target}*.py"]
+    seen: set[Path] = set()
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for pattern in patterns:
+            for candidate in sorted(directory.glob(pattern)):
+                if not candidate.is_file():
+                    continue
+                resolved = candidate.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                return resolved
+    return None
+
+
 def _materialize_branch_script(branch_name: str) -> Path | None:
     target = branch_name.strip()
     if not target:
@@ -1339,6 +1361,25 @@ def main():
             env_cycle_counter = int(env_cycle_counter_raw)
         except (TypeError, ValueError):
             env_cycle_counter = None
+
+    target_version = (os.getenv("TARGET_VERSION") or "").strip()
+    if target_version:
+        target_script = _locate_target_version_script(target_version)
+        if not target_script:
+            print(f"[BOOT] TARGET_VERSION={target_version} не найден, используем текущую версию.", file=sys.stderr)
+        else:
+            target_counter = env_cycle_counter if env_cycle_counter is not None else completed_cycles
+            _run_script_candidate(
+                target_script,
+                f"target.{target_version}",
+                f"TARGET_VERSION={target_version}",
+                f"target version {target_version}",
+                cycle_kind="normal",
+                cycle_mode="target",
+                cycle_counter=target_counter,
+                suppress_routine_increment=True,
+            )
+            return
 
     if history.get("fallback_active"):
         fallback_head = history.get("fallback_last_head")

@@ -47,9 +47,9 @@ except ImportError:
     feedparser = None
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.19.1"
+BOT_VERSION = "2025.11.27.1"
 BOT_CHANGELOG = (
-    "Support replies now search the full codebase with smarter keywords, /logs docs mention ticker filters, and onboarding docs highlight per-user balances."
+    "Spot balances >= $0.05 now count as active exposure, open positions bypass AI token caps, and launcher TARGET_VERSION overrides load the requested release."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -5964,20 +5964,20 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     return simplified, count
 
 
-def fetch_spot_position_symbols(exchange, *, min_total: float = 1e-6) -> set[str]:
+def fetch_spot_position_symbols(exchange, *, min_value_usd: float = 0.05) -> dict[str, dict[str, Any]]:
     """
-    Return spot symbols that currently have a non-trivial balance (e.g., BNB/USDT).
-    This allows the planner to consider spot holdings even though they are not part
-    of the derivatives position snapshot.
+    Return a mapping of spot symbols that currently have a balance >= min_value_usd.
+    Each entry contains a synthetic position payload so downstream logic can treat
+    spot holdings as active exposure.
     """
-    symbols: set[str] = set()
+    positions: dict[str, dict[str, Any]] = {}
     try:
         balances = exchange.fetch_balance({"type": "spot"})
     except Exception as exc:
         log(f"[WARN] Failed to fetch spot balances: {exc}", Fore.YELLOW)
-        return symbols
-    assets: dict[str, float] = {}
+        return positions
     totals = balances.get("total")
+    assets: dict[str, float] = {}
     if isinstance(totals, dict):
         for asset, value in totals.items():
             qty = safe_float(value)
@@ -5991,7 +5991,6 @@ def fetch_spot_position_symbols(exchange, *, min_total: float = 1e-6) -> set[str
         asset_name = str(asset or "").upper()
         if not asset_name:
             continue
-        amount_val = None
         if isinstance(payload, dict):
             amount_val = payload.get("total") if payload.get("total") is not None else payload.get("free")
         else:
@@ -6002,15 +6001,120 @@ def fetch_spot_position_symbols(exchange, *, min_total: float = 1e-6) -> set[str
         assets[asset_name] = max(qty, assets.get(asset_name, 0.0))
     stable_skip = {"USD", "BUSD", "USDT", "USDC"}
     stable_skip.update(quote.upper() for quote in RECOGNIZED_STABLE_QUOTES)
+    markets: dict[str, Any] = getattr(exchange, "markets", {}) or {}
+    if not markets:
+        try:
+            exchange.load_markets()
+            markets = getattr(exchange, "markets", {}) or {}
+        except Exception:
+            markets = {}
+    market_symbols = set(markets.keys() or [])
+    if not market_symbols:
+        market_symbols = set(getattr(exchange, "symbols", []) or [])
+    price_cache = getattr(exchange, "_spot_price_cache", None)
+    if not isinstance(price_cache, dict):
+        price_cache = {}
+        setattr(exchange, "_spot_price_cache", price_cache)
+
+    def candidate_symbols(asset_name: str) -> list[str]:
+        base = asset_name.upper()
+        candidates: list[str] = []
+        mapped = TICKER_TO_SYMBOL.get(base)
+        if mapped:
+            candidates.append(mapped)
+        candidates.extend(
+            [
+                f"{base}/USDT",
+                f"{base}/USDT:SPOT",
+                f"{base}/USDT:USDT",
+            ]
+        )
+        alias_target = SYMBOL_ALIASES.get(f"{base}/USDT:USDT")
+        if alias_target:
+            candidates.append(alias_target)
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for entry in candidates:
+            cleaned = entry.replace("//", "/")
+            if cleaned in seen:
+                continue
+            seen.add(cleaned)
+            ordered.append(cleaned)
+        return ordered
+
+    def lookup_price(symbol_name: str) -> Optional[float]:
+        price = price_cache.get(symbol_name)
+        if price:
+            return price
+        market = markets.get(symbol_name) or {}
+        info = market.get("info") if isinstance(market.get("info"), dict) else {}
+        for source in (market, info):
+            if not isinstance(source, dict):
+                continue
+            for key in ("last", "close", "markPrice", "indexPrice", "lastPrice", "avgPrice"):
+                price = safe_float(source.get(key))
+                if price:
+                    break
+            if price:
+                break
+        if not price and symbol_name in market_symbols:
+            try:
+                ticker = exchange.fetch_ticker(symbol_name)
+            except Exception:
+                ticker = None
+            if isinstance(ticker, dict):
+                for key in ("last", "close", "info"):
+                    value = ticker.get(key)
+                    if key == "info" and isinstance(value, dict):
+                        for nested in ("lastPrice", "close", "avgPrice"):
+                            price = safe_float(value.get(nested))
+                            if price:
+                                break
+                    else:
+                        price = safe_float(value)
+                    if price:
+                        break
+        if price:
+            price_cache[symbol_name] = price
+        return price
+
+    detected: list[str] = []
     for asset_name, qty in assets.items():
         if asset_name in stable_skip:
             continue
-        if qty is None or qty <= min_total:
+        amount = safe_float(qty)
+        if amount is None or amount <= 0:
             continue
-        symbols.add(f"{asset_name}/USDT")
-    if symbols:
-        log(f"[DEBUG] Spot holdings detected: {', '.join(sorted(symbols))}", Fore.LIGHTBLACK_EX)
-    return symbols
+        resolved_symbol = None
+        unit_price = None
+        for cand in candidate_symbols(asset_name):
+            if market_symbols and cand not in market_symbols:
+                continue
+            unit_price = lookup_price(cand)
+            if unit_price:
+                resolved_symbol = cand
+                break
+        if not resolved_symbol or not unit_price:
+            continue
+        usd_value = unit_price * amount
+        if usd_value < min_value_usd:
+            continue
+        payload = {
+            "symbol": resolved_symbol,
+            "amount": amount,
+            "side": "long",
+            "entryPrice": unit_price,
+            "category": "spot",
+            "info": {
+                "source": "spot_balance",
+                "usd_value": usd_value,
+            },
+        }
+        positions[resolved_symbol] = payload
+        detected.append(f"{resolved_symbol}≈{usd_value:.2f} USD")
+    if detected:
+        log(f"[DEBUG] Spot holdings detected: {', '.join(sorted(detected))}", Fore.LIGHTBLACK_EX)
+    return positions
 
 
 def _compact_positions_snapshot(positions_map: dict[str, Any] | None) -> dict[str, Any]:
@@ -7648,11 +7752,46 @@ def _compute_recent_pnl(
 
 def fetch_df(exchange, symbol, tf):
     resolved_symbol = _resolve_symbol_alias(symbol) or symbol
-    ohlcv = exchange.fetch_ohlcv(resolved_symbol, timeframe=tf, limit=200)
-    df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.set_index("timestamp", inplace=True)
-    return df
+
+    def _symbol_candidates(base_symbol: str) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def push(value: str | None) -> None:
+            if not value:
+                return
+            if value in seen:
+                return
+            seen.add(value)
+            candidates.append(value)
+
+        push(base_symbol)
+        upper_symbol = (base_symbol or "").upper()
+        if ":" in base_symbol:
+            raw = base_symbol.split(":", 1)[0]
+            push(raw)
+            push(f"{raw}:SPOT")
+            if raw.endswith("/USDT"):
+                push(raw.replace("/USDT", "/USDT:USDT"))
+        else:
+            push(f"{upper_symbol}:USDT")
+            push(f"{upper_symbol}:SPOT")
+        return candidates
+
+    last_exc: Exception | None = None
+    for candidate in _symbol_candidates(resolved_symbol):
+        try:
+            ohlcv = exchange.fetch_ohlcv(candidate, timeframe=tf, limit=200)
+        except Exception as exc:
+            last_exc = exc
+            continue
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        return df
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"Unable to fetch OHLCV for {symbol}")
 
 
 def _detect_position_mode(exchange, fallback_hedge: bool) -> bool:
@@ -9970,7 +10109,9 @@ def ai_decision(
     extra_context=None,
     target_meta=None,
     news_payload=None,
-    initial_decision=None
+    initial_decision=None,
+    *,
+    priority_symbol: bool = False,
 ):
     if not AI_KEY:
         log("❌ Не указан OPENAI_API_KEY", Fore.RED)
@@ -10282,7 +10423,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             if fallback_option:
                 return fallback_option
             return {"symbol": symbol, "action": "skip", "reason": "token cap exceeded"}
-        if not _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision"):
+        budget_ok = _ensure_token_budget(tokens_init, AI_MODEL, f"{symbol} initial decision")
+        if not budget_ok and priority_symbol:
+            log(f"⚠ {symbol}: превышен лимит токенов, продолжаем из-за открытой позиции", Fore.YELLOW)
+        elif not budget_ok:
             log(f"⛔ {symbol}: пропуск initial-запроса из-за лимита токенов", Fore.YELLOW)
             fallback_option = fallback_due_to("token budget exhausted (initial)")
             if fallback_option:
@@ -10639,7 +10783,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             if fallback_option:
                 return fallback_option
             return ensure_skip_reason(decision)
-        if not _ensure_token_budget(tokens_extra, AI_MODEL, f"{symbol} extra decision"):
+        budget_ok_extra = _ensure_token_budget(tokens_extra, AI_MODEL, f"{symbol} extra decision")
+        if not budget_ok_extra and priority_symbol:
+            log(f"⚠ {symbol}: превышен лимит токенов на extra-запросе, продолжаем из-за открытой позиции", Fore.YELLOW)
+        elif not budget_ok_extra:
             log(f"⛔ {symbol}: пропуск extra-запроса из-за лимита токенов", Fore.YELLOW)
             decision["needs_followup"] = needs
             fallback_option = fallback_due_to(
@@ -11068,6 +11215,15 @@ def run_cycle():
 
     ensure_position_mode(ex)
     positions_map, open_positions = fetch_positions_snapshot(ex)
+    spot_position_payloads = {}
+    try:
+        spot_position_payloads = fetch_spot_position_symbols(ex, min_value_usd=0.05)
+    except Exception:
+        spot_position_payloads = {}
+    if spot_position_payloads:
+        for sym_spot, payload in spot_position_payloads.items():
+            if sym_spot not in positions_map:
+                positions_map[sym_spot] = payload
     base_exposure_counts = _build_base_exposure_map(positions_map)
     pending_base_allocations: defaultdict[str, int] = defaultdict(int)
     base_max_positions = max(0, MAX_OPEN_POSITIONS or 0)
@@ -11275,12 +11431,9 @@ def run_cycle():
             amt = 0.0
         if math.isfinite(amt) and abs(amt) > 0:
             position_symbols.add(sym_pos)
-    try:
-        spot_symbols = fetch_spot_position_symbols(ex)
-    except Exception:
-        spot_symbols = set()
-    if spot_symbols:
-        position_symbols.update(spot_symbols)
+    spot_position_symbols = set(spot_position_payloads.keys())
+    if spot_position_symbols:
+        position_symbols.update(spot_position_symbols)
 
     position_limit_reached = (
         max_positions_limit > 0
@@ -11523,7 +11676,16 @@ def run_cycle():
         symbol_alias_hits.clear()
 
     if len(available_pairs) > symbol_processing_limit:
-        available_pairs = available_pairs[:symbol_processing_limit]
+        priority_pairs = [sym for sym in available_pairs if sym in position_symbols]
+        trimmed_list = priority_pairs[:]
+        allowed_extras = symbol_processing_limit
+        for sym in available_pairs:
+            if sym in position_symbols:
+                continue
+            if len(trimmed_list) >= len(priority_pairs) + allowed_extras:
+                break
+            trimmed_list.append(sym)
+        available_pairs = trimmed_list
     if position_limit_reached:
         log(
             f"[INFO] Position cap reached ({open_positions}/{max_positions_limit}); restricting analysis to existing exposure.",
@@ -11806,7 +11968,16 @@ def run_cycle():
             seen_priority.add(sym_order)
     symbols_sequence = priority_sequence
     if len(symbols_sequence) > symbol_processing_limit:
-        symbols_sequence = symbols_sequence[:symbol_processing_limit]
+        protected_symbols = [sym for sym in symbols_sequence if sym in position_symbols]
+        trimmed_sequence = protected_symbols[:]
+        allowed_slots = symbol_processing_limit
+        for sym in symbols_sequence:
+            if sym in position_symbols:
+                continue
+            if len(trimmed_sequence) >= len(protected_symbols) + allowed_slots:
+                break
+            trimmed_sequence.append(sym)
+        symbols_sequence = trimmed_sequence
     if not symbols_sequence:
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
@@ -11820,10 +11991,13 @@ def run_cycle():
     flat_unavailable_symbols: list[str] = []
 
     trade_plan_failed = trade_plan is None
-    for i,sym in enumerate(symbols_sequence,1):
-        if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET:
+    for i, sym in enumerate(symbols_sequence, 1):
+        has_priority_exposure = sym in position_symbols
+        if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET and not has_priority_exposure:
             log(f"⛔ Достигнут лимит {AI_HARD_STOP_BUDGET} токенов — дальнейший анализ остановлен", Fore.YELLOW)
             break
+        if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET and has_priority_exposure:
+            log(f"[{sym}] превышен лимит токенов, продолжаем из-за открытой позиции", Fore.YELLOW)
         log(f"[{i}/{len(symbols_sequence)}] {sym}", Fore.LIGHTBLUE_EX)
         try:
             equity, available_margin, _ = fetch_usdt_equity(ex)
@@ -11967,6 +12141,7 @@ def run_cycle():
                 target_meta=symbol_meta,
                 news_payload=news_payload_symbol,
                 initial_decision=initial_payload,
+                priority_symbol=has_priority_exposure,
             )
 
             if not dec:
