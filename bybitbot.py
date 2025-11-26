@@ -9,6 +9,7 @@ import time
 import shutil
 import signal
 import subprocess
+import threading
 import sys
 import traceback
 from dataclasses import dataclass
@@ -286,12 +287,18 @@ def _start_background_engine() -> None:
     env.setdefault("BYBIT_ENGINE_AUTOSTART", "1")
     cmd = [sys.executable, str(script_path), "--loop", "--quiet"]
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file if log_file else None,
-            stderr=log_file if log_file else None,
-            env=env,
-        )
+        popen_kwargs = {
+            "stdout": log_file if log_file else None,
+            "stderr": log_file if log_file else None,
+            "env": env,
+            "close_fds": True,
+        }
+        # Best-effort: detach session on POSIX so signals don’t cascade
+        try:
+            popen_kwargs["start_new_session"] = True
+        except Exception:
+            pass
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except Exception as exc:
         if log_file:
             log_file.write(f"[ENGINE] Failed to start: {exc}\n")
@@ -303,6 +310,40 @@ def _start_background_engine() -> None:
     _ENGINE_AUTOSTART_LOG = log_file
     try:
         pid_path.write_text(str(proc.pid))
+    except Exception:
+        pass
+
+    # Reap the child when it exits to avoid zombies; also clean pid/log.
+    def _engine_reaper(child: subprocess.Popen, pid_file: Path, log_handle):
+        try:
+            child.wait()
+        except Exception:
+            pass
+        finally:
+            try:
+                pid_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            if log_handle:
+                try:
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                    log_handle.write(f"=== Engine exited @ {ts} ===\n")
+                    log_handle.flush()
+                except Exception:
+                    pass
+                try:
+                    log_handle.close()
+                except Exception:
+                    pass
+            # Clear references
+            try:
+                globals()["_ENGINE_AUTOSTART_PROCESS"] = None
+                globals()["_ENGINE_AUTOSTART_LOG"] = None
+            except Exception:
+                pass
+
+    try:
+        threading.Thread(target=_engine_reaper, args=(proc, pid_path, log_file), daemon=True).start()
     except Exception:
         pass
 
