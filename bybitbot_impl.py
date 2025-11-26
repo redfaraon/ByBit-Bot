@@ -5908,6 +5908,12 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     for settle in extra_settles:
         try:
             extra_positions = exchange.fetch_positions({"settle": settle})
+            if not extra_positions:
+                # Retry with explicit category hint used by Bybit v5
+                try:
+                    extra_positions = exchange.fetch_positions({"category": "linear", "settle": settle})
+                except Exception:
+                    pass
             if extra_positions:
                 snapshots.extend(extra_positions)
             _log_raw_positions(extra_positions, settle)
@@ -6039,12 +6045,9 @@ def fetch_all_open_orders_grouped(exchange, limit: int | None = None) -> dict[st
 def cancel_order_by_id(exchange, symbol, order_id: str):
     resolved_symbol = _resolve_symbol_alias(symbol) or symbol
     try:
-        # Primary attempt: usual ccxt signature cancel_order(id, symbol, params)
         exchange.cancel_order(order_id, resolved_symbol)
         return True, None
     except TypeError as e:
-        # Some exchange adapters may choke on None params or unexpected types —
-        # try a safe fallback with empty params and capture both errors.
         try:
             exchange.cancel_order(order_id, resolved_symbol, {})
             return True, None
@@ -6052,9 +6055,17 @@ def cancel_order_by_id(exchange, symbol, order_id: str):
             tb = traceback.format_exc()
             log(f"[DEBUG] cancel_order_by_id TypeError fallback failed for {order_id} {symbol}: {e} | {e2}", Fore.YELLOW)
             log(tb, Fore.LIGHTBLACK_EX)
+            # Treat already-cancelled / not-exists as benign
+            text = str(e2)
+            if "OrderNotFound" in text or 'retCode":110001' in text or 'order not exists' in text.lower():
+                return True, None
             return False, f"{e} | fallback: {e2}"
     except Exception as e:
-        # Log the traceback for diagnostics and return the error string for upper layers
+        text = str(e)
+        # Consider Bybit 110001 and ccxt OrderNotFound benign during cleanups
+        if "OrderNotFound" in text or 'retCode":110001' in text or 'order not exists' in text.lower():
+            log(f"[INFO] cancel noop for {order_id} {symbol}: already cancelled/filled", Fore.LIGHTBLACK_EX)
+            return True, None
         tb = traceback.format_exc()
         log(f"[DEBUG] cancel_order_by_id failed for {order_id} {symbol}: {e}", Fore.YELLOW)
         log(tb, Fore.LIGHTBLACK_EX)
@@ -8187,6 +8198,11 @@ def _enable_exchange_logging(exchange: Any) -> Any:
                     log(tb2, Fore.LIGHTBLACK_EX)
                     raise
             except Exception as exc:
+                text = str(exc)
+                if "OrderNotFound" in text or 'retCode":110001' in text or 'order not exists' in text.lower():
+                    duration = time.time() - start
+                    log(f"[EX] cancel noop {symbol or '?'} #{order_id} ({duration:.2f}s) — already cancelled/filled", Fore.LIGHTBLACK_EX)
+                    return None
                 log(f"[EX] cancel fail {symbol or '?'} #{order_id}: {exc}", Fore.YELLOW)
                 tb = traceback.format_exc()
                 log(tb, Fore.LIGHTBLACK_EX)
@@ -8929,25 +8945,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         reduce_orders_source = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
     reduce_orders = [order for order in reduce_orders_source if isinstance(order, dict)]
     position_qty = abs(position_amount)
-    cancelled_stop_entries, cancel_stop_errors = _cleanup_redundant_stop_orders(
-        exchange,
-        symbol,
-        reduce_orders,
-        protection_side,
-        position_qty,
-        is_long,
-    )
-    if cancelled_stop_entries:
-        summary = "; ".join(cancelled_stop_entries)
-        log(f"📈 {symbol}: удалены лишние стоп-ордера: {summary}", Fore.LIGHTBLUE_EX)
-        send_tg(f"📈 {symbol}: удалены лишние стоп-ордера: {summary}")
-    if cancel_stop_errors:
-        details = "; ".join(f"{descriptor} -> {err}" for descriptor, err in cancel_stop_errors)
-        log(f"⚠️ {symbol}: не удалось удалить часть стоп-ордеров: {details}", Fore.YELLOW)
-        send_tg(f"ℹ️ {symbol}: ошибка при удалении стоп-ордеров: {details}")
-    if cancelled_stop_entries or cancel_stop_errors:
-        open_orders = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
-        reduce_orders = [order for order in (open_orders or []) if isinstance(order, dict)]
+    # Defer cleanup of redundant stops until AFTER new protection is placed,
+    # to avoid leaving the position unprotected if new orders fail.
+    # We'll refresh and clean up near the end of this function.
 
     has_stop = False
     has_take = False
@@ -9402,6 +9402,29 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         )
     if forced_errors:
         log(f"[WARN] {symbol}: fallback take-profit errors ({'; '.join(forced_errors)})", Fore.YELLOW)
+
+    # Now that new protection is set (or attempted), clean up redundant reduce-only orders
+    try:
+        refreshed_open = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
+        refreshed_reduce = [order for order in (refreshed_open or []) if isinstance(order, dict)]
+        cancelled_stop_entries, cancel_stop_errors = _cleanup_redundant_stop_orders(
+            exchange,
+            symbol,
+            refreshed_reduce,
+            protection_side,
+            position_qty,
+            is_long,
+        )
+        if cancelled_stop_entries:
+            summary = "; ".join(cancelled_stop_entries)
+            log(f"📈 {symbol}: удалены лишние стоп-ордера: {summary}", Fore.LIGHTBLUE_EX)
+            send_tg(f"📈 {symbol}: удалены лишние стоп-ордера: {summary}")
+        if cancel_stop_errors:
+            details = "; ".join(f"{descriptor} -> {err}" for descriptor, err in cancel_stop_errors)
+            log(f"⚠️ {symbol}: не удалось удалить часть стоп-ордеров: {details}", Fore.YELLOW)
+            send_tg(f"ℹ️ {symbol}: ошибка при удалении стоп-ордеров: {details}")
+    except Exception as exc_cleanup:
+        log(f"[WARN] {symbol}: cleanup of redundant stops failed: {exc_cleanup}", Fore.YELLOW)
 
     if created_log_parts:
         log(f"🔷 {symbol}: обновлена защита позиции {created_log_parts}", Fore.LIGHTBLUE_EX)
@@ -12597,6 +12620,8 @@ def run_cycle():
                         ratio_total = sum(item[0] for item in normalized_entries) or 1.0
                         log(f"[DEBUG] {sym} - normalized_entries={normalized_entries}, ratio_total={ratio_total}", Fore.LIGHTBLACK_EX)
                         log(f"[DEBUG] {sym} {side.upper()} - qty={qty:.4f}, notional={notional:.2f}, margin_required={notional/symbol_leverage if symbol_leverage else notional:.2f}, effective_margin={effective_margin:.2f}, sl={sl:.2f}, tp={tp:.2f}", Fore.LIGHTBLACK_EX)
+                        # Ensure fallback_price is defined for fallback path
+                        fallback_price = price
                         remaining_qty = qty
                         entry_summaries: list[str] = []
                         entry_created = 0
