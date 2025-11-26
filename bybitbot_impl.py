@@ -8131,10 +8131,11 @@ def _enable_exchange_logging(exchange: Any) -> Any:
     if callable(original_cancel_order):
         def logged_cancel_order(self, order_id, symbol=None, params=None):
             param_text = _format_exchange_params_blob(params)
+            safe_params = params if params else {}
             log(f"[EX] cancel {symbol or '?'} #{order_id} params={param_text}", Fore.LIGHTBLACK_EX)
             start = time.time()
             try:
-                result = original_cancel_order(order_id, symbol, params)
+                result = original_cancel_order(order_id, symbol, safe_params)
                 duration = time.time() - start
                 log(f"[EX] cancel ok {symbol or '?'} #{order_id} ({duration:.2f}s)", Fore.LIGHTBLACK_EX)
                 return result
