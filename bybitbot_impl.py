@@ -132,6 +132,9 @@ def _float_from_env(env_name: str, default_value: float) -> float:
 DEFAULT_USER_LOG_MAX_MB = 2.5
 USER_LOG_MAX_BYTES = _bytes_from_env("BYBIT_USER_LOG_MAX_MB", DEFAULT_USER_LOG_MAX_MB)
 USER_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_USER_LOG_BACKUPS", "3")))
+DEFAULT_AI_LOG_MAX_MB = 16.0
+AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
+AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", "5")))
 DEFAULT_MAIN_LOG_MAX_MB = 12.0
 _main_log_path_raw = os.getenv("BYBIT_MAIN_LOG")
 if _main_log_path_raw:
@@ -1811,6 +1814,15 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
             col = f"atr{period}"
             df[col] = atr(df, period)
             return col
+        if base in ("stochrsi", "stochrs", "stochr"):
+            period = length or 14
+            rsi_series = rsi(df["close"], period)
+            col = f"stochrsi{period}"
+            rsi_min = rsi_series.rolling(period).min()
+            rsi_max = rsi_series.rolling(period).max()
+            denom = (rsi_max - rsi_min).replace(0, pd.NA)
+            df[col] = 100 * (rsi_series - rsi_min) / denom
+            return col
         if base == "stoch":
             period = length or 14
             col = f"stoch{period}"
@@ -2774,6 +2786,7 @@ def refresh_settings():
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
     global USER_LOG_MAX_BYTES, USER_LOG_BACKUPS, DRAWDOWN_CONTROL_ENABLED, DRAWDOWN_WINDOW_HOURS
+    global AI_LOG_MAX_BYTES, AI_LOG_BACKUPS
     global MAIN_LOG_PATH, MAIN_LOG_MAX_BYTES, MAIN_LOG_BACKUPS, MAIN_LOG_ENABLED
     global LOG_TIMEZONE, LOG_TZINFO, _LOG_TZ_WARNING_EMITTED
     global PAIR_CANDIDATE_LIMIT, PAIR_PREFETCH_LIMIT
@@ -2991,6 +3004,8 @@ def refresh_settings():
         DRAWDOWN_WINDOW_HOURS = 24.0 * 7.0
     if not math.isfinite(AUTO_MARGIN_CONFIDENCE_MULT) or AUTO_MARGIN_CONFIDENCE_MULT < 1.0:
         AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
+    AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
+    AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
     MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -3347,10 +3362,12 @@ if "NEEDS_MAX_TIMEFRAMES" not in globals():
     NEEDS_MAX_TIMEFRAMES = 2
 if "NEEDS_MAX_INDICATORS" not in globals():
     NEEDS_MAX_INDICATORS = 6
+if "AI_EXTRA_PASSES_MAX" not in globals():
+    AI_EXTRA_PASSES_MAX = 2
 if "SUMMARY_TIMEFRAME_SHORTLIST" not in globals():
     SUMMARY_TIMEFRAME_SHORTLIST = ["30m", "4h"]
 if "SUMMARY_INDICATOR_SHORTLIST" not in globals():
-    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "macd", "atr14"]
+    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "stochrsi14", "atr14"]
 if "NEEDS_LONG_BARS_LIMIT" not in globals():
     NEEDS_LONG_BARS_LIMIT = 10
 if "TG_MIN_INTERVAL" not in globals():
@@ -5760,7 +5777,19 @@ def _restart_with_latest_code(reason: str) -> None:
 
 def save_json_line(path, data):
     try:
-        with open(path, "a", encoding="utf-8") as f:
+        p = Path(path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        ai_names = {
+            Path(AI_LOG_FILE).name if isinstance(AI_LOG_FILE, str) else str(AI_LOG_FILE),
+            Path(AI_ARCHIVE_FILE).name if isinstance(AI_ARCHIVE_FILE, str) else str(AI_ARCHIVE_FILE),
+            Path(AI_REQUESTS_LOG).name if isinstance(AI_REQUESTS_LOG, str) else str(AI_REQUESTS_LOG),
+        }
+        if p.name in ai_names:
+            _maybe_rotate_file(p, AI_LOG_MAX_BYTES, AI_LOG_BACKUPS)
+        with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
     except Exception as e:
         log(f"⚠️ Ошибка записи в {path}: {e}", Fore.YELLOW)
