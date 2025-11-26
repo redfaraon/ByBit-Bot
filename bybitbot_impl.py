@@ -10318,7 +10318,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                         raw_indicator_fields.append(n[key])
                 shorthand_fields = {
                     k: v for k, v in n.items()
-                    if isinstance(k, str) and k.lower() in ("ema", "sma", "rsi", "atr", "stoch")
+                    if isinstance(k, str) and k.lower() in ("ema", "sma", "rsi", "atr", "stoch", "stochrsi")
                 }
                 for k, v in shorthand_fields.items():
                     raw_indicator_fields.append({"indicator": k, "length": v})
@@ -10773,6 +10773,7 @@ def run_cycle():
     global DYNAMIC_SYMBOL_ALIASES
     global SYMBOL_RULES_CACHE
     global CURRENT_RISK_PCT
+    global ORDER_MARGIN_UTILIZATION
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     user_tag = f"[user={active_user_id}]"
 
@@ -12382,7 +12383,7 @@ def run_cycle():
                             send_tg(f"[WARN] {user_tag} {sym}: insufficient free margin ({available_margin:.2f} USDT)")
                             log_open_skip(sym, "risk budget zero")
                             continue
-                    qty = risk_capital / risk_distance
+                        qty = risk_capital / risk_distance
                     qty = _apply_qty_rules(qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
                     if not math.isfinite(qty) or qty <= 0:
                         log(f"[WARN] {user_tag} {sym}: computed quantity is invalid", Fore.YELLOW)
