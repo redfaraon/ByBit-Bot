@@ -5905,20 +5905,39 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
         log(f"⚠️ Не удалось получить список позиций: {e}", Fore.YELLOW)
         return {}, None
     extra_settles = [settle for settle in EXTRA_POSITION_SETTLES if settle and settle.upper() != "USDT"]
-    for settle in extra_settles:
-        try:
-            extra_positions = exchange.fetch_positions({"settle": settle})
-            if not extra_positions:
-                # Retry with explicit category hint used by Bybit v5
+    if extra_settles:
+        def _fetch_extra_positions(settle_hint: str) -> list[dict[str, Any]] | None:
+            candidates = [
+                {"settleCoin": settle_hint, "type": "linear"},
+                {"settleCoin": settle_hint},
+                {"category": "linear", "settle": settle_hint},
+                {"settle": settle_hint},
+            ]
+            last_exc: Exception | None = None
+            for params in candidates:
                 try:
-                    extra_positions = exchange.fetch_positions({"category": "linear", "settle": settle})
-                except Exception:
-                    pass
-            if extra_positions:
-                snapshots.extend(extra_positions)
-            _log_raw_positions(extra_positions, settle)
-        except Exception as exc_extra:
-            log(f"[WARN] Failed to fetch positions for settle {settle}: {exc_extra}", Fore.YELLOW)
+                    result = exchange.fetch_positions(dict(params))
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+                if result:
+                    return result
+            if last_exc:
+                raise last_exc
+            return None
+
+        for settle in extra_settles:
+            extra_positions = None
+            try:
+                extra_positions = _fetch_extra_positions(settle)
+                if extra_positions:
+                    snapshots.extend(extra_positions)
+                _log_raw_positions(extra_positions, settle)
+            except Exception as exc_extra:
+                log(
+                    f"[WARN] Failed to fetch positions for settle {settle}: {exc_extra}",
+                    Fore.YELLOW,
+                )
     count = 0
     simplified = {}
     symbols_filter = set(symbols_filter) if symbols_filter else None
