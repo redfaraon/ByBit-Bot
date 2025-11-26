@@ -5916,7 +5916,9 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
             last_exc: Exception | None = None
             for params in candidates:
                 try:
-                    result = exchange.fetch_positions(dict(params))
+                    # Pass extra parameters via the params argument so ccxt
+                    # can apply them correctly (e.g. settleCoin/settle).
+                    result = exchange.fetch_positions(None, dict(params))
                 except Exception as exc:
                     last_exc = exc
                     continue
