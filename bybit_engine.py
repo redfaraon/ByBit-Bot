@@ -5,6 +5,7 @@ Standalone engine runner that reuses EngineCore without importing the main bot.
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import sys
 import time
@@ -26,6 +27,40 @@ REPO_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
 RUNTIME_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
 MAIN_LOG_MIRROR = Path(os.getenv("BYBIT_MAIN_LOG", REPO_ROOT / "bybit.log"))
+MAIN_LOG_MAX_BYTES = int(float(os.getenv("BYBIT_MAIN_LOG_MAX_MB", "8")) * 1024 * 1024)
+MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", "5")))
+
+
+def _maybe_rotate_file(path: Path, max_bytes: int, backups: int) -> None:
+    if max_bytes <= 0 or backups <= 0:
+        return
+    try:
+        if not path.exists():
+            return
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < max_bytes:
+        return
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    rotated = path.with_name(f"{path.name}.{timestamp}")
+    try:
+        path.rename(rotated)
+    except OSError:
+        return
+    try:
+        rotated_files = sorted(
+            [candidate for candidate in path.parent.glob(f"{path.name}.*") if candidate.is_file()],
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for extra in rotated_files[backups:]:
+        try:
+            extra.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 class EngineWithMirror(EngineCore):
     """EngineCore that mirrors its log output into the main bybit.log as well."""
@@ -42,6 +77,7 @@ class EngineWithMirror(EngineCore):
         if self._mirror_path:
             try:
                 self._mirror_path.parent.mkdir(parents=True, exist_ok=True)
+                _maybe_rotate_file(self._mirror_path, MAIN_LOG_MAX_BYTES, MAIN_LOG_BACKUPS)
                 with self._mirror_path.open("a", encoding="utf-8") as fp:
                     fp.write(message.rstrip() + "`n")
             except Exception:
