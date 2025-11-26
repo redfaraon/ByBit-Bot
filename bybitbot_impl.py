@@ -5964,6 +5964,55 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     return simplified, count
 
 
+def fetch_spot_position_symbols(exchange, *, min_total: float = 1e-6) -> set[str]:
+    """
+    Return spot symbols that currently have a non-trivial balance (e.g., BNB/USDT).
+    This allows the planner to consider spot holdings even though they are not part
+    of the derivatives position snapshot.
+    """
+    symbols: set[str] = set()
+    try:
+        balances = exchange.fetch_balance({"type": "spot"})
+    except Exception as exc:
+        log(f"[WARN] Failed to fetch spot balances: {exc}", Fore.YELLOW)
+        return symbols
+    assets: dict[str, float] = {}
+    totals = balances.get("total")
+    if isinstance(totals, dict):
+        for asset, value in totals.items():
+            qty = safe_float(value)
+            if qty is None:
+                continue
+            assets[asset.upper()] = max(qty, assets.get(asset.upper(), 0.0))
+    skip_keys = {"info", "free", "used", "total", "timestamp", "datetime"}
+    for asset, payload in balances.items():
+        if asset in skip_keys:
+            continue
+        asset_name = str(asset or "").upper()
+        if not asset_name:
+            continue
+        amount_val = None
+        if isinstance(payload, dict):
+            amount_val = payload.get("total") if payload.get("total") is not None else payload.get("free")
+        else:
+            amount_val = payload
+        qty = safe_float(amount_val)
+        if qty is None:
+            continue
+        assets[asset_name] = max(qty, assets.get(asset_name, 0.0))
+    stable_skip = {"USD", "BUSD", "USDT", "USDC"}
+    stable_skip.update(quote.upper() for quote in RECOGNIZED_STABLE_QUOTES)
+    for asset_name, qty in assets.items():
+        if asset_name in stable_skip:
+            continue
+        if qty is None or qty <= min_total:
+            continue
+        symbols.add(f"{asset_name}/USDT")
+    if symbols:
+        log(f"[DEBUG] Spot holdings detected: {', '.join(sorted(symbols))}", Fore.LIGHTBLACK_EX)
+    return symbols
+
+
 def _compact_positions_snapshot(positions_map: dict[str, Any] | None) -> dict[str, Any]:
     """Strip heavy fields from positions before sending to the trade plan model."""
     snapshot: dict[str, Any] = {}
@@ -11226,6 +11275,12 @@ def run_cycle():
             amt = 0.0
         if math.isfinite(amt) and abs(amt) > 0:
             position_symbols.add(sym_pos)
+    try:
+        spot_symbols = fetch_spot_position_symbols(ex)
+    except Exception:
+        spot_symbols = set()
+    if spot_symbols:
+        position_symbols.update(spot_symbols)
 
     position_limit_reached = (
         max_positions_limit > 0
