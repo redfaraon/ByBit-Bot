@@ -10221,6 +10221,7 @@ def execute_extra_orders(
             params["reduceOnly"] = True
         elif "reduceOnly" in params:
             params["reduceOnly"] = bool(params["reduceOnly"])
+        is_reduce_only = _is_truthy_flag(params.get("reduceOnly"))
         amount = compute_order_amount(order, current_position)
         if amount is None:
             log(f"[WARN] Unable to determine amount for extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
@@ -10265,7 +10266,6 @@ def execute_extra_orders(
             log(f"[WARN] Invalid price in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
         price_key = round(price, NON_REDUCE_PRICE_DECIMALS) if price is not None else None
-        is_reduce_only = _is_truthy_flag(params.get("reduceOnly"))
         trigger_price = safe_float(
             order.get("triggerPrice")
             or order.get("stopPrice")
