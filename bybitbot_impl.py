@@ -9992,6 +9992,23 @@ def execute_extra_orders(
             log(f"[WARN] Invalid amount in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
         side_raw = order.get("side")
+        if not side_raw and is_reduce_only:
+            reduce_direction = None
+            position_side_field = str((current_position or {}).get("side") or "").lower()
+            if position_side_field in {"long", "buy"}:
+                reduce_direction = "sell"
+            elif position_side_field in {"short", "sell"}:
+                reduce_direction = "buy"
+            if reduce_direction is None:
+                pos_amount_val = safe_float(
+                    (current_position or {}).get("amount")
+                    or (current_position or {}).get("contracts")
+                    or (current_position or {}).get("size")
+                )
+                if pos_amount_val is not None and math.isfinite(pos_amount_val) and abs(pos_amount_val) > 0:
+                    reduce_direction = "sell" if pos_amount_val > 0 else "buy"
+            if reduce_direction:
+                side_raw = reduce_direction
         side, autodetected_side = _normalize_order_side(side_raw, amount)
         if autodetected_side:
             log(
@@ -11848,7 +11865,12 @@ def run_cycle():
         new_universe_set = set(new_universe_candidates)
 
     news_sorted = sorted(news_priority)
-    _append_unique(available_pairs, sorted(position_symbols), seen_available)
+    if position_symbols:
+        prioritized_positions = sorted(
+            position_symbols,
+            key=lambda sym: (0 if sym in spot_position_symbols else 1, sym),
+        )
+        _append_unique(available_pairs, prioritized_positions, seen_available)
     _append_unique(available_pairs, sorted(order_symbols), seen_available)
     if new_universe_candidates:
         _append_unique(available_pairs, new_universe_candidates, seen_available)
