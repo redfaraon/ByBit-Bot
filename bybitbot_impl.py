@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.27.3"
+BOT_VERSION = "2025.11.27.4"
 BOT_CHANGELOG = (
     "Graphs now auto-generate and get pushed to Telegram, AI request/response logging gained timestamps,"
     " trailing protection exclusively uses set_trading_stop, and runtime visibility improved."
