@@ -2775,7 +2775,9 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     if replacement_orders:
         extra_orders.extend(replacement_orders)
 
+    executed_orders: list[str] = []
     if extra_orders:
+        previous_position_snapshot = current_position
         executed, actions_performed = execute_extra_orders(
             exchange,
             sym,
@@ -2784,6 +2786,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             open_orders=open_orders_symbol,
             max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
         )
+        executed_orders = list(executed) if executed else []
         if executed:
             send_tg(f"{sym}: —?—?—?——? выполнил:\n- " + "\n- ".join(executed))
         if actions_performed:
@@ -2795,6 +2798,37 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
                 log(f"[WARN] fetch_open_orders {sym}: {exc}", Fore.YELLOW)
                 open_orders_symbol = []
             open_orders_cache[sym] = open_orders_symbol
+            if action == "open" and not has_position and executed_orders:
+                prev_amount_val = safe_float(
+                    (previous_position_snapshot or {}).get("amount")
+                    or (previous_position_snapshot or {}).get("contracts")
+                    or (previous_position_snapshot or {}).get("size")
+                )
+                curr_amount_val = safe_float(
+                    (current_position or {}).get("amount")
+                    or (current_position or {}).get("contracts")
+                    or (current_position or {}).get("size")
+                )
+                prev_has_pos = (
+                    prev_amount_val is not None and math.isfinite(prev_amount_val) and abs(prev_amount_val) > 0
+                )
+                curr_has_pos = (
+                    curr_amount_val is not None and math.isfinite(curr_amount_val) and abs(curr_amount_val) > 0
+                )
+                if not prev_has_pos and not curr_has_pos:
+                    pending_orders = open_orders_symbol or []
+                    pending_descriptions = [
+                        _summarize_order_spec(order)
+                        for order in pending_orders[:3]
+                        if isinstance(order, dict)
+                    ]
+                    pending_text = (
+                        "; ".join(pending_descriptions) if pending_descriptions else "awaiting exchange confirmation"
+                    )
+                    log(
+                        f"[INFO] {sym}: entry orders submitted, waiting for fill ({pending_text}).",
+                        Fore.LIGHTBLACK_EX,
+                    )
 
     return 1, positions_map, open_orders_cache
 
@@ -6107,11 +6141,6 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
         simp = simplify_position(pos)
         if simp:
             simplified[canonical_symbol] = simp
-            if "PEPE" in canonical_symbol.upper() or (source_symbol and "PEPE" in source_symbol.upper()):
-                log(
-                    f"[DEBUG] PEPE canonical {source_symbol}->{canonical_symbol}: amount={simp.get('amount')} entry={simp.get('entryPrice')}",
-                    Fore.LIGHTCYAN_EX,
-                )
             if source_symbol and source_symbol != canonical_symbol:
                 DYNAMIC_SYMBOL_ALIASES[source_symbol] = canonical_symbol
             count += 1
