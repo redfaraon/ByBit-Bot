@@ -112,6 +112,7 @@ def _configure_state_paths() -> None:
         pass
 
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
+LOG_EXTRA_SETTLE_POSITIONS = str(os.getenv("LOG_EXTRA_SETTLE_POSITIONS", "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
