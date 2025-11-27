@@ -54,10 +54,10 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.27.2"
+BOT_VERSION = "2025.11.27.3"
 BOT_CHANGELOG = (
-    "Candidates list now labels spot/deriv, trailing protection uses Bybit set_trading_stop, inline "
-    "/version controls restart on demand, and graphs + UTF-8 console output."
+    "Graphs now auto-generate and get pushed to Telegram, AI request/response logging gained timestamps,"
+    " trailing protection exclusively uses set_trading_stop, and runtime visibility improved."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -114,6 +114,8 @@ def _configure_state_paths() -> None:
 
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
 LOG_EXTRA_SETTLE_POSITIONS = str(os.getenv("LOG_EXTRA_SETTLE_POSITIONS", "")).strip().lower() in {"1", "true", "yes", "on"}
+GRAPH_OUTPUT_DIR = SCRIPT_DIR / "assets" / "graphs"
+GRAPH_SEND_INTERVAL_DEFAULT = 60
 
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
@@ -3683,6 +3685,17 @@ def _write_runtime_status(next_delay_minutes: Optional[float], next_run_dt: Opti
         pass
 
 
+def _update_runtime_status_field(key: str, value: Any) -> None:
+    state = _read_runtime_status()
+    if not isinstance(state, dict):
+        state = {}
+    state[key] = value
+    try:
+        RUNTIME_STATUS_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _format_tz_suffix(dt: datetime.datetime) -> str:
     parts = []
     tz_name = (dt.tzname() or "").strip()
@@ -4090,6 +4103,43 @@ def send_tg(msg: str | Sequence[str], **extra):
         if should_flush:
             _flush_tg_log_buffer()
     return last_message_id
+
+
+def send_tg_photo(
+    path: Path,
+    *,
+    caption: str | None = None,
+    chat_id_override: int | None = None,
+    thread_id: int | None = None,
+) -> int | None:
+    if not TG_TOKEN:
+        return None
+    target_chat = chat_id_override if chat_id_override is not None else TG_CHAT
+    if target_chat is None:
+        return None
+    payload = {"chat_id": target_chat}
+    thread_candidate = thread_id if thread_id is not None else TELEGRAM_LOG_THREAD_ID
+    thread_id_int = safe_int(thread_candidate) if thread_candidate is not None else None
+    if thread_id_int is not None:
+        payload["message_thread_id"] = thread_id_int
+    if caption:
+        payload["caption"] = caption
+    try:
+        with path.open("rb") as fh:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+                data=payload,
+                files={"photo": fh},
+                timeout=10,
+            )
+        data = response.json()
+    except Exception as exc:
+        log(f"[WARN] Telegram photo send failed: {exc}", Fore.YELLOW)
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        log(f"[WARN] Telegram photo API error: {data}", Fore.YELLOW)
+        return None
+    return data.get("result", {}).get("message_id")
 
 
 def _delete_tg_message(chat_id: int, message_id: int) -> bool:
@@ -4780,6 +4830,77 @@ def start_telegram_long_polling() -> None:
     thread = threading.Thread(target=_poll_updates, daemon=True)
     _TELEGRAM_LONG_POLL_THREAD = thread
     thread.start()
+
+
+def _graph_interval_minutes() -> int:
+    return max(0, env_int("GRAPH_SEND_INTERVAL_MINUTES", GRAPH_SEND_INTERVAL_DEFAULT))
+
+
+def _graph_thread_id() -> int | None:
+    candidate = TELEGRAM_LOG_THREAD_ID if TELEGRAM_LOG_THREAD_ID is not None else TELEGRAM_COMMAND_THREAD_ID
+    return safe_int(candidate) if candidate is not None else None
+
+
+def _generate_graphs() -> None:
+    python_exec = sys.executable or "python"
+    script = SCRIPT_DIR / "analyze_graphs.py"
+    if not script.exists():
+        log("[GRAPH] analyze_graphs.py not found; skipping generation.", Fore.YELLOW)
+        return
+    try:
+        subprocess.run(
+            [
+                python_exec,
+                str(script),
+                "--state-dir",
+                str(SCRIPT_DIR / "assets"),
+                "--output",
+                str(GRAPH_OUTPUT_DIR),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log("[GRAPH] Diagnostic plots regenerated.", Fore.LIGHTBLACK_EX)
+    except Exception as exc:
+        log(f"[GRAPH] Failed to regenerate plots: {exc}", Fore.YELLOW)
+
+
+def _send_graph_photos() -> None:
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    thread_id = _graph_thread_id()
+    now_txt = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    captions = {
+        "equity.png": f"Equity / Available margin ({now_txt})",
+        "pnl.png": f"Closed / Unrealized PnL ({now_txt})",
+        "signals.png": f"Signal distribution ({now_txt})",
+    }
+    for filename, caption in captions.items():
+        path = GRAPH_OUTPUT_DIR / filename
+        if not path.exists():
+            continue
+        send_tg_photo(path, caption=caption, thread_id=thread_id)
+
+
+def maybe_send_graphs() -> None:
+    interval = _graph_interval_minutes()
+    if interval <= 0:
+        return
+    status = _read_runtime_status()
+    last_sent = status.get("last_graph_sent")
+    last_dt = None
+    if last_sent:
+        try:
+            last_dt = datetime.datetime.fromisoformat(last_sent)
+        except Exception:
+            last_dt = None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if last_dt and (now - last_dt).total_seconds() < interval * 60:
+        return
+    _generate_graphs()
+    _send_graph_photos()
+    _update_runtime_status_field("last_graph_sent", now.isoformat())
 
 
 def _build_help_message() -> str:
@@ -6066,8 +6187,10 @@ def save_json_line(path, data):
         }
         if p.name in ai_names:
             _maybe_rotate_file(p, AI_LOG_MAX_BYTES, AI_LOG_BACKUPS)
+        entry = dict(data)
+        entry.setdefault("timestamp", datetime.datetime.now(datetime.timezone.utc).isoformat())
         with p.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
         log(f"⚠️ Ошибка записи в {path}: {e}", Fore.YELLOW)
 
@@ -10759,8 +10882,9 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
     auto_low_confidence_needs_triggered = False
     needs = []
     if decision is None:
-        messages_init, tokens_init, _ = prepare_messages(stage="initial")
-        log(f"ℹ️ Токены запроса (initial) для {symbol}: {tokens_init}", Fore.LIGHTBLACK_EX)
+        messages_init, tokens_init, initial_payload = prepare_messages(stage="initial")
+        initial_summary = (initial_payload or "").replace("\n", " ")[:200]
+        log(f"[AI REQUEST] initial {symbol}: tokens={tokens_init}, prompt={initial_summary}", Fore.LIGHTBLACK_EX)
         per_cap_init = _current_request_token_cap()
         if per_cap_init and tokens_init > per_cap_init:
             log(f"⛔ {symbol}: запрос initial превышает кап {per_cap_init} токенов", Fore.YELLOW)
@@ -10829,6 +10953,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 log(msg_low, Fore.LIGHTBLACK_EX)
                 send_tg(msg_low)
 
+        response_action = (decision.get("action") or "").lower() or "skip"
+        response_reason = (decision.get("reason") or "").replace("\n", " ")[:200]
+        log(f"[AI RESPONSE] initial {symbol}: action={response_action} reason={response_reason}", Fore.LIGHTBLACK_EX)
+
         save_json_line(
             AI_REQUESTS_LOG,
             {
@@ -10843,7 +10971,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "needs": needs,
                 "auto_needs": auto_needs_triggered,
                 "low_confidence": low_confidence,
-                "auto_low_confidence": auto_low_confidence_needs_triggered
+                "auto_low_confidence": auto_low_confidence_needs_triggered,
+                "prompt_summary": initial_summary,
+                "response_action": response_action,
+                "response_reason": response_reason,
             }
         )
     else:
@@ -11114,8 +11245,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             decision.pop("needs", None)
             return ensure_skip_reason(decision)
         bias_flag = bool(AI_AFTER_NEEDS_BIAS)
-        messages_extra, tokens_extra, _ = prepare_messages(stage="extra", extra=extra, bias=bias_flag)
+        messages_extra, tokens_extra, extra_payload = prepare_messages(stage="extra", extra=extra, bias=bias_flag)
         log(f"ℹ️ Токены запроса (extra) для {symbol}: {tokens_extra}", Fore.LIGHTBLACK_EX)
+        extra_summary = (extra_payload or "").replace("\n", " ")[:200]
+        log(f"[AI REQUEST] extra {symbol}: tokens={tokens_extra}, prompt={extra_summary}", Fore.LIGHTBLACK_EX)
         per_cap_extra = _current_request_token_cap()
         if per_cap_extra and tokens_extra > per_cap_extra:
             log(f"⛔ {symbol}: запрос extra превышает кап {per_cap_extra} токенов", Fore.YELLOW)
@@ -11159,6 +11292,9 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             log(f"ℹ️ После допконтекста модель все ещё запрашивает {needs_followup} для {symbol}", Fore.LIGHTBLACK_EX)
             decision["needs_followup"] = needs_followup
             decision.pop("needs", None)
+        response_action_extra = (decision.get("action") or "").lower() or "skip"
+        response_reason_extra = (decision.get("reason") or "").replace("\n", " ")[:200]
+        log(f"[AI RESPONSE] extra {symbol}: action={response_action_extra} reason={response_reason_extra} needs_followup={needs_followup}", Fore.LIGHTBLACK_EX)
         save_json_line(
             AI_REQUESTS_LOG,
             {
@@ -11172,7 +11308,10 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "context": current_context,
                 "extra": extra,
                 "bias": bias_flag,
-                "needs_followup": needs_followup
+                "needs_followup": needs_followup,
+                "prompt_summary": extra_summary,
+                "response_action": response_action_extra,
+                "response_reason": response_reason_extra
             }
         )
         log(f"🔷 Второй проход завершён для {symbol}", Fore.CYAN)
@@ -14140,6 +14279,10 @@ def main():
         except Exception:
             _write_runtime_status(None, None, "error")
             raise
+        try:
+            maybe_send_graphs()
+        except Exception as exc:
+            log(f"[GRAPH] {exc}", Fore.YELLOW)
         base_delay = delay_minutes if delay_minutes and delay_minutes > 0 else DEFAULT_NEXT_RUN_MINUTES
         while True:
             delay_minutes, target_dt, override_applied = _consume_schedule_override(base_delay)
