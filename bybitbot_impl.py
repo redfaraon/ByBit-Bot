@@ -9887,6 +9887,7 @@ def execute_extra_orders(
     except Exception:
         _market_info = None
     category = _infer_market_category(exchange_symbol, _market_info) or "linear"
+    set_trading_stop_callable = getattr(exchange, "set_trading_stop", None)
     reduce_only_map: dict[str, list[dict]] = {}
     existing_non_reduce_limits: dict[tuple[str, float], int] = {}
     for existing in open_orders:
@@ -10083,9 +10084,79 @@ def execute_extra_orders(
                 reduce_only_map[side] = []
         position_idx = order.get("positionIdx")
         if position_idx is None:
-            params.setdefault("positionIdx", get_position_idx(side))
-        else:
+            position_idx = get_position_idx(side)
+        if position_idx is not None:
             params["positionIdx"] = position_idx
+        else:
+            params.pop("positionIdx", None)
+        if order_type_key == "trailing_stop":
+            if abs(position_amount) == 0:
+                log(f"[INFO] Skipping trailing-stop request for {symbol}: no active position", Fore.LIGHTBLACK_EX)
+                continue
+            if category == "spot":
+                log(f"[INFO] Skipping trailing-stop request for {symbol}: spot markets do not support exchange trailing.", Fore.LIGHTBLACK_EX)
+                continue
+            if not callable(set_trading_stop_callable):
+                log(f"[WARN] Trailing stop requested for {symbol}, but exchange adapter lacks set_trading_stop.", Fore.YELLOW)
+                continue
+            trailing_amount = safe_float(
+                order.get("trailingStop")
+                or order.get("trailingAmount")
+                or order.get("trailing_stop")
+                or params.get("trailingStop")
+                or params.get("trailingAmount")
+            )
+            trailing_percent = safe_float(order.get("trailingPercent") or order.get("trailing_percent"))
+            trailing_callback = safe_float(order.get("trailingCallback") or order.get("trailing_callback"))
+            reference_price = resolve_reference_price(order, price)
+            trigger_ref = trigger_price if trigger_price is not None else reference_price
+            if trailing_amount is None and trailing_percent is not None and math.isfinite(trailing_percent):
+                ref_for_percent = reference_price if reference_price and math.isfinite(reference_price) else trigger_price
+                if ref_for_percent and math.isfinite(ref_for_percent):
+                    trailing_amount = abs(ref_for_percent) * (trailing_percent / 100.0)
+            if trailing_amount is None and trailing_callback is not None and math.isfinite(trailing_callback):
+                trailing_amount = abs(trailing_callback)
+            take_profit_value = safe_float(
+                order.get("takeProfit")
+                or order.get("tp")
+                or order.get("take_profit")
+                or params.get("takeProfit")
+                or params.get("tp")
+            )
+            if trailing_amount is None and take_profit_value is None:
+                log(f"[WARN] Trailing-stop request for {symbol} missing trailing offset/take-profit; skipping.", Fore.YELLOW)
+                continue
+            trading_stop_params = {
+                "category": category,
+                "side": "Sell" if side == "sell" else "Buy",
+                "symbol": exchange_symbol,
+            }
+            if position_idx is not None:
+                trading_stop_params["positionIdx"] = position_idx
+            if trigger_ref is not None and math.isfinite(trigger_ref):
+                trading_stop_params["triggerPrice"] = trigger_ref
+            if trailing_amount is not None and math.isfinite(trailing_amount) and trailing_amount > 0:
+                trailing_str = f"{abs(trailing_amount):.8f}"
+                trading_stop_params["trailingStop"] = trailing_str
+                trading_stop_params["trailingAmount"] = trailing_str
+            elif trailing_amount is not None:
+                log(f"[WARN] Trailing-stop request for {symbol} has invalid trailing amount ({trailing_amount}); skipping.", Fore.YELLOW)
+                continue
+            if take_profit_value is not None and math.isfinite(take_profit_value) and take_profit_value > 0:
+                trading_stop_params["takeProfit"] = take_profit_value
+            try:
+                set_trading_stop_callable(exchange_symbol, trading_stop_params)
+            except Exception as exc:
+                log(f"[WARN] Failed to set trailing stop for {symbol}: {exc}", Fore.YELLOW)
+                continue
+            desc_parts = ["TRADING-STOP", side.upper()]
+            if "trailingStop" in trading_stop_params:
+                desc_parts.append(f"trail={trading_stop_params['trailingStop']}")
+            if "takeProfit" in trading_stop_params:
+                desc_parts.append(f"tp={trading_stop_params['takeProfit']}")
+            executed.append(" ".join(desc_parts))
+            log(f"[INFO] Applied trailing stop for {symbol}: {' '.join(desc_parts[1:])}", Fore.LIGHTBLUE_EX)
+            continue
         if order_type_key == "partial_close":
             base_order_type_raw = (
                 order.get("orderType")
