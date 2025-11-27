@@ -46,6 +46,13 @@ try:
 except ImportError:
     feedparser = None
 
+# Ensure UTF-8 console on Windows/streams that support reconfigure
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
 BOT_VERSION = "2025.11.27.1"
 BOT_CHANGELOG = (
@@ -5802,6 +5809,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
             return
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
+        _tmp = _handle_version_command(args, user_id=user_id, chat_id=chat_id, thread_id=response_thread)
+        if _tmp is None:
+            return
+        reply = _tmp
     elif command == "ai":
         reply = _handle_ai_command(args)
     else:
@@ -5939,9 +5950,86 @@ def _ensure_commands_help_messages() -> None:
             "thread_id": thread_id,
             "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
-        _save_commands_help_state(payload)
+    _save_commands_help_state(payload)
 
 
+def _find_release_scripts(limit: int = 10) -> list[tuple[str, Path]]:
+    """Scan repo root for release scripts like 2025.11.06*.py and return sorted list.
+    Returns list of tuples (version_name, path), newest first by filename.
+    """
+    items: list[tuple[str, Path]] = []
+    try:
+        candidates = list(REPO_ROOT.glob("20*.py"))
+    except Exception:
+        candidates = []
+    pattern = re.compile(r"^20\d{2}\.\d{2}\.\d{2}(\..+)?\.py$")
+    for p in candidates:
+        name = p.name
+        if pattern.match(name):
+            version_name = name[:-3]
+            items.append((version_name, p))
+    items.sort(key=lambda x: x[0], reverse=True)
+    if limit > 0:
+        items = items[:limit]
+    return items
+
+
+def _handle_version_command(args: list[str], *, user_id: Optional[int], chat_id: int, thread_id: Optional[int]) -> Optional[str]:
+    """Implements /version list|set|latest with inline buttons and auto-restart."""
+    sub = (args[0].lower() if args else "list")
+    header = f"Версия {BOT_VERSION}"
+    if BOT_CHANGELOG:
+        header += f"\n{BOT_CHANGELOG}"
+
+    def _send_with_keyboard(versions: list[tuple[str, Path]]) -> None:
+        lines = [header, "", "Доступные релизы:"]
+        for ver, _ in versions:
+            lines.append(f"- {ver}")
+        text = "\n".join(lines)
+        buttons: list[list[dict[str, str]]] = []
+        buttons.append([{"text": "Latest HEAD", "callback_data": "/version latest"}])
+        row: list[dict[str, str]] = []
+        for ver, _ in versions:
+            row.append({"text": ver, "callback_data": f"/version set {ver}"})
+            if len(row) >= 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        reply_markup = {"inline_keyboard": buttons}
+        send_tg(text, chat_id_override=chat_id, thread_id=thread_id, no_log_forward=True, reply_markup=reply_markup)
+
+    if sub in {"list", "ls"}:
+        versions = _find_release_scripts(limit=10)
+        _send_with_keyboard(versions)
+        return None
+
+    if sub == "latest":
+        if not is_bot_owner(user_id, USER_ID):
+            return "Только владелец бота может переключать версию."
+        target_path = _get_bot_config_path(USER_ID, REPO_ROOT)
+        updated = _persist_env_file(target_path, {"TARGET_VERSION": None})
+        if not updated:
+            return "Не удалось обновить TARGET_VERSION."
+        reason = "[RESTART] /version latest -> switching to HEAD"
+        _restart_with_latest_code(reason)
+        return "Переключаюсь на HEAD и перезапускаюсь…"
+
+    if sub == "set":
+        if len(args) < 2:
+            return "Использование: /version set <YYYY.MM.DD[.N]>"
+        if not is_bot_owner(user_id, USER_ID):
+            return "Только владелец бота может переключать версию."
+        ver = args[1].strip()
+        target_path = _get_bot_config_path(USER_ID, REPO_ROOT)
+        updated = _persist_env_file(target_path, {"TARGET_VERSION": ver})
+        if not updated:
+            return "Не удалось обновить TARGET_VERSION."
+        reason = f"[RESTART] /version set {ver}"
+        _restart_with_latest_code(reason)
+        return f"Переключаюсь на {ver} и перезапускаюсь…"
+
+    return "Использование: /version list | /version latest | /version set <YYYY.MM.DD[.N]>"
 def _restart_with_latest_code(reason: str) -> None:
     log(reason, Fore.LIGHTBLUE_EX)
     send_tg(reason)
@@ -6123,7 +6211,7 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
                     f"[WARN] Failed to fetch positions for settle {settle}: {exc_extra}",
                     Fore.YELLOW,
                 )
-    if extra_settle_summary:
+    if extra_settle_summary and LOG_EXTRA_SETTLE_POSITIONS:
         log(
             "[DEBUG] extra-settle positions: " + " | ".join(extra_settle_summary),
             Fore.LIGHTBLACK_EX,
@@ -11953,7 +12041,22 @@ def run_cycle():
             f"[INFO] Position cap reached ({open_positions}/{max_positions_limit}); restricting analysis to existing exposure.",
             Fore.LIGHTBLACK_EX,
         )
-    log("[INFO] Candidates for analysis: " + ', '.join(available_pairs), Fore.LIGHTBLACK_EX)
+    annotated = []
+    for _sym in available_pairs:
+        exch_sym = _resolve_symbol_alias(_sym) or _sym
+        try:
+            mi = ex.market(exch_sym)
+        except Exception:
+            mi = None
+        try:
+            cat = _infer_market_category(exch_sym, mi)
+        except Exception:
+            cat = None
+        if cat in ("spot", "linear", "inverse"):
+            annotated.append(f"{_sym} [{cat}]")
+        else:
+            annotated.append(_sym)
+    log("[INFO] Candidates for analysis: " + ', '.join(annotated), Fore.LIGHTBLACK_EX)
 
     start_pnl_symbols: set[str] = set(available_pairs)
     start_pnl_symbols.update(position_symbols)
