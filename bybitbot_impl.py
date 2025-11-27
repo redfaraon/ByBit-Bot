@@ -298,7 +298,7 @@ def _pending_entry_key(symbol: str, user_id: str | None = None) -> tuple[str, st
     user_key = user_id or os.getenv("BYBITBOT_USER_ID") or "default"
     return (user_key, symbol)
 CYCLE_FALLBACK_INTERVAL = 5
-PNL_LOOKBACK_HOURS = 6
+PNL_LOOKBACK_HOURS = 168
 SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
 RESULTS_CLOSED_ORDER_DISPLAY_LIMIT = 10
 REQUIRE_TAKE_PROFIT = True
@@ -988,6 +988,53 @@ def _apply_qty_rules(qty: float, *, min_qty: float = 0.0, qty_step: float = 0.0)
     return result
 
 
+def _compute_vwma(df: pd.DataFrame, length: int) -> pd.Series:
+    if df.empty or length <= 0:
+        return pd.Series(dtype=float, index=df.index)
+    weighted = df["close"] * df["volume"]
+    numerator = weighted.rolling(length).sum()
+    denominator = df["volume"].rolling(length).sum()
+    vwma_series = numerator / denominator
+    return vwma_series
+
+
+def _compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.Series:
+    if df.empty or period <= 0 or len(df) < period:
+        return pd.Series(dtype=float, index=df.index)
+    atr_series = atr(df, period)
+    if atr_series is None:
+        return pd.Series(dtype=float, index=df.index)
+    hl2 = (df["high"] + df["low"]) / 2.0
+    upper_band = hl2 + multiplier * atr_series
+    lower_band = hl2 - multiplier * atr_series
+    values: list[float] = []
+    prev_value: float | None = None
+    trend_up = True
+    closes = df["close"].tolist()
+    for idx, close_price in enumerate(closes):
+        ub = upper_band.iloc[idx] if idx < len(upper_band) else math.nan
+        lb = lower_band.iloc[idx] if idx < len(lower_band) else math.nan
+        if math.isnan(ub) or math.isnan(lb):
+            values.append(prev_value if prev_value is not None else math.nan)
+            continue
+        if prev_value is None:
+            prev_value = ub
+            trend_up = close_price >= lb
+            values.append(prev_value)
+            continue
+        if close_price > prev_value:
+            trend_up = True
+        elif close_price < prev_value:
+            trend_up = False
+        if trend_up:
+            candidate = lb if prev_value is None else max(lb, prev_value)
+        else:
+            candidate = ub if prev_value is None else min(ub, prev_value)
+        prev_value = candidate
+        values.append(candidate)
+    return pd.Series(values, index=df.index)
+
+
 def _clamp_qty_to_max_notional(
     qty: float,
     price: float,
@@ -1159,6 +1206,16 @@ def _record_cycle_completion(
     return state
 
 
+def _pnl_window_label() -> str:
+    hours = float(PNL_LOOKBACK_HOURS)
+    if hours % 24 == 0 and hours >= 24:
+        days = int(hours // 24)
+        return f"{days}d"
+    if hours.is_integer():
+        return f"{int(hours)}h"
+    return f"{hours:.1f}h"
+
+
 def _emit_realized_pnl_message(stage_label: str, value: float | None, fill_count: int | None) -> None:
     if value is None or not math.isfinite(value):
         return
@@ -1166,10 +1223,11 @@ def _emit_realized_pnl_message(stage_label: str, value: float | None, fill_count
     if fill_count:
         fills_suffix = f" ({fill_count} fills)"
     stage_clean = (stage_label or "").strip()
+    window_label = _pnl_window_label()
     if stage_clean:
-        label_text = f"6h closed, {stage_clean}"
+        label_text = f"{window_label} closed, {stage_clean}"
     else:
-        label_text = "6h closed"
+        label_text = f"{window_label} closed"
     message = f"PnL ({label_text}): {value:+.2f} USDT{fills_suffix}"
     colour = Fore.CYAN if value >= 0 else Fore.YELLOW
     log(message, colour)
@@ -1260,6 +1318,11 @@ def _get_symbol_trade_rules(exchange, symbol: str) -> dict[str, float | None]:
             lot_filter.get("minTradingQty"),
             info.get("minOrderQty"),
             info.get("minTradingQty"),
+            info.get("minQty"),
+            info.get("min_qty"),
+            info.get("minLimitOrderQty"),
+            info.get("min_limit_order_qty"),
+            info.get("minTradeQty"),
         )
         qty_step = _pick_positive_float(
             amount_limits.get("step"),
@@ -1267,6 +1330,9 @@ def _get_symbol_trade_rules(exchange, symbol: str) -> dict[str, float | None]:
             lot_filter.get("qtyStep"),
             lot_filter.get("stepSize"),
             info.get("qtyStep"),
+            info.get("stepSize"),
+            info.get("step_size"),
+            info.get("qty_step"),
         )
         min_notional = _pick_positive_float(
             cost_limits.get("min"),
@@ -1817,6 +1883,19 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
             col = f"sma{length}"
             df[col] = df["close"].rolling(length).mean()
             return col
+        if base == "macd":
+            fast = 12
+            slow = 26
+            signal = 9
+            fast_ema = df["close"].ewm(span=fast, adjust=False).mean()
+            slow_ema = df["close"].ewm(span=slow, adjust=False).mean()
+            macd_line = fast_ema - slow_ema
+            signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+            hist_col = "macd"
+            df["macd_line"] = macd_line
+            df["macd_signal"] = signal_line
+            df[hist_col] = macd_line - signal_line
+            return hist_col
         if base == "rsi":
             period = length or 14
             col = f"rsi{period}"
@@ -1826,6 +1905,20 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
             period = length or 14
             col = f"atr{period}"
             df[col] = atr(df, period)
+            return col
+        if base == "vwma":
+            period = length or 20
+            col = f"vwma{period}"
+            df[col] = _compute_vwma(df, period)
+            return col
+        if base == "vol":
+            col = "vol"
+            df[col] = df["volume"]
+            return col
+        if base == "supertrend":
+            period = length or 10
+            col = f"supertrend{period}"
+            df[col] = _compute_supertrend(df, period=period, multiplier=3.0)
             return col
         if base in ("stochrsi", "stochrs", "stochr"):
             period = length or 14
@@ -2528,12 +2621,53 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         log(f"{sym}: normalized action {action_raw!r} > {action!r}", Fore.LIGHTBLACK_EX)
     counts[action] = counts.get(action, 0) + 1
     side = decision.get("side") or ""
+    side_lower = side.lower()
     reason = decision.get("reason") or ""
     notional_pct = decision.get("notional_pct")
+    current_position = positions_map.get(sym)
+    position_category = str((current_position or {}).get("category") or "").lower()
+    is_spot_position = position_category == "spot"
+    if not is_spot_position and sym.upper().endswith(":SPOT"):
+        is_spot_position = True
+    spot_reduce_order: dict[str, Any] | None = None
+    if (
+        is_spot_position
+        and side_lower == "sell"
+        and action not in {"reduce", "skip", "hold", "none"}
+    ):
+        counts[action] = max(0, counts.get(action, 0) - 1)
+        action = "reduce"
+        counts[action] = counts.get(action, 0) + 1
+        position_amount = safe_float(
+            (current_position or {}).get("amount")
+            or (current_position or {}).get("contracts")
+            or (current_position or {}).get("size")
+        )
+        position_amount = abs(position_amount) if position_amount is not None else 0.0
+        requested_qty = safe_float(
+            decision.get("qty")
+            or decision.get("amount")
+            or decision.get("volume")
+            or decision.get("size")
+        )
+        reduce_qty = (
+            min(position_amount, abs(requested_qty))
+            if requested_qty is not None and position_amount
+            else position_amount
+        )
+        if reduce_qty and reduce_qty > 0:
+            spot_reduce_order = {
+                "type": "market",
+                "side": "sell",
+                "amount": reduce_qty,
+                "note": "spot reduce",
+                "reduceOnly": True,
+                "spotReduce": True,
+            }
+            log(f"{sym}: spot SELL converted to reduce amount={reduce_qty:.6f}", Fore.LIGHTBLUE_EX)
     log(f"{sym}: action={action} side={side} reason={reason}", Fore.LIGHTBLUE_EX)
     if notional_pct is not None:
         log(f"{sym}: notional_pct={_format_notional_pct(notional_pct)}", Fore.LIGHTBLACK_EX)
-    current_position = positions_map.get(sym)
     open_orders_symbol = open_orders_cache.get(sym)
     if open_orders_symbol is None:
         try:
@@ -2555,6 +2689,8 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         extra_orders = list(extra_orders_raw)
     else:
         extra_orders = []
+    if spot_reduce_order:
+        extra_orders.insert(0, spot_reduce_order)
 
     def normalize_order_ids(value):
         if value is None:
@@ -3312,6 +3448,8 @@ RSS_FEEDS = [
     "https://decrypt.co/feed",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://u.today/rss",
+    "https://cryptoslate.com/feed",
+    "https://www.theblock.co/rss",
 ]
 
 NEWS_PROVIDER_ALIAS_CC = {"cryptocompare", "cc", "crypto"}
@@ -3382,7 +3520,7 @@ if "AI_EXTRA_PASSES_MAX" not in globals():
 if "SUMMARY_TIMEFRAME_SHORTLIST" not in globals():
     SUMMARY_TIMEFRAME_SHORTLIST = ["30m", "4h"]
 if "SUMMARY_INDICATOR_SHORTLIST" not in globals():
-    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "vol", "rsi14", "stochrsi14", "atr14"]
+    SUMMARY_INDICATOR_SHORTLIST = ["ema20", "ema50", "ema200", "rsi14", "atr14", "macd", "vwma20", "supertrend", "vol"]
 if "NEEDS_LONG_BARS_LIMIT" not in globals():
     NEEDS_LONG_BARS_LIMIT = 10
 if "TG_MIN_INTERVAL" not in globals():
@@ -5159,7 +5297,7 @@ def _format_status_message(live: bool = False) -> str:
             f"Баланс: {LATEST_STATUS.get('equity_start', 0.0):.2f} {stable_label}, доступно {LATEST_STATUS.get('available_start', 0.0):.2f} {stable_label}"
         )
     if LATEST_STATUS.get("closed_pnl") is not None:
-        lines.append(f"PnL (6h closed): {LATEST_STATUS['closed_pnl']:+.2f} USDT")
+        lines.append(f"PnL ({_pnl_window_label()} closed): {LATEST_STATUS['closed_pnl']:+.2f} USDT")
     if LATEST_STATUS.get("unrealized") is not None:
         lines.append(f"PnL (open unrealized): {LATEST_STATUS['unrealized']:+.2f} USDT")
     lines.append(f"Открытых позиций: {len(LATEST_STATUS.get('positions') or [])}")
@@ -5882,11 +6020,6 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
                 if symbol_raw:
                     if len(entries) < 20:
                         entries.append(f"{symbol_raw}:{display_amount}")
-                    if "PEPE" in symbol_raw.upper():
-                        log(
-                            f"[DEBUG] PEPE raw position ({'settle='+settle_hint if settle_hint else 'default'}) {symbol_raw}: amount={display_amount}, entry={pos.get('entryPrice')}",
-                            Fore.LIGHTCYAN_EX,
-                        )
             label = f" ({settle_hint})" if settle_hint else ""
             if entries:
                 log(
@@ -5905,6 +6038,7 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
         log(f"⚠️ Не удалось получить список позиций: {e}", Fore.YELLOW)
         return {}, None
     extra_settles = [settle for settle in EXTRA_POSITION_SETTLES if settle and settle.upper() != "USDT"]
+    extra_settle_summary: list[str] = []
     if extra_settles:
         def _fetch_extra_positions(settle_hint: str) -> list[dict[str, Any]] | None:
             candidates = [
@@ -5935,11 +6069,31 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
                 if extra_positions:
                     snapshots.extend(extra_positions)
                 _log_raw_positions(extra_positions, settle)
+                summary_items: list[str] = []
+                for pos in extra_positions or []:
+                    symbol_raw = pos.get("symbol") or settle
+                    amt_val = safe_float(
+                        pos.get("contracts")
+                        or pos.get("positionAmt")
+                        or pos.get("size")
+                        or pos.get("amount")
+                    )
+                    if amt_val is not None and math.isfinite(amt_val):
+                        summary_items.append(f"{symbol_raw}:{amt_val:.4f}")
+                    if len(summary_items) >= 5:
+                        break
+                if summary_items:
+                    extra_settle_summary.append(f"{settle}: " + ", ".join(summary_items))
             except Exception as exc_extra:
                 log(
                     f"[WARN] Failed to fetch positions for settle {settle}: {exc_extra}",
                     Fore.YELLOW,
                 )
+    if extra_settle_summary:
+        log(
+            "[DEBUG] extra-settle positions: " + " | ".join(extra_settle_summary),
+            Fore.LIGHTBLACK_EX,
+        )
     count = 0
     simplified = {}
     symbols_filter = set(symbols_filter) if symbols_filter else None
@@ -6694,9 +6848,11 @@ def _merge_news_payloads(base_symbol: str, payloads: Sequence[dict[str, Any]], l
     base_upper = (base_symbol or "").upper()
     combined: list[dict[str, Any]] = []
     seen: set[str] = set()
+    source_counts: dict[str, int] = {}
     for payload in payloads:
         items = payload.get("items") or []
         source_name = (payload.get("source") or "news").lower()
+        source_counts[source_name] = source_counts.get(source_name, 0) + len(items)
         for item in items:
             title = (item.get("title") or "").strip()
             url = item.get("url") or item.get("link")
@@ -6714,17 +6870,17 @@ def _merge_news_payloads(base_symbol: str, payloads: Sequence[dict[str, Any]], l
                 }
             )
     combined.sort(key=lambda entry: entry.get("published_at") or "", reverse=True)
-    summary_parts = [
-        f"{(payload.get('source') or 'news')}:{len(payload.get('items') or [])}"
-        for payload in payloads
-    ]
-    summary_suffix = f" ({', '.join(summary_parts)})" if summary_parts else ""
-    summary = f"Mixed news{summary_suffix}".strip()
+    if source_counts:
+        counts_text = ", ".join(f"{src}={cnt}" for src, cnt in source_counts.items())
+        summary = f"news counts: {counts_text}"
+    else:
+        summary = "news unavailable"
     return {
         "summary": summary or "Mixed news",
         "items": combined[:limit],
         "asset": base_upper,
         "source": "hybrid",
+        "counts": source_counts,
     }
 
 def get_news(symbol):
@@ -9451,6 +9607,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 fallback_limit_success = True
 
     trailing_amount = abs(trailing_offset) if trailing_offset is not None else None
+    if position_category == "spot":
+        trailing_amount = None
     trailing_set = False
     take_set_via_trading_stop = False
     trailing_errors: list[str] = []
@@ -9462,15 +9620,16 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             trading_stop_params = {
                 "category": position_category,
                 "side": "Sell" if is_long else "Buy",
+                "symbol": exchange_symbol,
             }
-            trading_stop_params["symbol"] = exchange_symbol
             if position_idx is not None:
                 trading_stop_params["positionIdx"] = position_idx
             if reference_price and math.isfinite(reference_price):
                 trading_stop_params["triggerPrice"] = reference_price
             if trailing_amount:
-                trading_stop_params["trailingStop"] = trailing_amount
-                trading_stop_params["trailingAmount"] = trailing_amount
+                trailing_text = f"{trailing_amount:.8f}"
+                trading_stop_params["trailingStop"] = trailing_text
+                trading_stop_params["trailingAmount"] = trailing_text
             if fallback_take_price:
                 trading_stop_params["takeProfit"] = fallback_take_price
             try:
@@ -9499,36 +9658,15 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             take_trading_stop_errors.append("set_trading_stop not supported by exchange")
 
     if trailing_amount and not trailing_set:
-        if trailing_offset is not None:
-            try:
-                fallback_trailing_params = dict(base_params)
-                fallback_trailing_params.pop("reduceOnly", None)
-                fallback_trailing_params["category"] = position_category or "linear"
-                fallback_trailing_params["closeOnTrigger"] = True
-                fallback_trailing_params["trailingAmount"] = trailing_amount
-                fallback_trailing_params["trailingStop"] = trailing_amount
-                fallback_trailing_params["side"] = protection_side.upper()
-                if reference_price and math.isfinite(reference_price):
-                    fallback_trailing_params.setdefault("triggerPrice", reference_price)
-                exchange.create_order(
-                    exchange_symbol,
-                    "trailingStop",
-                    protection_side,
-                    qty,
-                    None,
-                    fallback_trailing_params,
-                )
-                created_log_parts.append(f"trailingStop {trailing_amount:.4f}")
-                trailing_set = True
-            except Exception as exc:
-                trailing_errors.append(str(exc))
-    if trailing_amount and not trailing_set and trailing_errors:
+        if not trailing_errors:
+            trailing_errors.append("trailing stop unsupported on this market")
         combined = "; ".join(trailing_errors)
         if "set_trading_stop not supported" in combined.lower():
-            log(f"ℹ️ {symbol}: биржа не поддерживает трейлинг-стоп (оставляем SL/TP).", Fore.LIGHTBLACK_EX)
+            log(f"ℹ️ {symbol}: trailing stop unavailable on this market (likely spot).", Fore.LIGHTBLACK_EX)
         else:
-            log(f"⚠️ {symbol}: не удалось выставить трейлинг-стоп ({combined})", Fore.YELLOW)
+            log(f"[WARN] {symbol}: trailing stop setup failed ({combined})", Fore.YELLOW)
 
+    forced_actions: list[str] = []
     forced_actions: list[str] = []
     forced_errors: list[str] = []
     if not take_orders_success:
@@ -10922,6 +11060,7 @@ def apply_trade_plan_snapshot(
     equity, available_margin, _ = fetch_usdt_equity(exchange)
     user_key = user_id or "default"
     user_tag = f"[user={user_key}]"
+    open_skip_notes: defaultdict[str, list[str]] = defaultdict(list)
 
     def log_user(msg: str) -> None:
         tagged = f"{user_tag} {msg}"
@@ -10931,9 +11070,10 @@ def apply_trade_plan_snapshot(
 
     def log_open_skip(symbol: str, reason: str) -> None:
         log_user(f"OPEN SKIP {symbol}: {reason}")
-
-    def log_open_skip(symbol: str, reason: str) -> None:
-        log_user(f"OPEN SKIP {symbol}: {reason}")
+        try:
+            open_skip_notes[symbol].append(reason)
+        except Exception:
+            pass
 
     def _record_pending_entry(symbol: str, qty_value: float, side_value: str) -> None:
         record_pending_entry(symbol, qty_value, side_value, user_key)
@@ -11718,7 +11858,7 @@ def run_cycle():
     if start_closed_pnl_value is not None:
         _emit_realized_pnl_message("start", start_closed_pnl_value, start_closed_pnl_count)
     else:
-        message_na = "PnL (6h closed, start): n/a"
+        message_na = f"PnL ({_pnl_window_label()} closed, start): n/a"
         log(message_na, Fore.LIGHTBLACK_EX)
         try:
             send_tg(message_na)
@@ -13069,7 +13209,11 @@ def run_cycle():
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                         detail_entry = f"[{sym}] - entry orders placed (waiting fill) {direction or ''} (lev x{symbol_leverage})"
                     else:
-                        detail_entry = f"[{sym}] - open request skipped"
+                        reasons = open_skip_notes.get(sym) or []
+                        if reasons:
+                            detail_entry = f"[{sym}] - open request skipped ({'; '.join(reasons[-3:])})"
+                        else:
+                            detail_entry = f"[{sym}] - open request skipped"
                 elif action == "close":
                     direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                     detail_entry = f"[{sym}] - closed {direction or 'position'} (lev x{symbol_leverage})"
@@ -13615,7 +13759,7 @@ def run_cycle():
                         except Exception:
                             pass
                     basis_label = "realized" if pnl_basis == "realized" else "equity"
-                    pnl_message = f"PnL (6h {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
+                    pnl_message = f"PnL ({_pnl_window_label()} {basis_label}): {pnl_value:+.2f} USDT (ref {reference_value:.2f})"
                     log(pnl_message, Fore.CYAN if pnl_value >= 0 else Fore.YELLOW)
                     send_tg(pnl_message)
                     _emit_unrealized_pnl_message("end", unreal_total, unreal_count)
