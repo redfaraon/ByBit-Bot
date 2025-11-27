@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Version: 12.2
+# Version: 12.3
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -54,9 +54,10 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.27.1"
+BOT_VERSION = "2025.11.27.2"
 BOT_CHANGELOG = (
-    "Spot balances >= $0.05 now count as active exposure, open positions bypass AI token caps, and launcher TARGET_VERSION overrides load the requested release."
+    "Candidates list now labels spot/deriv, trailing protection uses Bybit set_trading_stop, inline "
+    "/version controls restart on demand, and graphs + UTF-8 console output."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
