@@ -9,6 +9,7 @@ import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+import base64
 
 try:
     import matplotlib
@@ -18,9 +19,25 @@ except Exception as exc:  # pragma: no cover - protects from missing dependencie
     plt = None  # type: ignore[assignment]
     print(f"[WARN] matplotlib unavailable: {exc}", file=sys.stderr)
 
+# 1x1 PNG placeholder (white) for environments without matplotlib
+_PNG_1PX_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/gn9zqUAAAAASUVORK5CYII="
+)
+
+def _write_fallback_png(output_dir: Path, filename: str) -> None:
+    try:
+        data = base64.b64decode(_PNG_1PX_B64)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out = output_dir / filename
+        with out.open("wb") as fh:
+            fh.write(data)
+        print(f"[INFO] Saved minimal placeholder to {out}")
+    except Exception as exc:
+        print(f"[WARN] Failed to write fallback PNG {filename}: {exc}", file=sys.stderr)
+
 def _save_placeholder(output_dir: Path, filename: str, title: str, subtitle: str = "No data") -> None:
     if plt is None:
-        print(f"[WARN] Matplotlib not available; cannot create placeholder {filename}.", file=sys.stderr)
+        _write_fallback_png(output_dir, filename)
         return
     try:
         plt.figure(figsize=(8, 3))
