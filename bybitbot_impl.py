@@ -6284,6 +6284,20 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
     except Exception as e:
         log(f"⚠️ Не удалось получить список позиций: {e}", Fore.YELLOW)
         return {}, None
+    def _extract_settle_coin(position: dict[str, Any]) -> str | None:
+        settle_coin = position.get("settle")
+        if not settle_coin:
+            info_payload = position.get("info")
+            if isinstance(info_payload, dict):
+                settle_coin = info_payload.get("settleCoin") or info_payload.get("settle")
+        if not settle_coin:
+            symbol_text = str(position.get("symbol") or "")
+            if ":" in symbol_text:
+                settle_coin = symbol_text.split(":", 1)[1]
+        if settle_coin:
+            settle_coin = str(settle_coin).strip().upper()
+        return settle_coin or None
+
     extra_settles = [settle for settle in EXTRA_POSITION_SETTLES if settle and settle.upper() != "USDT"]
     extra_settle_summary: list[str] = []
     if extra_settles:
@@ -6313,11 +6327,17 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
             extra_positions = None
             try:
                 extra_positions = _fetch_extra_positions(settle)
-                if extra_positions:
-                    snapshots.extend(extra_positions)
-                _log_raw_positions(extra_positions, settle)
-                summary_items: list[str] = []
+                filtered_positions: list[dict[str, Any]] = []
                 for pos in extra_positions or []:
+                    settle_coin = _extract_settle_coin(pos)
+                    if settle_coin is not None and settle_coin != settle.upper():
+                        continue
+                    filtered_positions.append(pos)
+                if filtered_positions:
+                    snapshots.extend(filtered_positions)
+                _log_raw_positions(filtered_positions, settle)
+                summary_items: list[str] = []
+                for pos in filtered_positions:
                     symbol_raw = pos.get("symbol") or settle
                     amt_val = safe_float(
                         pos.get("contracts")
