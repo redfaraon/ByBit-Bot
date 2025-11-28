@@ -46,7 +46,7 @@ def _save_placeholder(output_dir: Path, filename: str, title: str, subtitle: str
         plt.text(0.5, 0.35, subtitle, ha='center', va='center', fontsize=11)
         output_path = output_dir / filename
         plt.tight_layout()
-        plt.savefig(output_path)
+        plt.savefig(output_path);\n        try:\n            plt.savefig(str(output_path).replace('.png','.jpg'), format='jpeg')\n        except Exception:\n            pass
         plt.close()
         print(f"[INFO] Saved placeholder graph to {output_path}")
     except Exception as exc:
@@ -101,7 +101,7 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
         plt.legend()
         output_path = output_dir / "equity.png"
         plt.tight_layout()
-        plt.savefig(output_path)
+        plt.savefig(output_path);\n        try:\n            plt.savefig(str(output_path).replace('.png','.jpg'), format='jpeg')\n        except Exception:\n            pass
         plt.close()
         print(f"[INFO] Saved equity graph to {output_path}")
     except Exception as exc:
@@ -144,7 +144,7 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
         plt.legend()
         output_path = output_dir / "pnl.png"
         plt.tight_layout()
-        plt.savefig(output_path)
+        plt.savefig(output_path);\n        try:\n            plt.savefig(str(output_path).replace('.png','.jpg'), format='jpeg')\n        except Exception:\n            pass
         plt.close()
         print(f"[INFO] Saved PnL graph to {output_path}")
     except Exception as exc:
@@ -179,7 +179,7 @@ def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) ->
         plt.axis("equal")
         output_path = output_dir / "signals.png"
         plt.tight_layout()
-        plt.savefig(output_path)
+        plt.savefig(output_path);\n        try:\n            plt.savefig(str(output_path).replace('.png','.jpg'), format='jpeg')\n        except Exception:\n            pass
         plt.close()
         print(f"[INFO] Saved signal distribution graph to {output_path}")
     except Exception as exc:
@@ -210,10 +210,16 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
-        args.output.mkdir(parents=True, exist_ok=True)
-        state_dir = args.state_dir.expanduser()
-        equity_path = args.equity or (state_dir / "equity_history.json")
-        results_path = args.results or (state_dir / "results_state.json")
+    args.output.mkdir(parents=True, exist_ok=True)
+    script_dir = Path(__file__).resolve().parent
+    # Resolve state dir: prefer provided; otherwise auto-detect nearby files
+    state_dir = args.state_dir.expanduser()
+    candidate_dirs = [state_dir, script_dir, script_dir / "assets"]
+    def _find_state_path(name: str) -> Path:
+        # If explicit path is given via args, honor it
+        return next((d / name for d in candidate_dirs if (d / name).exists()), state_dir / name)
+    equity_path = args.equity or _find_state_path("equity_history.json")
+    results_path = args.results or _find_state_path("results_state.json")
 
         equity_data = read_json(equity_path)
         if isinstance(equity_data, dict):
@@ -241,3 +247,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

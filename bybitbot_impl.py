@@ -10312,10 +10312,18 @@ def execute_extra_orders(
         if side not in {"buy", "sell"}:
             log(f"[WARN] Missing valid side in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
-        price = safe_float(order.get("price"))
-        if price is not None and (not math.isfinite(price) or price <= 0):
-            log(f"[WARN] Invalid price in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
-            continue
+            price = safe_float(order.get("price"))
+            # Allow MARKET orders without a valid price; strip price instead of skipping
+            is_market_order = (order_type_key == "market") or (str(params.get("orderType") or "").lower() == "market")
+            if price is not None and (not math.isfinite(price) or price <= 0):
+                if is_market_order:
+                    # Remove price for MARKET; Bybit/ccxt ignores it for market orders
+                    order.pop("price", None)
+                    params.pop("price", None)
+                    price = None
+                else:
+                    log(f"[WARN] Invalid price in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+                    continue
         price_key = round(price, NON_REDUCE_PRICE_DECIMALS) if price is not None else None
         trigger_price = safe_float(
             order.get("triggerPrice")
@@ -13456,7 +13464,7 @@ def run_cycle():
                             if duplicate_match:
                                 consumed_qty = target_qty if duplicate_qty <= 0 else min(target_qty, max(duplicate_qty, 0.0))
                                 remaining_qty = max(0.0, remaining_qty - consumed_qty)
-                                entry_created += 1
+                                # Do not count duplicates as created entries
                                 entry_summaries.append(f"existing limit @ {layer_price:.2f} (qty~{consumed_qty:.4f})")
                                 log_user(
                                     f"OPEN DUPLICATE {sym}: existing limit @ {layer_price:.2f} (qty~{consumed_qty:.4f})",
