@@ -10,9 +10,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # type: ignore[import]
+except Exception as exc:  # pragma: no cover - protects from missing dependencies
+    plt = None  # type: ignore[assignment]
+    print(f"[WARN] matplotlib unavailable: {exc}", file=sys.stderr)
 
 
 def read_json(path: Path) -> Any:
@@ -29,6 +33,9 @@ def read_json(path: Path) -> Any:
 def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if not history:
         print("[INFO] No equity history available; skipping equity plot.")
+        return
+    if plt is None:
+        print("[WARN] Matplotlib not available; skipping equity plot.")
         return
     equities = []
     availables = []
@@ -48,24 +55,31 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if not equities:
         print("[INFO] Equity history empty after filtering.")
         return
-    plt.figure(figsize=(12, 4))
-    plt.plot(equities, label="Equity")
-    if any(math.isfinite(x) for x in availables):
-        plt.plot(availables, label="Available", linestyle="--")
-    plt.title("Equity / Available Margin")
-    plt.xlabel("Samples")
-    plt.ylabel("USDT")
-    plt.legend()
-    output_path = output_dir / "equity.png"
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-    print(f"[INFO] Saved equity graph to {output_path}")
+    try:
+        plt.figure(figsize=(12, 4))
+        plt.plot(equities, label="Equity")
+        if any(math.isfinite(x) for x in availables):
+            plt.plot(availables, label="Available", linestyle="--")
+        plt.title("Equity / Available Margin")
+        plt.xlabel("Samples")
+        plt.ylabel("USDT")
+        plt.legend()
+        output_path = output_dir / "equity.png"
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close()
+        print(f"[INFO] Saved equity graph to {output_path}")
+    except Exception as exc:
+        print(f"[WARN] Failed to plot equity graph: {exc}", file=sys.stderr)
+        return
 
 
 def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if not history:
         print("[INFO] No results history available; skipping PnL plot.")
+        return
+    if plt is None:
+        print("[WARN] Matplotlib not available; skipping PnL plot.")
         return
     closed_pnls = []
     unrealized = []
@@ -83,24 +97,31 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if not closed_pnls:
         print("[INFO] PnL history empty.")
         return
-    plt.figure(figsize=(12, 4))
-    plt.plot(closed_pnls, label="Closed PnL")
-    if any(math.isfinite(x) for x in unrealized):
-        plt.plot(unrealized, label="Unrealized", linestyle="--")
-    plt.title("PnL over time")
-    plt.xlabel("Samples")
-    plt.ylabel("USDT")
-    plt.legend()
-    output_path = output_dir / "pnl.png"
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-    print(f"[INFO] Saved PnL graph to {output_path}")
+    try:
+        plt.figure(figsize=(12, 4))
+        plt.plot(closed_pnls, label="Closed PnL")
+        if any(math.isfinite(x) for x in unrealized):
+            plt.plot(unrealized, label="Unrealized", linestyle="--")
+        plt.title("PnL over time")
+        plt.xlabel("Samples")
+        plt.ylabel("USDT")
+        plt.legend()
+        output_path = output_dir / "pnl.png"
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close()
+        print(f"[INFO] Saved PnL graph to {output_path}")
+    except Exception as exc:
+        print(f"[WARN] Failed to plot PnL graph: {exc}", file=sys.stderr)
+        return
 
 
 def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if not history:
         print("[INFO] No signal history available; skipping distribution plot.")
+        return
+    if plt is None:
+        print("[WARN] Matplotlib not available; skipping signal distribution plot.")
         return
     actions = {}
     for entry in history:
@@ -114,15 +135,19 @@ def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) ->
         return
     labels = list(actions.keys())
     sizes = [actions[label] for label in labels]
-    plt.figure(figsize=(6, 6))
-    plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
-    plt.title("Signal/Action Distribution")
-    plt.axis("equal")
-    output_path = output_dir / "signals.png"
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-    print(f"[INFO] Saved signal distribution graph to {output_path}")
+    try:
+        plt.figure(figsize=(6, 6))
+        plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
+        plt.title("Signal/Action Distribution")
+        plt.axis("equal")
+        output_path = output_dir / "signals.png"
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close()
+        print(f"[INFO] Saved signal distribution graph to {output_path}")
+    except Exception as exc:
+        print(f"[WARN] Failed to plot signal distribution: {exc}", file=sys.stderr)
+        return
 
 
 def main() -> int:
@@ -147,28 +172,34 @@ def main() -> int:
         help="Equity history JSON path (defaults to <state-dir>/equity_history.json)",
     )
     args = parser.parse_args()
+    try:
+        args.output.mkdir(parents=True, exist_ok=True)
+        state_dir = args.state_dir.expanduser()
+        equity_path = args.equity or (state_dir / "equity_history.json")
+        results_path = args.results or (state_dir / "results_state.json")
 
-    args.output.mkdir(parents=True, exist_ok=True)
-    state_dir = args.state_dir.expanduser()
-    equity_path = args.equity or (state_dir / "equity_history.json")
-    results_path = args.results or (state_dir / "results_state.json")
+        equity_data = read_json(equity_path)
+        if isinstance(equity_data, dict):
+            history = equity_data.get("history") or equity_data.get("entries") or []
+        else:
+            history = equity_data or []
+        plot_equity(history, args.output)
 
-    equity_data = read_json(equity_path)
-    if isinstance(equity_data, dict):
-        history = equity_data.get("history") or equity_data.get("entries") or []
-    else:
-        history = equity_data or []
-    plot_equity(history, args.output)
+        results_data = read_json(results_path)
+        if isinstance(results_data, dict):
+            history = results_data.get("history") or results_data.get("entries") or []
+        else:
+            history = results_data or []
+        plot_pnl(history, args.output)
+        plot_signal_distribution(history, args.output)
 
-    results_data = read_json(results_path)
-    if isinstance(results_data, dict):
-        history = results_data.get("history") or results_data.get("entries") or []
-    else:
-        history = results_data or []
-    plot_pnl(history, args.output)
-    plot_signal_distribution(history, args.output)
+        return 0
+    except Exception as exc:  # pragma: no cover - ensures CLI is resilient
+        import traceback
 
-    return 0
+        print(f"[ERROR] Failed to generate graphs: {exc}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
