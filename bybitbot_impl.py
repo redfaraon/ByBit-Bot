@@ -4833,7 +4833,18 @@ def start_telegram_long_polling() -> None:
 
 
 def _graph_interval_minutes() -> int:
-    return max(0, env_int("GRAPH_SEND_INTERVAL_MINUTES", GRAPH_SEND_INTERVAL_DEFAULT))
+    try:
+        dynamic_default = int(max(1.0, DEFAULT_NEXT_RUN_MINUTES))
+    except Exception:
+        dynamic_default = GRAPH_SEND_INTERVAL_DEFAULT
+    return max(0, env_int("GRAPH_SEND_INTERVAL_MINUTES", dynamic_default))
+
+
+def _graph_send_each_cycle() -> bool:
+    raw = os.getenv("GRAPH_SEND_EACH_CYCLE")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _graph_thread_id() -> int | None:
@@ -4866,9 +4877,11 @@ def _generate_graphs() -> None:
         log(f"[GRAPH] Failed to regenerate plots: {exc}", Fore.YELLOW)
 
 
-def _send_graph_photos() -> None:
+def _send_graph_photos() -> list[str]:
+    sent_labels: list[str] = []
     if not TG_TOKEN or not TG_CHAT:
-        return
+        log("[GRAPH] Telegram credentials missing; skipping graph delivery.", Fore.YELLOW)
+        return sent_labels
     thread_id = _graph_thread_id()
     now_txt = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     captions = {
@@ -4879,14 +4892,22 @@ def _send_graph_photos() -> None:
     for filename, caption in captions.items():
         path = GRAPH_OUTPUT_DIR / filename
         if not path.exists():
+            log(f"[GRAPH] Plot {filename} is missing; skipping send.", Fore.LIGHTBLACK_EX)
             continue
-        send_tg_photo(path, caption=caption, thread_id=thread_id)
+        msg_id = send_tg_photo(path, caption=caption, thread_id=thread_id)
+        if msg_id:
+            sent_labels.append(filename)
+            log(f"[GRAPH] Sent {filename} to Telegram (msg {msg_id}).", Fore.LIGHTBLACK_EX)
+        else:
+            log(f"[GRAPH] Failed to send {filename} to Telegram.", Fore.YELLOW)
+    if not sent_labels:
+        log("[GRAPH] No plots were sent (files missing or Telegram send failed).", Fore.YELLOW)
+    return sent_labels
 
 
 def maybe_send_graphs() -> None:
     interval = _graph_interval_minutes()
-    if interval <= 0:
-        return
+    force_each_cycle = _graph_send_each_cycle() or interval <= 0
     status = _read_runtime_status()
     last_sent = status.get("last_graph_sent")
     last_dt = None
@@ -4896,11 +4917,14 @@ def maybe_send_graphs() -> None:
         except Exception:
             last_dt = None
     now = datetime.datetime.now(datetime.timezone.utc)
-    if last_dt and (now - last_dt).total_seconds() < interval * 60:
+    if not force_each_cycle and last_dt and (now - last_dt).total_seconds() < interval * 60:
         return
+    if force_each_cycle:
+        log("[GRAPH] Forced graph push for this cycle.", Fore.LIGHTBLACK_EX)
     _generate_graphs()
-    _send_graph_photos()
-    _update_runtime_status_field("last_graph_sent", now.isoformat())
+    sent = _send_graph_photos()
+    if sent:
+        _update_runtime_status_field("last_graph_sent", now.isoformat())
 
 
 def _build_help_message() -> str:
