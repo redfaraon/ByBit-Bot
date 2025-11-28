@@ -18,6 +18,23 @@ except Exception as exc:  # pragma: no cover - protects from missing dependencie
     plt = None  # type: ignore[assignment]
     print(f"[WARN] matplotlib unavailable: {exc}", file=sys.stderr)
 
+def _save_placeholder(output_dir: Path, filename: str, title: str, subtitle: str = "No data") -> None:
+    if plt is None:
+        print(f"[WARN] Matplotlib not available; cannot create placeholder {filename}.", file=sys.stderr)
+        return
+    try:
+        plt.figure(figsize=(8, 3))
+        plt.axis('off')
+        plt.text(0.5, 0.65, title, ha='center', va='center', fontsize=14, fontweight='bold')
+        plt.text(0.5, 0.35, subtitle, ha='center', va='center', fontsize=11)
+        output_path = output_dir / filename
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close()
+        print(f"[INFO] Saved placeholder graph to {output_path}")
+    except Exception as exc:
+        print(f"[WARN] Failed to save placeholder {filename}: {exc}", file=sys.stderr)
+
 
 def read_json(path: Path) -> Any:
     if not path.exists():
@@ -31,11 +48,11 @@ def read_json(path: Path) -> Any:
 
 
 def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
-    if not history:
-        print("[INFO] No equity history available; skipping equity plot.")
-        return
     if plt is None:
         print("[WARN] Matplotlib not available; skipping equity plot.")
+        return
+    if not history:
+        _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
         return
     equities = []
     availables = []
@@ -53,7 +70,7 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
         except Exception:
             availables.append(math.nan)
     if not equities:
-        print("[INFO] Equity history empty after filtering.")
+        _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
         return
     try:
         plt.figure(figsize=(12, 4))
@@ -75,11 +92,11 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
 
 
 def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
-    if not history:
-        print("[INFO] No results history available; skipping PnL plot.")
-        return
     if plt is None:
         print("[WARN] Matplotlib not available; skipping PnL plot.")
+        return
+    if not history:
+        _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
         return
     closed_pnls = []
     unrealized = []
@@ -95,7 +112,7 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
         except Exception:
             unrealized.append(math.nan)
     if not closed_pnls:
-        print("[INFO] PnL history empty.")
+        _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
         return
     try:
         plt.figure(figsize=(12, 4))
@@ -117,11 +134,11 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
 
 
 def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) -> None:
-    if not history:
-        print("[INFO] No signal history available; skipping distribution plot.")
-        return
     if plt is None:
         print("[WARN] Matplotlib not available; skipping signal distribution plot.")
+        return
+    if not history:
+        _save_placeholder(output_dir, "signals.png", "Signal distribution")
         return
     actions = {}
     for entry in history:
@@ -131,7 +148,7 @@ def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) ->
         key = "open" if "open" in action else "close" if "close" in action else "skip"
         actions[key] = actions.get(key, 0) + 1
     if not actions:
-        print("[INFO] No actions recorded; skipping distribution plot.")
+        _save_placeholder(output_dir, "signals.png", "Signal distribution")
         return
     labels = list(actions.keys())
     sizes = [actions[label] for label in labels]
