@@ -66,7 +66,8 @@ def read_json(path: Path) -> Any:
 
 def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if plt is None:
-        print("[WARN] Matplotlib not available; skipping equity plot.")
+        print("[WARN] Matplotlib not available; using minimal placeholder for equity.")
+        _write_fallback_png(output_dir, "equity.png")
         return
     if not history:
         _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
@@ -110,7 +111,8 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
 
 def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if plt is None:
-        print("[WARN] Matplotlib not available; skipping PnL plot.")
+        print("[WARN] Matplotlib not available; using minimal placeholder for PnL.")
+        _write_fallback_png(output_dir, "pnl.png")
         return
     if not history:
         _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
@@ -152,7 +154,8 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
 
 def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if plt is None:
-        print("[WARN] Matplotlib not available; skipping signal distribution plot.")
+        print("[WARN] Matplotlib not available; using minimal placeholder for signal distribution.")
+        _write_fallback_png(output_dir, "signals.png")
         return
     if not history:
         _save_placeholder(output_dir, "signals.png", "Signal distribution")
