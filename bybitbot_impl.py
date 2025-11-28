@@ -6352,11 +6352,17 @@ def fetch_positions_snapshot(exchange, symbols_filter=None):
         if symbols_filter and canonical_symbol not in symbols_filter and source_symbol not in symbols_filter:
             continue
         simp = simplify_position(pos)
-        if simp:
+        if not simp:
+            continue
+        # Avoid double-counting the same canonical symbol across multiple settles
+        if canonical_symbol not in simplified:
             simplified[canonical_symbol] = simp
             if source_symbol and source_symbol != canonical_symbol:
                 DYNAMIC_SYMBOL_ALIASES[source_symbol] = canonical_symbol
             count += 1
+        else:
+            # Prefer keeping the first snapshot as the primary view; we only update aliases once.
+            pass
     return simplified, count
 
 
@@ -13575,7 +13581,12 @@ def run_cycle():
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                         detail_entry = f"[{sym}] - entry orders placed (waiting fill) {direction or ''} (lev x{symbol_leverage})"
                     else:
-                        reasons = open_skip_notes.get(sym) or []
+                        # open_skip_notes is available in apply_trade_plan_snapshot; in the main run_cycle
+                        # summary it may be undefined, so fall back to a local empty mapping.
+                        try:
+                            reasons = open_skip_notes.get(sym) or []  # type: ignore[name-defined]
+                        except NameError:
+                            reasons = []
                         if reasons:
                             detail_entry = f"[{sym}] - open request skipped ({'; '.join(reasons[-3:])})"
                         else:
