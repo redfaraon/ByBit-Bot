@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.27.4"
+BOT_VERSION = "2025.11.28.1"
 BOT_CHANGELOG = (
     "Graphs now auto-generate and get pushed to Telegram, AI request/response logging gained timestamps,"
     " trailing protection exclusively uses set_trading_stop, and runtime visibility improved."
@@ -10195,6 +10195,7 @@ def execute_extra_orders(
         return executed, False
     cancelled_success = []
     cancel_errors = []
+    order_errors: list[str] = []
 
     def resolve_reference_price(order_dict, fallback_price):
         candidates = [
@@ -10582,14 +10583,16 @@ def execute_extra_orders(
             if margin_buffer is not None and margin_required is not None:
                 margin_buffer = max(0.0, margin_buffer - margin_required)
         except Exception as e:
-            log(f"[ERROR] Extra order #{idx} for {symbol} failed: {e}", Fore.RED)
+            err_text = str(e)
+            order_errors.append(err_text)
+            log(f"[ERROR] Extra order #{idx} for {symbol} failed: {err_text}", Fore.RED)
     if cancelled_success:
         send_tg(f"[INFO] {symbol}: cancelled reduce-only orders {', '.join(cancelled_success)}")
     if cancel_errors:
         errs = "; ".join(f"{oid}: {err}" for oid, err in cancel_errors)
         send_tg(f"[WARN] {symbol}: errors cancelling orders - {errs}")
     actions_performed = bool(executed or cancelled_success or cancel_errors)
-    return executed, actions_performed
+    return executed, actions_performed, order_errors
 
 # --- Решение модели (2 прохода, русский лог) ---
 def ai_decision(
@@ -13408,6 +13411,7 @@ def run_cycle():
                         remaining_qty = qty
                         entry_summaries: list[str] = []
                         entry_created = 0
+                        entry_errors: list[str] = []
                         total_margin_used = 0.0
                         side_lower = side.lower()
                         total_layers = len(normalized_entries)
@@ -13524,6 +13528,8 @@ def run_cycle():
 
                     except Exception as e:
                         err_text = str(e)
+                        entry_errors.append(err_text)
+                        log_open_skip(sym, err_text)
                         open_error = err_text
                         log(f"❌ Ошибка ордера: {err_text}", Fore.RED)
                         send_tg(f"ℹ️ Ошибка ордера для {sym}: {err_text}")
@@ -13548,7 +13554,7 @@ def run_cycle():
                 extra_orders = []
 
             if extra_orders:
-                executed, actions_performed = execute_extra_orders(
+                executed, actions_performed, order_errors = execute_extra_orders(
                     ex,
                     sym,
                     extra_orders,
@@ -13599,16 +13605,33 @@ def run_cycle():
                         detail_entry = f"[{sym}] - opened {direction or 'position'} (lev x{symbol_leverage})"
                     elif open_pending:
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
-                        detail_entry = f"[{sym}] - entry orders placed (waiting fill) {direction or ''} (lev x{symbol_leverage})"
+                        pending_parts = ["waiting fill"]
+                        if entry_created:
+                            plural = "layer" if entry_created == 1 else "layers"
+                            pending_parts.append(f"{entry_created} {plural}")
+                        pending_desc = ", ".join(pending_parts)
+                        detail_entry = f"[{sym}] - entry orders placed ({pending_desc}) {direction or ''} (lev x{symbol_leverage})"
+                        if entry_errors:
+                            detail_entry += f" (last error: {entry_errors[-1]})"
                     else:
                         # open_skip_notes is available in apply_trade_plan_snapshot; in the main run_cycle
                         # summary it may be undefined, so fall back to a local empty mapping.
+                        combined_reasons: list[str] = []
+                        seen_reasons: set[str] = set()
                         try:
-                            reasons = open_skip_notes.get(sym) or []  # type: ignore[name-defined]
+                            existing_reasons = open_skip_notes.get(sym) or []  # type: ignore[name-defined]
                         except NameError:
-                            reasons = []
-                        if reasons:
-                            detail_entry = f"[{sym}] - open request skipped ({'; '.join(reasons[-3:])})"
+                            existing_reasons = []
+                        for reason in existing_reasons:
+                            if reason and reason not in seen_reasons:
+                                combined_reasons.append(reason)
+                                seen_reasons.add(reason)
+                        for err in entry_errors:
+                            if err and err not in seen_reasons:
+                                combined_reasons.append(err)
+                                seen_reasons.add(err)
+                        if combined_reasons:
+                            detail_entry = f"[{sym}] - open request skipped ({'; '.join(combined_reasons[-3:])})"
                         else:
                             detail_entry = f"[{sym}] - open request skipped"
                 elif action == "close":
