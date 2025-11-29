@@ -1400,6 +1400,7 @@ def main():
             history["fallback_failed_head"] = None
             _save_fallback_history(history)
             print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", file=sys.stderr)
+            # Run the freshly pulled current version once, then continue normal flow
             _run_current()
             return
         fallback_cycles_recorded = int(history.get("fallback_cycles") or 0)
