@@ -10324,8 +10324,8 @@ def execute_extra_orders(
             log(f"[WARN] Invalid amount in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
         side_raw = order.get("side")
-        if not side_raw and is_reduce_only:
-            reduce_direction = None
+        reduce_direction = None
+        if is_reduce_only:
             position_side_field = str((current_position or {}).get("side") or "").lower()
             if position_side_field in {"long", "buy"}:
                 reduce_direction = "sell"
@@ -10339,8 +10339,8 @@ def execute_extra_orders(
                 )
                 if pos_amount_val is not None and math.isfinite(pos_amount_val) and abs(pos_amount_val) > 0:
                     reduce_direction = "sell" if pos_amount_val > 0 else "buy"
-            if reduce_direction:
-                side_raw = reduce_direction
+        if reduce_direction:
+            side_raw = reduce_direction
         side, autodetected_side = _normalize_order_side(side_raw, amount)
         if autodetected_side:
             log(
