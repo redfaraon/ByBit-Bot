@@ -9586,17 +9586,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if position is None or position_amount is None or not math.isfinite(position_amount) or position_amount == 0:
         return open_orders or []
 
-    position_side = (position.get("side") or "").lower()
     exchange_symbol = _resolve_symbol_alias(symbol) or symbol
-    if position_side in ("sell", "short"):
-        protection_side = "buy"
-        is_long = False
-    elif position_side in ("buy", "long"):
-        protection_side = "sell"
-        is_long = True
-    else:
-        is_long = position_amount > 0
-        protection_side = "sell" if is_long else "buy"
+    is_long = position_amount > 0
+    protection_side = "sell" if is_long else "buy"
 
     sl_mult = cfg.get("sl_atr", SL_ATR)
     tp_mult = cfg.get("tp_atr", TP_ATR)
@@ -12824,6 +12816,7 @@ def run_cycle():
             open_error: str | None = None
             preallocated_base_asset: str | None = None
             open_executed = False
+            entry_errors: list[str] = []
             if action == "open" and not has_position:
                 base_asset_key = _extract_base_asset(sym)
                 exposure_cap = MAX_POSITIONS_PER_BASE
@@ -13447,7 +13440,6 @@ def run_cycle():
                         remaining_qty = qty
                         entry_summaries: list[str] = []
                         entry_created = 0
-                        entry_errors: list[str] = []
                         total_margin_used = 0.0
                         side_lower = side.lower()
                         total_layers = len(normalized_entries)
