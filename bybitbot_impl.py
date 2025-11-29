@@ -4885,21 +4885,25 @@ def _send_graph_photos() -> list[str]:
     thread_id = _graph_thread_id()
     now_txt = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     captions = {
-        "equity.png": f"Equity / Available margin ({now_txt})",
-        "pnl.png": f"Closed / Unrealized PnL ({now_txt})",
-        "signals.png": f"Signal distribution ({now_txt})",
+        "equity": f"Equity / Available margin ({now_txt})",
+        "pnl": f"Closed / Unrealized PnL ({now_txt})",
+        "signals": f"Signal distribution ({now_txt})",
     }
-    for filename, caption in captions.items():
-        path = GRAPH_OUTPUT_DIR / filename
-        if not path.exists():
-            log(f"[GRAPH] Plot {filename} is missing; skipping send.", Fore.LIGHTBLACK_EX)
+    for base, caption in captions.items():
+        preferred = [
+            GRAPH_OUTPUT_DIR / f"{base}.jpg",
+            GRAPH_OUTPUT_DIR / f"{base}.png",
+        ]
+        path = next((p for p in preferred if p.exists()), None)
+        if not path:
+            log(f"[GRAPH] Plot {base} (jpg/png) missing; skipping send.", Fore.LIGHTBLACK_EX)
             continue
         msg_id = send_tg_photo(path, caption=caption, thread_id=thread_id)
         if msg_id:
-            sent_labels.append(filename)
-            log(f"[GRAPH] Sent {filename} to Telegram (msg {msg_id}).", Fore.LIGHTBLACK_EX)
+            sent_labels.append(path.name)
+            log(f"[GRAPH] Sent {path.name} to Telegram (msg {msg_id}).", Fore.LIGHTBLACK_EX)
         else:
-            log(f"[GRAPH] Failed to send {filename} to Telegram.", Fore.YELLOW)
+            log(f"[GRAPH] Failed to send {path.name} to Telegram.", Fore.YELLOW)
     if not sent_labels:
         log("[GRAPH] No plots were sent (files missing or Telegram send failed).", Fore.YELLOW)
     return sent_labels
@@ -10312,18 +10316,18 @@ def execute_extra_orders(
         if side not in {"buy", "sell"}:
             log(f"[WARN] Missing valid side in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
             continue
-            price = safe_float(order.get("price"))
-            # Allow MARKET orders without a valid price; strip price instead of skipping
-            is_market_order = (order_type_key == "market") or (str(params.get("orderType") or "").lower() == "market")
-            if price is not None and (not math.isfinite(price) or price <= 0):
-                if is_market_order:
-                    # Remove price for MARKET; Bybit/ccxt ignores it for market orders
-                    order.pop("price", None)
-                    params.pop("price", None)
-                    price = None
-                else:
-                    log(f"[WARN] Invalid price in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
-                    continue
+        price = safe_float(order.get("price"))
+        # Allow MARKET orders without a valid price; strip price instead of skipping
+        is_market_order = (order_type_key == "market") or (str(params.get("orderType") or "").lower() == "market")
+        if price is not None and (not math.isfinite(price) or price <= 0):
+            if is_market_order:
+                # Remove price for MARKET; Bybit/ccxt ignores it for market orders
+                order.pop("price", None)
+                params.pop("price", None)
+                price = None
+            else:
+                log(f"[WARN] Invalid price in extra order #{idx} for {symbol}; skipping.", Fore.YELLOW)
+                continue
         price_key = round(price, NON_REDUCE_PRICE_DECIMALS) if price is not None else None
         trigger_price = safe_float(
             order.get("triggerPrice")

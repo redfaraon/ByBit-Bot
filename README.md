@@ -6,7 +6,7 @@
    sudo apt install python3-pip -y
    python3 -m pip --version
    python3 -m pip install --upgrade pip
-   python3 -m pip install --user -U ccxt pandas requests colorama "openai>=1.0.0" python-dotenv pyyaml
+   python3 -m pip install --user -U ccxt pandas requests colorama "openai>=1.0.0" python-dotenv pyyaml matplotlib
    ```
 
 2. Disable password request from github
@@ -37,20 +37,20 @@
    export TELEGRAM_WEBHOOK_PATH=/telegram     # webhook path prefix
    export TELEGRAM_WEBHOOK_SECRET=secret123   # optional Telegram secret token
    export TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,-1005678901234
-   export TELEGRAM_COMMANDS="status:Òåêóùèé ñòàòóñ;help:Ñïðàâêà"  # slash-command overrides
+   export TELEGRAM_COMMANDS="status:ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½;help:ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"  # slash-command overrides
    export NEWS_PROVIDER=hybrid                   # news sources: hybrid (default), cryptocompare, rss
    ```
 ## AI model configuration
 
 - Set `OPENAI_API_KEY` to your API key (shared across all traders unless overridden per user).
-- `OPENAI_MODEL_PRIMARY` — default `gpt-4.1-mini` (used for heavy planning).
-- `OPENAI_MODEL_CHEAP` — default `gpt-4o-mini` (used once `/tokens` shows usage above `OPENAI_MODEL_CHEAP_THRESHOLD`, default 5 symbols).
-- `AI_SUPPORT_MODEL` — optional override for `/support` replies (falls back to the primary trading model).
+- `OPENAI_MODEL_PRIMARY` ï¿½ default `gpt-4.1-mini` (used for heavy planning).
+- `OPENAI_MODEL_CHEAP` ï¿½ default `gpt-4o-mini` (used once `/tokens` shows usage above `OPENAI_MODEL_CHEAP_THRESHOLD`, default 5 symbols).
+- `AI_SUPPORT_MODEL` ï¿½ optional override for `/support` replies (falls back to the primary trading model).
 - `/tokens` displays current budget, model switches, and can be used to verify limits.
 
 ### Telegram diagnostics
 
-- `/ai payload [context]` — dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
+- `/ai payload [context]` ï¿½ dumps the last OpenAI request/response snapshot (pass `universe` or `trade` to focus on a stage; without arguments the latest exchange is shown).
 - `/logs [count|SYMBOL window]` - show logs; e.g. `/logs 30` or `/logs BTC 60` for the last hour.
 
 ### Telegram log mirroring
@@ -121,7 +121,7 @@ Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, 
 - Mixed mode is supported on a unified account:
   - Funding/Open Interest are queried only for derivatives.
   - Spot orders do not use reduceOnly/positionIdx/conditional fields.
-  - The bot skips “open” short on spot (`SELL` to open). Closing spot exposure is done by explicit `SELL` of held assets.
+  - The bot skips ï¿½openï¿½ short on spot (`SELL` to open). Closing spot exposure is done by explicit `SELL` of held assets.
 - Ensure free balances exist for spot orders:
   - `BUY`: free `USDT` must cover notional + fees.
   - `SELL`: free base asset must cover the sell amount.
@@ -129,7 +129,7 @@ Also ensure your server clock is synchronized (e.g., systemd-timesyncd, chrony, 
 ## Adding a new trader without sharing Bybit keys
 
 1. **Collect the Telegram user id** of the new trader (they can forward any of their messages to `@userinfobot`). Decide on a unique bot id, e.g. `alice`.
-2. **Create a profile**: either run `/adduser alice <telegram_id>` in the Commands topic or append to `users/users.json`. Keep the entry minimal—`id`, optional `label`, `owner_id`, and per-user overrides such as:
+2. **Create a profile**: either run `/adduser alice <telegram_id>` in the Commands topic or append to `users/users.json`. Keep the entry minimalï¿½`id`, optional `label`, `owner_id`, and per-user overrides such as:
    ```json
    {
      "id": "alice",
