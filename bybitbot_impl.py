@@ -9620,9 +9620,17 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if position is None or position_amount is None or not math.isfinite(position_amount) or position_amount == 0:
         return open_orders or []
 
+    position_side = (position.get("side") or "").lower()
     exchange_symbol = _resolve_symbol_alias(symbol) or symbol
-    is_long = position_amount > 0
-    protection_side = "sell" if is_long else "buy"
+    if position_side in ("sell", "short"):
+        protection_side = "buy"
+        is_long = False
+    elif position_side in ("buy", "long"):
+        protection_side = "sell"
+        is_long = True
+    else:
+        is_long = position_amount > 0
+        protection_side = "sell" if is_long else "buy"
 
     sl_mult = cfg.get("sl_atr", SL_ATR)
     tp_mult = cfg.get("tp_atr", TP_ATR)
