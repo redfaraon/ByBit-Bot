@@ -14037,7 +14037,13 @@ def run_cycle():
             restored = True
             continue
 
-        close_side = "sell" if amount_unprotected > 0 else "buy"
+        position_side_field = str(position_payload.get("side") or "").lower()
+        if position_side_field in {"long", "buy"}:
+            close_side = "sell"
+        elif position_side_field in {"short", "sell"}:
+            close_side = "buy"
+        else:
+            close_side = "sell" if amount_unprotected > 0 else "buy"
         qty_close = abs(amount_unprotected)
         params_close = {"reduceOnly": True}
         position_idx = get_position_idx(close_side)
