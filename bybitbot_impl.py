@@ -13491,6 +13491,9 @@ def run_cycle():
                                 if precise_qty < min_qty_rule:
                                     continue
                             layer_notional = precise_qty * layer_price
+                            order_price = layer_price
+                            order_notional = layer_notional
+                            fallback_used = False
                             if layer_notional + NOTIONAL_EPSILON < min_notional_required:
                                 min_qty_needed = min_notional_required / layer_price if layer_price > 0 else min_notional_required
                                 min_qty_target = _apply_qty_rules(min_qty_needed, min_qty=min_qty_rule, qty_step=qty_step_rule)
@@ -13526,29 +13529,37 @@ def run_cycle():
                                 fallback_notional = precise_qty * fallback_price
                                 if fallback_notional + NOTIONAL_EPSILON < min_notional_required:
                                     raise RuntimeError("no entry orders placed")
-                                layer_params = dict(base_params)
-                                layer_params = _sanitize_order_params_for_category(layer_params, category)
-                                log(
-                                    f"[EX] create (fallback) {sym} {side_lower}/limit qty={precise_qty:.6f} price={fallback_price:.4f} params={layer_params}",
-                                    Fore.LIGHTBLACK_EX,
+                                fallback_used = True
+                                order_price = fallback_price
+                                order_notional = fallback_notional
+                            if not fallback_used:
+                                order_price = layer_price
+                                order_notional = precise_qty * order_price
+                            layer_params = dict(base_params)
+                            layer_params = _sanitize_order_params_for_category(layer_params, category)
+                            log(
+                                f"[EX] create {sym} {side_lower}/limit qty={precise_qty:.6f} price={order_price:.4f} params={layer_params}",
+                                Fore.LIGHTBLACK_EX,
+                            )
+                            order_result = ex.create_order(sym, "limit", side, precise_qty, order_price, layer_params)
+                            log(f"[EX] ok {sym} {side_lower}/limit -> {order_result}", Fore.LIGHTBLACK_EX)
+                            try:
+                                _append_user_bybit_log(
+                                    USER_ID,
+                                    f"ORDER: {sym} {side.upper()} {precise_qty:.6f}@{order_price:.4f} -> {order_result}",
                                 )
-                                order_result = ex.create_order(sym, "limit", side, precise_qty, fallback_price, layer_params)
-                                log(f"[EX] ok (fallback) {sym} {side_lower}/limit -> {order_result}", Fore.LIGHTBLACK_EX)
-                                try:
-                                    _append_user_bybit_log(
-                                        USER_ID,
-                                        f"ORDER (fallback): {sym} {side.upper()} {precise_qty:.6f}@{fallback_price:.4f} -> {order_result}",
-                                    )
-                                except Exception:
-                                    pass
-                                _append_trade_log(
-                                    f"{user_tag} ORDER (fallback) {sym} {side.upper()} qty={precise_qty:.6f} price={fallback_price:.4f} -> {order_result}"
-                                )
+                            except Exception:
+                                pass
+                            _append_trade_log(
+                                f"{user_tag} ORDER {sym} {side.upper()} qty={precise_qty:.6f} price={order_price:.4f} -> {order_result}"
+                            )
                             open_executed = True
                             entry_created = 1
                             remaining_qty = max(0.0, qty - precise_qty)
-                            total_margin_used = fallback_notional / symbol_leverage if symbol_leverage else fallback_notional
-                            entry_summaries.append(f"{precise_qty:.4f} @ {fallback_price:.2f} (fallback, margin {total_margin_used:.2f} USDT)")
+                            total_margin_used = order_notional / symbol_leverage if symbol_leverage else order_notional
+                            entry_summaries.append(
+                                f"{precise_qty:.4f} @ {order_price:.2f} ({'fallback' if fallback_used else 'limit'}, margin {total_margin_used:.2f} USDT)"
+                            )
                         log(f"✅ Ордеры {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
                             f"ℹ️ {sym} {side.upper()} входы:\n"
