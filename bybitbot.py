@@ -1217,6 +1217,7 @@ def _run_current():
         os.environ["BYBITBOT_CYCLE_COUNTER"] = "0"
     os.environ.pop("BYBITBOT_FALLBACK_CONTEXT", None)
     _start_background_engine()
+    module = None
     try:
         module = importlib.import_module("bybitbot_impl")
         module_path = Path(getattr(module, "__file__", "<unknown>")).resolve() if hasattr(module, "__file__") else Path("bybitbot_impl.py").resolve()
@@ -1233,6 +1234,11 @@ def _run_current():
         else:
             raise AttributeError("bybitbot_impl.main not found")
     finally:
+        if module and hasattr(module, "shutdown_telegram_services"):
+            try:
+                module.shutdown_telegram_services()
+            except Exception as exc:
+                print(f"[BOOT] Failed to shutdown Telegram services: {exc}", file=sys.stderr)
         _stop_background_engine()
 
 

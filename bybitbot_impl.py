@@ -4713,6 +4713,22 @@ def start_telegram_webhook_server() -> None:
     thread.start()
 
 
+def stop_telegram_webhook_server() -> None:
+    global _TELEGRAM_WEBHOOK_THREAD, _TELEGRAM_WEBHOOK_SERVER
+    server = _TELEGRAM_WEBHOOK_SERVER
+    if server:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        _TELEGRAM_WEBHOOK_SERVER = None
+    thread = _TELEGRAM_WEBHOOK_THREAD
+    if thread:
+        if thread.is_alive():
+            thread.join(timeout=5)
+        _TELEGRAM_WEBHOOK_THREAD = None
+
+
 def _collect_live_status_snapshot() -> dict[str, Any]:
     exchange = init_exchange()
     try:
@@ -4830,6 +4846,24 @@ def start_telegram_long_polling() -> None:
     thread = threading.Thread(target=_poll_updates, daemon=True)
     _TELEGRAM_LONG_POLL_THREAD = thread
     thread.start()
+
+
+def stop_telegram_long_polling() -> None:
+    global _TELEGRAM_LONG_POLL_THREAD, _TELEGRAM_LONG_POLL_STOP
+    stop_event = _TELEGRAM_LONG_POLL_STOP
+    thread = _TELEGRAM_LONG_POLL_THREAD
+    if stop_event:
+        stop_event.set()
+    if thread:
+        if thread.is_alive():
+            thread.join(timeout=5)
+    _TELEGRAM_LONG_POLL_THREAD = None
+    _TELEGRAM_LONG_POLL_STOP = None
+
+
+def shutdown_telegram_services() -> None:
+    stop_telegram_long_polling()
+    stop_telegram_webhook_server()
 
 
 def _graph_interval_minutes() -> int:
