@@ -1,4 +1,7 @@
-﻿2025.11.17.1
+2025.12.02.0
+- Stop protection cleanup keeps newly placed stops and retries stop creation if cleanup leaves none, avoiding false missing protection closes and ensuring stops stay on positions.
+
+2025.11.17.1
 - Support answers now search the entire repo (sans secrets) with multilingual keywords, so /support can explain trading logic, sandboxes, etc.
 - README documents AI model env vars and clarifies that each trader runs on their own Bybit balance.
 

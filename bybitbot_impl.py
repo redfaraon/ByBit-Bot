@@ -54,10 +54,10 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.11.28.1"
+BOT_VERSION = "2025.12.02.0"
 BOT_CHANGELOG = (
-    "Graphs now auto-generate and get pushed to Telegram, AI request/response logging gained timestamps,"
-    " trailing protection exclusively uses set_trading_stop, and runtime visibility improved."
+    "Protection cleanup now keeps freshly placed stops and retries placement if none remain, preventing"
+    " false 'missing protection' closes and ensuring positions retain stop-loss coverage."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -9533,7 +9533,15 @@ def _sync_with_remote() -> None:
             log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
 
 
-def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_side, position_qty, is_long):
+def _cleanup_redundant_stop_orders(
+    exchange,
+    symbol,
+    reduce_orders,
+    protection_side,
+    position_qty,
+    is_long,
+    keep_ids_preferred: set[str] | None = None,
+):
     """Remove surplus reduce-only stop orders that exceed current position coverage."""
     if (
         not reduce_orders
@@ -9590,7 +9598,15 @@ def _cleanup_redundant_stop_orders(exchange, symbol, reduce_orders, protection_s
     coverage = 0.0
     tolerance = max(position_qty * 1e-6, 1e-8)
     keep_ids: set[str] = set()
+    preferred_ids: set[str] = {str(val) for val in (keep_ids_preferred or set())}
+    # Always keep newly placed stops first to avoid cancelling fresh protection.
     for entry in stop_entries:
+        if entry["id"] in preferred_ids:
+            keep_ids.add(entry["id"])
+            coverage += entry["amount"]
+    for entry in stop_entries:
+        if entry["id"] in keep_ids:
+            continue
         keep_ids.add(entry["id"])
         coverage += entry["amount"]
         if coverage >= position_qty - tolerance:
@@ -9762,6 +9778,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     }
     if position_idx is not None:
         base_params["positionIdx"] = position_idx
+    stop_ids_preferred: set[str] = set()
 
     market_info = None
     try:
@@ -9804,7 +9821,25 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 "closeOnTrigger": True,
             }
         )
-        exchange.create_order(exchange_symbol, "market", protection_side, qty, None, stop_params)
+        stop_order = exchange.create_order(
+            exchange_symbol,
+            "market",
+            protection_side,
+            qty,
+            None,
+            stop_params,
+        )
+        try:
+            if isinstance(stop_order, dict):
+                stop_order_id = (
+                    stop_order.get("id")
+                    or (stop_order.get("info") or {}).get("orderId")
+                    or (stop_order.get("info") or {}).get("orderID")
+                )
+                if stop_order_id:
+                    stop_ids_preferred.add(str(stop_order_id))
+        except Exception:
+            pass
         created_log_parts.append(f"stopLoss @ {stop_price:.2f}")
         if breakeven_note:
             created_log_parts.append(breakeven_note)
@@ -10091,6 +10126,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             protection_side,
             position_qty,
             is_long,
+            keep_ids_preferred=stop_ids_preferred,
         )
         if cancelled_stop_entries:
             summary = "; ".join(cancelled_stop_entries)
@@ -10109,7 +10145,40 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             f"ℹ️ {symbol}: обновлена защита позиции\n"
             + "\n".join(f"- {entry}" for entry in created_log_parts)
         )
-    return fetch_open_orders_for_symbol(exchange, symbol)
+    final_open_orders = fetch_open_orders_for_symbol(exchange, symbol)
+    protective_after = _extract_protection_orders(final_open_orders)
+    has_stop_after = any(
+        _has_stop_flag(order) or _has_trailing_flag(order) for order in protective_after
+    )
+    if not has_stop_after and stop_price and math.isfinite(stop_price):
+        log(f"[WARN] {symbol}: стоп-ордера не обнаружены после очистки, повторная установка", Fore.YELLOW)
+        fallback_params = dict(base_params)
+        fallback_params.update(
+            {
+                "triggerPrice": stop_price,
+                "triggerDirection": get_trigger_direction_for_side(
+                    protection_side, trigger_price=stop_price, reference_price=price
+                ),
+                "closeOnTrigger": True,
+            }
+        )
+        try:
+            retry_order = exchange.create_order(
+                exchange_symbol, "market", protection_side, qty, None, fallback_params
+            )
+            if isinstance(retry_order, dict):
+                retry_id = (
+                    retry_order.get("id")
+                    or (retry_order.get("info") or {}).get("orderId")
+                    or (retry_order.get("info") or {}).get("orderID")
+                )
+                if retry_id:
+                    stop_ids_preferred.add(str(retry_id))
+            log(f"🔁 {symbol}: стоп-ордер восстановлен повторно @ {stop_price:.2f}", Fore.LIGHTBLUE_EX)
+        except Exception as exc_retry:
+            log(f"⚠️ {symbol}: повторная установка стопа не удалась: {exc_retry}", Fore.YELLOW)
+        final_open_orders = fetch_open_orders_for_symbol(exchange, symbol)
+    return final_open_orders
 
 
 
