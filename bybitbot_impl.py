@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.02.1"
+BOT_VERSION = "2025.12.02.2"
 BOT_CHANGELOG = (
     "Trailing stop is now applied only when explicitly requested by the model and only on open positions;"
     " protection checks keep stop-loss vs take-profit semantics intact."
@@ -9706,27 +9706,6 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     sl_mult = cfg.get("sl_atr", SL_ATR)
     tp_mult = cfg.get("tp_atr", TP_ATR)
-    # Trailing stop is applied only if explicitly requested by the model/config.
-    trailing_requested = any(
-        key in cfg
-        for key in (
-            "trailing_atr_mult",
-            "trailing_atr",
-            "trailing",
-            "trailing_stop",
-        )
-    ) or any(
-        target_spec.get(key) not in (None, "")
-        for key in (
-            "trailingStop",
-            "trailing_stop",
-            "trailingPercent",
-            "trailing_percent",
-            "trailingCallback",
-            "trailing_callback",
-        )
-    )
-    trailing_mult = cfg.get("trailing_atr_mult", 0.0 if not trailing_requested else TRAILING_ATR_MULT)
     reduce_orders_source = open_orders or []
     if not reduce_orders_source:
         reduce_orders_source = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
@@ -9779,6 +9758,27 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     target_spec = cfg.get("target") if isinstance(cfg.get("target"), dict) else {}
     explicit_entry = safe_float(target_spec.get("entryPrice") or target_spec.get("entry_price"))
     reference_price = explicit_entry if explicit_entry and math.isfinite(explicit_entry) else price
+
+    trailing_requested = any(
+        key in cfg
+        for key in (
+            "trailing_atr_mult",
+            "trailing_atr",
+            "trailing",
+            "trailing_stop",
+        )
+    ) or any(
+        target_spec.get(key) not in (None, "")
+        for key in (
+            "trailingStop",
+            "trailing_stop",
+            "trailingPercent",
+            "trailing_percent",
+            "trailingCallback",
+            "trailing_callback",
+        )
+    )
+    trailing_mult = cfg.get("trailing_atr_mult", 0.0 if not trailing_requested else TRAILING_ATR_MULT)
 
     if is_long:
         stop_price = price - sl_mult * atrv

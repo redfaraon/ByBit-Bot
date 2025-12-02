@@ -1,3 +1,6 @@
+2025.12.02.2
+- Trailing-stop detection now references target parameters after they are available, preventing missing-variable errors when restoring protection for managed positions.
+
 2025.12.02.1
 - Trailing stop is applied only when explicitly requested by the model and only for open positions; tightened SL/TP detection remains in place.
 
