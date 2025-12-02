@@ -54,10 +54,10 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.02.0"
+BOT_VERSION = "2025.12.02.1"
 BOT_CHANGELOG = (
-    "Protection cleanup now keeps freshly placed stops and retries placement if none remain, preventing"
-    " false 'missing protection' closes and ensuring positions retain stop-loss coverage."
+    "Trailing stop is now applied only when explicitly requested by the model and only on open positions;"
+    " protection checks keep stop-loss vs take-profit semantics intact."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -9706,7 +9706,27 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     sl_mult = cfg.get("sl_atr", SL_ATR)
     tp_mult = cfg.get("tp_atr", TP_ATR)
-    trailing_mult = cfg.get("trailing_atr_mult", TRAILING_ATR_MULT)
+    # Trailing stop is applied only if explicitly requested by the model/config.
+    trailing_requested = any(
+        key in cfg
+        for key in (
+            "trailing_atr_mult",
+            "trailing_atr",
+            "trailing",
+            "trailing_stop",
+        )
+    ) or any(
+        target_spec.get(key) not in (None, "")
+        for key in (
+            "trailingStop",
+            "trailing_stop",
+            "trailingPercent",
+            "trailing_percent",
+            "trailingCallback",
+            "trailing_callback",
+        )
+    )
+    trailing_mult = cfg.get("trailing_atr_mult", 0.0 if not trailing_requested else TRAILING_ATR_MULT)
     reduce_orders_source = open_orders or []
     if not reduce_orders_source:
         reduce_orders_source = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
@@ -9801,30 +9821,31 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         take_price = explicit_take
 
     trailing_offset = None
-    explicit_trailing = safe_float(target_spec.get("trailingStop") or target_spec.get("trailing_stop"))
-    if explicit_trailing is not None and math.isfinite(explicit_trailing):
-        trailing_offset = abs(explicit_trailing)
-    if trailing_offset is None:
-        trailing_percent = safe_float(target_spec.get("trailingPercent") or target_spec.get("trailing_percent"))
-        if trailing_percent is not None and math.isfinite(trailing_percent) and trailing_percent > 0:
-            base_price = reference_price if reference_price and math.isfinite(reference_price) else price
-            trailing_offset = abs(base_price) * (trailing_percent / 100.0) if base_price else None
-    if trailing_offset is None:
-        trailing_callback = safe_float(target_spec.get("trailingCallback") or target_spec.get("trailing_callback"))
-        if trailing_callback is not None and math.isfinite(trailing_callback) and trailing_callback > 0:
-            trailing_offset = trailing_callback
-    if trailing_offset is None and trailing_mult > 0 and math.isfinite(trailing_mult):
-        trailing_offset = trailing_mult * atrv
-    if trailing_mult > 0 and atrv and TRAILING_DYNAMIC_TRIGGER_ATR > 0 and profit_distance > 0:
-        trigger_distance = atrv * TRAILING_DYNAMIC_TRIGGER_ATR
-        if trigger_distance > 0 and profit_distance >= trigger_distance:
-            dynamic_offset = atrv * TRAILING_DYNAMIC_FACTOR
-            dynamic_offset = max(dynamic_offset, atrv * TRAILING_DYNAMIC_MIN_ATR)
-            if dynamic_offset > 0 and (trailing_offset is None or dynamic_offset < trailing_offset - 1e-9):
-                trailing_offset = dynamic_offset
-                log(f"🔷 {symbol}: tightened trailing offset to {trailing_offset:.4f} (profit distance {profit_distance:.4f})", Fore.LIGHTBLUE_EX)
-    if trailing_offset is not None and trailing_offset <= 0:
-        trailing_offset = None
+    if trailing_requested:
+        explicit_trailing = safe_float(target_spec.get("trailingStop") or target_spec.get("trailing_stop"))
+        if explicit_trailing is not None and math.isfinite(explicit_trailing):
+            trailing_offset = abs(explicit_trailing)
+        if trailing_offset is None:
+            trailing_percent = safe_float(target_spec.get("trailingPercent") or target_spec.get("trailing_percent"))
+            if trailing_percent is not None and math.isfinite(trailing_percent) and trailing_percent > 0:
+                base_price = reference_price if reference_price and math.isfinite(reference_price) else price
+                trailing_offset = abs(base_price) * (trailing_percent / 100.0) if base_price else None
+        if trailing_offset is None:
+            trailing_callback = safe_float(target_spec.get("trailingCallback") or target_spec.get("trailing_callback"))
+            if trailing_callback is not None and math.isfinite(trailing_callback) and trailing_callback > 0:
+                trailing_offset = trailing_callback
+        if trailing_offset is None and trailing_mult > 0 and math.isfinite(trailing_mult):
+            trailing_offset = trailing_mult * atrv
+        if trailing_mult > 0 and atrv and TRAILING_DYNAMIC_TRIGGER_ATR > 0 and profit_distance > 0:
+            trigger_distance = atrv * TRAILING_DYNAMIC_TRIGGER_ATR
+            if trigger_distance > 0 and profit_distance >= trigger_distance:
+                dynamic_offset = atrv * TRAILING_DYNAMIC_FACTOR
+                dynamic_offset = max(dynamic_offset, atrv * TRAILING_DYNAMIC_MIN_ATR)
+                if dynamic_offset > 0 and (trailing_offset is None or dynamic_offset < trailing_offset - 1e-9):
+                    trailing_offset = dynamic_offset
+                    log(f"🔷 {symbol}: tightened trailing offset to {trailing_offset:.4f} (profit distance {profit_distance:.4f})", Fore.LIGHTBLUE_EX)
+        if trailing_offset is not None and trailing_offset <= 0:
+            trailing_offset = None
     qty = position_qty
     if not math.isfinite(qty) or qty <= 0:
         return open_orders or []
