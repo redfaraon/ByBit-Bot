@@ -9307,6 +9307,62 @@ def _categorize_protection_orders(orders) -> dict[str, list[tuple]]:
     return summary
 
 
+def _evaluate_position_protection(position_payload: dict[str, Any] | None, orders) -> tuple[bool, bool]:
+    """
+    Return (has_stop_loss, has_take_profit) for a position given its protective orders.
+
+    For LONG positions, only stops *below* entry price are treated as stop-loss protection.
+    For SHORT positions, only stops *above* entry price are treated as stop-loss protection.
+    Stops on the profitable side are treated as take-profit equivalents.
+    """
+    position_side_raw = str((position_payload or {}).get("side") or "").lower()
+    amount_val = safe_float(
+        (position_payload or {}).get("amount") or (position_payload or {}).get("contracts")
+    )
+    if position_side_raw in {"sell", "short"}:
+        is_long = False
+    elif position_side_raw in {"buy", "long"}:
+        is_long = True
+    else:
+        is_long = False if amount_val is not None and amount_val < 0 else True
+
+    entry_price = safe_float(
+        (position_payload or {}).get("entryPrice")
+        or (position_payload or {}).get("average")
+        or (position_payload or {}).get("avgEntryPrice")
+    )
+
+    categorized = _categorize_protection_orders(orders)
+    has_take_profit = bool(categorized["take_profit"])
+    has_trailing = bool(categorized["trailing"])
+
+    has_stop_loss = False
+    # Interpret stops relative to entry price direction.
+    for stop_price, _amt in categorized["stop"]:
+        if stop_price is None:
+            continue
+        try:
+            stop_val = float(stop_price)
+        except (TypeError, ValueError):
+            continue
+        if entry_price is not None and math.isfinite(entry_price):
+            if is_long and stop_val < entry_price - 1e-9:
+                has_stop_loss = True
+            elif not is_long and stop_val > entry_price + 1e-9:
+                has_stop_loss = True
+            else:
+                # Stop is on the profitable side; treat as take-profit equivalent.
+                has_take_profit = True or has_take_profit
+        else:
+            # Without entry price, treat any stop as protection to avoid false negatives.
+            has_stop_loss = True
+
+    if has_trailing:
+        has_stop_loss = True
+
+    return has_stop_loss, has_take_profit
+
+
 def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
     changes: list[str] = []
     initial_summary = _categorize_protection_orders(initial_orders)
@@ -14044,9 +14100,7 @@ def run_cycle():
         if orders_snapshot is None:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
         protective_orders = _extract_protection_orders(orders_snapshot)
-        categorized = _categorize_protection_orders(protective_orders)
-        has_stop = bool(categorized["stop"]) or bool(categorized["trailing"])
-        has_take = bool(categorized["take_profit"])
+        has_stop, has_take = _evaluate_position_protection(payload, protective_orders)
         needs_protection = False
         if not has_stop:
             needs_protection = True
@@ -14100,7 +14154,7 @@ def run_cycle():
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
         protective_orders_after = _extract_protection_orders(refreshed_orders)
-        has_stop_after = any(_has_stop_flag(order) or _has_trailing_flag(order) for order in protective_orders_after)
+        has_stop_after, _ = _evaluate_position_protection(position_payload, protective_orders_after)
         if has_stop_after:
             log(f"[INFO] {sym_unprotected}: protection restored ({len(protective_orders_after)} orders)", Fore.CYAN)
             restored = True
