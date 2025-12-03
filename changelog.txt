@@ -1,3 +1,6 @@
+2025.12.02.3
+- Logs now report the latest close/EMA20/EMA50/RSI/ATR before making an AI decision, improving indicator visibility.
+
 2025.12.02.2
 - Trailing-stop detection now references target parameters after they are available, preventing missing-variable errors when restoring protection for managed positions.
 

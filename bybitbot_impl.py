@@ -54,10 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.02.2"
+BOT_VERSION = "2025.12.02.3"
 BOT_CHANGELOG = (
-    "Trailing stop is now applied only when explicitly requested by the model and only on open positions;"
-    " protection checks keep stop-loss vs take-profit semantics intact."
+    "Initial indicators (close/EMA20/EMA50/RSI/ATR) are now logged before every AI decision for better traceability; trailing stop request handling remains restricted."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -10838,6 +10837,22 @@ def ai_decision(
     df_30m["ema50"] = ema(df_30m["close"],50)
     df_30m["rsi"] = rsi(df_30m["close"],14)
     df_30m["atr"] = atr(df_30m,14)
+    if not df_30m.empty:
+        last_indicators = df_30m.iloc[-1]
+        def _fmt(val):
+            try:
+                return f"{float(val):.4f}"
+            except (TypeError, ValueError):
+                return "n/a"
+        log(
+            f"[INFO] {symbol}: initial indicators "
+            f"close={_fmt(last_indicators.get('close'))}, "
+            f"ema20={_fmt(last_indicators.get('ema20'))}, "
+            f"ema50={_fmt(last_indicators.get('ema50'))}, "
+            f"rsi={_fmt(last_indicators.get('rsi'))}, "
+            f"atr={_fmt(last_indicators.get('atr'))}",
+            Fore.LIGHTBLACK_EX,
+        )
     portfolio_guidance = dict(target_meta) if isinstance(target_meta, dict) else {}
     extra_context_payload = extra_context if isinstance(extra_context, dict) else {}
     news_payload_payload = news_payload if isinstance(news_payload, dict) else None
