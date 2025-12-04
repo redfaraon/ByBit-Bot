@@ -188,6 +188,47 @@ DRAWDOWN_RULES: tuple[tuple[float, float, float, float], ...] = (
 )
 
 
+def _parse_env_list(raw: str | None, default: Sequence[str] | None) -> list[str]:
+    if not raw:
+        return list(default or [])
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, (list, tuple, set)):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+
+def _parse_env_map(raw: str | None, default: Mapping[str, Any] | None) -> dict[str, int]:
+    base = {str(key).strip(): int(value) for key, value in (default or {}).items() if value is not None}
+    if not raw:
+        return base
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            normalized_key = str(key).strip()
+            if not normalized_key:
+                continue
+            numeric = safe_int(value) if value is not None else None
+            if numeric is not None and numeric > 0:
+                base[normalized_key] = numeric
+        return base
+    for part in str(raw).split(","):
+        chunk = part.strip()
+        if ":" not in chunk:
+            continue
+        key, val = chunk.split(":", 1)
+        normalized_key = key.strip()
+        numeric = safe_int(val.strip())
+        if normalized_key and numeric is not None and numeric > 0:
+            base[normalized_key] = numeric
+    return base
+
+
 def _format_tz_suffix(dt: datetime.datetime) -> str:
     if not LOG_TZINFO:
         return ""
@@ -689,6 +730,15 @@ BASE_INDICATOR_CANDIDATES = [
     "vwma20",
     "supertrend",
 ]
+
+AI_INITIAL_TIMEFRAMES: list[str] = []
+AI_INITIAL_TF_DEPTHS: dict[str, int] = {}
+AI_INITIAL_INDICATOR_POOL: list[str] = list(BASE_INDICATOR_CANDIDATES)
+AI_INITIAL_EMA_COUNT: int = 2
+AI_INITIAL_EXTRA_INDICATOR_COUNT: int = 5
+AI_INITIAL_NEWS_PROVIDER: str = ""
+AI_INITIAL_NEWS_LIMIT: int = 0
+AI_NEEDS_TF_DEPTHS: dict[str, int] = {}
 
 BASE_TIMEFRAME_CANDIDATES = ["5m", "15m", "30m", "1h", "2h", "4h", "1d"]
 PAIR_TICKER_MAP = {pair: pair.split("/")[0].split(":")[0].upper() for pair in BASE_PAIR_CANDIDATES}
@@ -1925,6 +1975,17 @@ def _apply_indicator_to_df(df: pd.DataFrame, indicator_name: str) -> Optional[st
             col = "vol"
             df[col] = df["volume"]
             return col
+        if base == "bbands":
+            period = length or 20
+            col = f"bbands{period}"
+            middle = df["close"].rolling(period).mean()
+            std = df["close"].rolling(period).std()
+            df[col] = middle
+            upper = middle + std * 2
+            lower = middle - std * 2
+            df[f"{col}_upper"] = upper
+            df[f"{col}_lower"] = lower
+            return col
         if base == "supertrend":
             period = length or 10
             col = f"supertrend{period}"
@@ -2001,6 +2062,84 @@ def prepare_symbol_dataset(exchange, symbol: str, timeframes: list, indicators: 
     if news_cache and symbol in news_cache:
         dataset["news"] = news_cache[symbol]
     return dataset
+
+
+def _ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "timestamp" not in df.columns:
+        df = df.reset_index()
+        if "timestamp" not in df.columns and df.columns:
+            df = df.rename(columns={df.columns[0]: "timestamp"})
+    if "timestamp" in df.columns:
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        except Exception:
+            try:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+            except Exception:
+                pass
+    return df
+
+
+def _ensure_initial_indicators(
+    df: pd.DataFrame,
+    indicator_pool: Sequence[str],
+    ema_count: int,
+    extra_count: int,
+) -> list[str]:
+    selected: list[str] = []
+    remaining = []
+    for candidate in indicator_pool or []:
+        normalized = str(candidate).strip()
+        if not normalized:
+            continue
+        normalized_lower = normalized.lower()
+        if normalized_lower.startswith("ema"):
+            if len(selected) < ema_count:
+                col = _apply_indicator_to_df(df, normalized_lower)
+                if col and col not in selected:
+                    selected.append(col)
+            else:
+                remaining.append(normalized_lower)
+        else:
+            remaining.append(normalized_lower)
+    fallback_emas = ["ema20", "ema50", "ema100"]
+    for fallback in fallback_emas:
+        if len(selected) >= ema_count:
+            break
+        if fallback not in selected:
+            col = _apply_indicator_to_df(df, fallback)
+            if col:
+                selected.append(col)
+    extras: list[str] = []
+    for candidate in remaining:
+        if len(extras) >= extra_count:
+            break
+        normalized_lower = candidate.lower()
+        if normalized_lower.startswith("ema") or normalized_lower in {"volume", "vol"}:
+            continue
+        col = _apply_indicator_to_df(df, normalized_lower)
+        if col and col not in selected and col not in extras:
+            extras.append(col)
+    return selected + extras
+
+
+def _load_initial_dataframe(
+    exchange,
+    symbol: str,
+    tf: str,
+    df_primary: pd.DataFrame | None,
+    primary_frame: str,
+):
+    if tf == primary_frame and isinstance(df_primary, pd.DataFrame) and not df_primary.empty:
+        df_used = df_primary.copy()
+    else:
+        try:
+            df_used = fetch_df(exchange, symbol, tf)
+        except Exception as exc:
+            log(f"[WARN] Failed to fetch {tf} for initial context: {exc}", Fore.YELLOW)
+            return None
+    df_used = df_used.copy()
+    return _ensure_timestamp_column(df_used)
 
 
 def ai_update_universe(exchange, symbols, positions_map, equity, available_margin, universe_cache, news_digest=None):
@@ -2972,6 +3111,9 @@ def refresh_settings():
     global BREAKEVEN_ENABLED, BREAKEVEN_ATR_MULT, BREAKEVEN_BUFFER_ATR
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
+    global AI_INITIAL_TIMEFRAMES, AI_INITIAL_TF_DEPTHS, AI_INITIAL_INDICATOR_POOL
+    global AI_INITIAL_EMA_COUNT, AI_INITIAL_EXTRA_INDICATOR_COUNT
+    global AI_INITIAL_NEWS_PROVIDER, AI_INITIAL_NEWS_LIMIT, AI_NEEDS_TF_DEPTHS
     global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
     global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global AI_SECONDARY_BUDGET_START, AI_HARD_STOP_BUDGET
@@ -3313,6 +3455,30 @@ def refresh_settings():
     CONTEXT_STEP_30M = max(1, env_int("AI_CONTEXT_30M_STEP", 4))
     CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
 
+    base_tf = normalize_requested_timeframe(TIMEFRAME or "30m")
+    fallback_initial = [base_tf]
+    if "4h" not in fallback_initial:
+        fallback_initial.append("4h")
+    parsed_initial = []
+    for item in _parse_env_list(os.getenv("AI_INITIAL_TIMEFRAMES"), fallback_initial):
+        tf_norm = normalize_requested_timeframe(item, default=base_tf)
+        if tf_norm and tf_norm not in parsed_initial:
+            parsed_initial.append(tf_norm)
+    AI_INITIAL_TIMEFRAMES = parsed_initial or fallback_initial[:]
+    default_depths: dict[str, int] = {}
+    for tf in AI_INITIAL_TIMEFRAMES:
+        if tf == base_tf:
+            default_depths[tf] = int(DEFAULT_CONTEXT_30M)
+        elif tf == "4h":
+            default_depths[tf] = int(DEFAULT_CONTEXT_4H)
+        else:
+            default_depths[tf] = int(DEFAULT_CONTEXT_30M)
+    AI_INITIAL_TF_DEPTHS = _parse_env_map(os.getenv("AI_INITIAL_TF_DEPTHS"), default_depths)
+    pool_override = _parse_env_list(os.getenv("AI_INITIAL_INDICATOR_POOL"), BASE_INDICATOR_CANDIDATES)
+    AI_INITIAL_INDICATOR_POOL = [item.lower() for item in pool_override]
+    AI_INITIAL_EMA_COUNT = max(1, env_int("AI_INITIAL_EMA_COUNT", 2))
+    AI_INITIAL_EXTRA_INDICATOR_COUNT = max(0, env_int("AI_INITIAL_EXTRA_INDICATOR_COUNT", 5))
+
     support_tf_env = os.getenv("AI_SUPPORT_TIMEFRAMES")
     if support_tf_env:
         parsed_support_tf = None
@@ -3423,6 +3589,13 @@ def refresh_settings():
         NEEDS_SERIALIZE_DEFAULT_LIMIT = 8
     NEEDS_SERIALIZE_DEFAULT_LIMIT = max(5, NEEDS_SERIALIZE_DEFAULT_LIMIT)
 
+    default_needs_depths = {
+        "15m": NEEDS_SERIALIZE_DEFAULT_LIMIT,
+        "1h": NEEDS_SERIALIZE_DEFAULT_LIMIT,
+        "4h": NEEDS_SERIALIZE_DEFAULT_LIMIT,
+    }
+    AI_NEEDS_TF_DEPTHS = _parse_env_map(os.getenv("AI_NEEDS_TF_DEPTHS"), default_needs_depths)
+
     PAIR_CANDIDATE_LIMIT = env_int("PAIR_CANDIDATE_LIMIT", PAIR_CANDIDATE_LIMIT)
     PAIR_PREFETCH_LIMIT = env_int("PAIR_PREFETCH_LIMIT", PAIR_PREFETCH_LIMIT)
     try:
@@ -3435,6 +3608,8 @@ def refresh_settings():
     NEWS_PROVIDER = news_provider_env.strip().lower() or "hybrid"
     NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
+    AI_INITIAL_NEWS_PROVIDER = os.getenv("AI_INITIAL_NEWS_PROVIDER") or NEWS_PROVIDER
+    AI_INITIAL_NEWS_LIMIT = max(1, env_int("AI_INITIAL_NEWS_LIMIT", NEWS_ITEMS_LIMIT or 5))
     POSITION_MODE = (os.getenv("BYBIT_POSITION_MODE") or "oneway").strip().lower()
     HEDGE_MODE = POSITION_MODE in ("hedge", "hedged", "dual", "dual_side", "dual-side")
     ACTIVE_POSITION_MODE = POSITION_MODE
@@ -7214,8 +7389,9 @@ def _merge_news_payloads(base_symbol: str, payloads: Sequence[dict[str, Any]], l
 
 def get_news(symbol):
     base = symbol.split("/")[0].split(":")[0].upper()
-    limit = max(1, NEWS_ITEMS_LIMIT)
-    normalized_provider = (NEWS_PROVIDER or "hybrid").strip().lower()
+    limit = max(1, AI_INITIAL_NEWS_LIMIT or NEWS_ITEMS_LIMIT)
+    provider_source = AI_INITIAL_NEWS_PROVIDER or NEWS_PROVIDER
+    normalized_provider = (provider_source or "hybrid").strip().lower()
     payloads: list[dict[str, Any]] = []
     def _fetch_cc():
         return get_news_from_cryptocompare(base, limit)
@@ -10837,26 +11013,62 @@ def ai_decision(
     df_30m["ema50"] = ema(df_30m["close"],50)
     df_30m["rsi"] = rsi(df_30m["close"],14)
     df_30m["atr"] = atr(df_30m,14)
-    if not df_30m.empty:
-        last_indicators = df_30m.iloc[-1]
+    portfolio_guidance = dict(target_meta) if isinstance(target_meta, dict) else {}
+    extra_context_payload = extra_context if isinstance(extra_context, dict) else {}
+    news_payload_payload = news_payload if isinstance(news_payload, dict) else None
+
+    primary_initial_tf = AI_INITIAL_TIMEFRAMES[0] if AI_INITIAL_TIMEFRAMES else normalize_requested_timeframe(TIMEFRAME or "30m")
+    initial_frames_data: dict[str, list[dict[str, Any]]] = {}
+    indicator_columns_by_tf: dict[str, list[str]] = {}
+    for tf in AI_INITIAL_TIMEFRAMES:
+        df_tf = _load_initial_dataframe(exchange, symbol, tf, df_primary, primary_initial_tf)
+        if df_tf is None or df_tf.empty:
+            continue
+        indicator_columns = _ensure_initial_indicators(
+            df_tf,
+            AI_INITIAL_INDICATOR_POOL,
+            AI_INITIAL_EMA_COUNT,
+            AI_INITIAL_EXTRA_INDICATOR_COUNT,
+        )
+        indicator_columns_by_tf[tf] = indicator_columns
+        columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        for col in indicator_columns:
+            if col not in columns:
+                columns.append(col)
+        depth = max(1, int(AI_INITIAL_TF_DEPTHS.get(tf, AI_INITIAL_TF_DEPTHS.get(primary_initial_tf, int(DEFAULT_CONTEXT_30M)))))
+        trimmed = df_tf.tail(depth)
+        selected_columns = [col for col in columns if col in trimmed.columns]
+        if not selected_columns:
+            continue
+        initial_frames_data[tf] = _serialize_df(trimmed[selected_columns])
+    if not initial_frames_data and isinstance(df_30m, pd.DataFrame) and not df_30m.empty:
+        trimmed = df_30m.tail(int(DEFAULT_CONTEXT_30M))
+        selected = [col for col in ["timestamp", "open", "high", "low", "close", "volume"] if col in trimmed.columns]
+        initial_frames_data[primary_initial_tf] = _serialize_df(trimmed[selected])
+    higher_tf = initial_frames_data.get("4h", [])
+    context_counts = {
+        tf: len(initial_frames_data.get(tf, []))
+        for tf in AI_INITIAL_TIMEFRAMES
+    }
+    context_counts.setdefault("30m", len(initial_frames_data.get("30m", [])))
+    context_counts.setdefault("4h", len(higher_tf))
+
+    base_rows = initial_frames_data.get(primary_initial_tf) or higher_tf
+    latest_row = base_rows[-1] if base_rows else None
+    if latest_row:
+        columns_to_log = ["open", "high", "low", "close", "volume"]
+        columns_to_log.extend(indicator_columns_by_tf.get(primary_initial_tf, []))
         def _fmt(val):
             try:
                 return f"{float(val):.4f}"
             except (TypeError, ValueError):
                 return "n/a"
-        log(
-            f"[INFO] {symbol}: initial indicators "
-            f"close={_fmt(last_indicators.get('close'))}, "
-            f"ema20={_fmt(last_indicators.get('ema20'))}, "
-            f"ema50={_fmt(last_indicators.get('ema50'))}, "
-            f"rsi={_fmt(last_indicators.get('rsi'))}, "
-            f"atr={_fmt(last_indicators.get('atr'))}",
-            Fore.LIGHTBLACK_EX,
+        entries = ", ".join(
+            f"{col}={_fmt(latest_row.get(col))}"
+            for col in columns_to_log
+            if col in latest_row
         )
-    portfolio_guidance = dict(target_meta) if isinstance(target_meta, dict) else {}
-    extra_context_payload = extra_context if isinstance(extra_context, dict) else {}
-    news_payload_payload = news_payload if isinstance(news_payload, dict) else None
-    higher_tf = get_higher_tf(exchange, symbol, "4h")
+        log(f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}", Fore.LIGHTBLACK_EX)
 
     higher_trend_bias = None
     higher_trend_label = "неопределён"
@@ -10871,11 +11083,6 @@ def ai_decision(
             elif ema20_ht < ema50_ht:
                 higher_trend_bias = "sell"
                 higher_trend_label = "нисходящий"
-
-    context_counts = {
-        "30m": min(DEFAULT_CONTEXT_30M, len(df_30m)),
-        "4h": min(DEFAULT_CONTEXT_4H, len(higher_tf))
-    }
     def fallback_due_to(trigger: str, extra_notes: dict[str, Any] | None = None) -> dict[str, Any] | None:
         fallback_decision = _fallback_momentum_decision(symbol, df_30m, higher_trend_bias, current_position)
         if not fallback_decision:
@@ -10942,15 +11149,20 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             ema_slope = df_30m.iloc[-1]["ema20"] - df_30m.iloc[-3]["ema20"]
 
     def build_context():
-        tail_30m = df_30m.tail(context_counts["30m"]).reset_index()
-        if not tail_30m.empty:
-            tail_30m["timestamp"] = pd.to_datetime(tail_30m["timestamp"], utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            tf_30m = tail_30m[["timestamp","open","high","low","close","volume","ema20","ema50","rsi","atr"]].to_dict(orient="records")
-        else:
-            tf_30m = []
-        count_4h = min(context_counts["4h"], len(higher_tf))
-        tf_4h = higher_tf[-count_4h:] if count_4h else []
+        def _slice_context(tf_name: str, limit: int) -> list[dict[str, Any]]:
+            if not tf_name or limit <= 0:
+                return []
+            entries = initial_frames_data.get(tf_name, [])
+            return entries[-limit:] if entries else []
+
+        tf_30m = _slice_context("30m", context_counts.get("30m", 0))
+        tf_4h = _slice_context("4h", context_counts.get("4h", 0))
         context = {"tf_30m": tf_30m, "tf_4h": tf_4h}
+        initial_payload: dict[str, list[dict[str, Any]]] = {}
+        for tf_name in AI_INITIAL_TIMEFRAMES:
+            limit = context_counts.get(tf_name, len(initial_frames_data.get(tf_name, [])))
+            initial_payload[tf_name] = _slice_context(tf_name, limit)
+        context["initial_timeframes"] = initial_payload
         if position_payload:
             context["position"] = position_payload
         if open_orders:
@@ -11285,7 +11497,15 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 structured_need["timeframes"] = structured_timeframes
             if structured_indicators:
                 structured_need["indicators"] = structured_indicators
-            structured_need["limit"] = LOW_CONFIDENCE_SERIALIZE_LIMIT
+            selected_limits = [
+                AI_NEEDS_TF_DEPTHS.get(tf, NEEDS_SERIALIZE_DEFAULT_LIMIT)
+                for tf in (structured_timeframes or [])
+            ]
+            fallback_limit = max(
+                selected_limits
+                or [NEEDS_SERIALIZE_DEFAULT_LIMIT or LOW_CONFIDENCE_SERIALIZE_LIMIT or 8]
+            )
+            structured_need["limit"] = max(1, int(fallback_limit))
             needs.insert(0, structured_need)
             decision["needs"] = needs
             auto_low_confidence_needs_triggered = True

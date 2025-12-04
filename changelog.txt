@@ -1,3 +1,6 @@
+2025.12.02.4
+- Initial context now reports OHLC plus EMA/volume and five additional indicators (configurable via env), timeframes/depths are parameterized, needs-depth overrides obey new env map, and news limits/provider can be controlled for initial requests.
+
 2025.12.02.3
 - Logs now report the latest close/EMA20/EMA50/RSI/ATR before making an AI decision, improving indicator visibility.
 
