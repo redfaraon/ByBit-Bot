@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.02.3"
+BOT_VERSION = "2025.12.02.5"
 BOT_CHANGELOG = (
-    "Initial indicators (close/EMA20/EMA50/RSI/ATR) are now logged before every AI decision for better traceability; trailing stop request handling remains restricted."
+    "Added regime detection (TREND_UP / TREND_DOWN / FLAT / COUNTER), wired it into ai_decision, and extended logs with regime and active indicator set for each symbol."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -186,6 +186,79 @@ DRAWDOWN_RULES: tuple[tuple[float, float, float, float], ...] = (
     (40.0, 0.50, 0.65, 0.60),
     (30.0, 0.70, 0.75, 0.80),
 )
+
+
+def detect_regime(
+    df_primary: pd.DataFrame | None,
+    higher_tf_rows: Sequence[Mapping[str, Any]] | None,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Classify current market regime as TREND_UP / TREND_DOWN / FLAT / COUNTER.
+
+    Returns (mode, metrics) where mode is one of the strings above and
+    metrics contains helper values (ema spread, atr ratio, rsi, etc.).
+    """
+    mode = "FLAT"
+    metrics: dict[str, Any] = {}
+
+    if df_primary is None or df_primary.empty:
+        return mode, metrics
+
+    last_row = df_primary.iloc[-1]
+    close_val = safe_float(last_row.get("close"))
+    ema20_val = safe_float(last_row.get("ema20"))
+    ema50_val = safe_float(last_row.get("ema50"))
+    rsi_val = safe_float(last_row.get("rsi"))
+    atr_val = safe_float(last_row.get("atr"))
+
+    if not (math.isfinite(close_val or 0) and math.isfinite(ema20_val or 0) and math.isfinite(ema50_val or 0)):
+        return mode, metrics
+
+    ema_spread = (ema20_val - ema50_val) if ema20_val is not None and ema50_val is not None else 0.0
+    ema_spread_pct = abs(ema_spread) / close_val if close_val else 0.0
+    atr_ratio = (atr_val or 0.0) / close_val if close_val and atr_val is not None else 0.0
+
+    metrics.update(
+        {
+            "close": close_val,
+            "ema20": ema20_val,
+            "ema50": ema50_val,
+            "ema_spread_pct": ema_spread_pct,
+            "atr_ratio": atr_ratio,
+            "rsi": rsi_val,
+        }
+    )
+
+    higher_bias = None
+    if higher_tf_rows:
+        last_higher = higher_tf_rows[-1]
+        ema20_ht = safe_float(last_higher.get("ema20"))
+        ema50_ht = safe_float(last_higher.get("ema50"))
+        if ema20_ht is not None and ema50_ht is not None:
+            if ema20_ht > ema50_ht:
+                higher_bias = "up"
+            elif ema20_ht < ema50_ht:
+                higher_bias = "down"
+        metrics["higher_ema20"] = ema20_ht
+        metrics["higher_ema50"] = ema50_ht
+
+    flat_spread_threshold = 0.0025  # 0.25%
+    flat_atr_threshold = 0.01      # 1% дневной волатильности
+
+    if ema_spread_pct < flat_spread_threshold and atr_ratio < flat_atr_threshold:
+        mode = "FLAT"
+    else:
+        local_trend_up = ema_spread > 0
+        if higher_bias == "up" and local_trend_up:
+            mode = "TREND_UP"
+        elif higher_bias == "down" and not local_trend_up:
+            mode = "TREND_DOWN"
+        else:
+            mode = "COUNTER"
+
+    metrics["mode"] = mode
+    metrics["higher_bias"] = higher_bias
+    return mode, metrics
 
 
 def _parse_env_list(raw: str | None, default: Sequence[str] | None) -> list[str]:
@@ -11070,19 +11143,18 @@ def ai_decision(
         )
         log(f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}", Fore.LIGHTBLACK_EX)
 
+    regime_mode, regime_metrics = detect_regime(df_30m, higher_tf)
     higher_trend_bias = None
     higher_trend_label = "неопределён"
-    if higher_tf:
-        last_higher = higher_tf[-1]
-        ema20_ht = last_higher.get("ema20")
-        ema50_ht = last_higher.get("ema50")
-        if ema20_ht is not None and ema50_ht is not None:
-            if ema20_ht > ema50_ht:
-                higher_trend_bias = "buy"
-                higher_trend_label = "восходящий"
-            elif ema20_ht < ema50_ht:
-                higher_trend_bias = "sell"
-                higher_trend_label = "нисходящий"
+    if regime_metrics.get("higher_ema20") is not None and regime_metrics.get("higher_ema50") is not None:
+        ema20_ht = regime_metrics.get("higher_ema20")
+        ema50_ht = regime_metrics.get("higher_ema50")
+        if ema20_ht > ema50_ht:
+            higher_trend_bias = "buy"
+            higher_trend_label = "восходящий"
+        elif ema20_ht < ema50_ht:
+            higher_trend_bias = "sell"
+            higher_trend_label = "нисходящий"
     def fallback_due_to(trigger: str, extra_notes: dict[str, Any] | None = None) -> dict[str, Any] | None:
         fallback_decision = _fallback_momentum_decision(symbol, df_30m, higher_trend_bias, current_position)
         if not fallback_decision:
@@ -11148,6 +11220,12 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         if len(df_30m) >= 3 and pd.notna(df_30m.iloc[-1].get("ema20")) and pd.notna(df_30m.iloc[-3].get("ema20")):
             ema_slope = df_30m.iloc[-1]["ema20"] - df_30m.iloc[-3]["ema20"]
 
+    selected_indicator_names = indicator_columns_by_tf.get(primary_initial_tf, [])
+    log(
+        f"[INFO] {symbol}: regime={regime_mode} indicators={','.join(selected_indicator_names) or 'none'}",
+        Fore.LIGHTBLACK_EX,
+    )
+
     def build_context():
         def _slice_context(tf_name: str, limit: int) -> list[dict[str, Any]]:
             if not tf_name or limit <= 0:
@@ -11163,6 +11241,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             limit = context_counts.get(tf_name, len(initial_frames_data.get(tf_name, [])))
             initial_payload[tf_name] = _slice_context(tf_name, limit)
         context["initial_timeframes"] = initial_payload
+        context["regime"] = regime_metrics
         if position_payload:
             context["position"] = position_payload
         if open_orders:
@@ -11208,10 +11287,11 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "базовый_тренд": {
                     "рекомендуемое_действие": "open" if ema_trend_bias else "skip",
                     "сторона": ema_trend_bias,
-                    "описание": (
-                        f"Доминирующий тренд {ema_trend_label} по EMA20/EMA50 на 30m."
-                        f" На 4h тренд {higher_trend_label}. При их совпадении отдавай предпочтение входу."
-                    ),
+                     "описание": (
+                         f"Доминирующий тренд {ema_trend_label} по EMA20/EMA50 на 30m."
+                         f" На 4h тренд {higher_trend_label}. Текущий режим: {regime_mode}."
+                         f" При TREND_UP/TREND_DOWN отдавай предпочтение входу по тренду, при COUNTER будь осторожнее, при FLAT — сокращай цели и полагайся на осцилляторы."
+                     ),
                     "наклон_ema20": ema_slope
                 },
                 "контртренд": {
