@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.02.5"
+BOT_VERSION = "2025.12.02.6"
 BOT_CHANGELOG = (
-    "Added regime detection (TREND_UP / TREND_DOWN / FLAT / COUNTER), wired it into ai_decision, and extended logs with regime and active indicator set for each symbol."
+    "Regime now drives per-symbol SL/TP multipliers and notional scaling; logs show regime, indicators, and applied risk tweaks. Initial context preserves a minimal 30m slice during token trimming."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -11137,6 +11137,37 @@ def ai_decision(
 
     base_rows = initial_frames_data.get(primary_initial_tf) or higher_tf
     latest_row = base_rows[-1] if base_rows else None
+    regime_mode, regime_metrics = detect_regime(df_30m, higher_tf)
+    sl_mult_local = SL_ATR
+    tp_mult_local = TP_ATR
+    notional_scale = 1.0
+    if regime_mode == "FLAT":
+        tp_mult_local = TP_ATR * 0.75
+        notional_scale = 0.7
+    elif regime_mode == "COUNTER":
+        sl_mult_local = SL_ATR * 0.9
+        tp_mult_local = TP_ATR * 0.65
+        notional_scale = 0.55
+    elif regime_mode in {"TREND_UP", "TREND_DOWN"}:
+        tp_mult_local = TP_ATR * 1.1
+        notional_scale = 1.0
+
+    cfg_local = target_meta.setdefault("config", {}) if isinstance(target_meta, dict) else {}
+    cfg_local["sl_atr"] = sl_mult_local
+    cfg_local["tp_atr"] = tp_mult_local
+
+    base_notional = (
+        target_meta.get("notional_pct")
+        or (target_meta.get("target") or {}).get("notional_pct")
+    )
+    if base_notional is not None:
+        try:
+            scaled_notional = float(base_notional) * notional_scale
+            if math.isfinite(scaled_notional) and scaled_notional > 0:
+                target_meta["notional_pct"] = scaled_notional
+        except (TypeError, ValueError):
+            pass
+
     if latest_row:
         columns_to_log = ["open", "high", "low", "close", "volume"]
         columns_to_log.extend(indicator_columns_by_tf.get(primary_initial_tf, []))
@@ -11150,9 +11181,12 @@ def ai_decision(
             for col in columns_to_log
             if col in latest_row
         )
-        log(f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}", Fore.LIGHTBLACK_EX)
+        log(
+            f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}; "
+            f"regime={regime_mode} sl_atr={sl_mult_local:.2f} tp_atr={tp_mult_local:.2f} notional_scale={notional_scale:.2f}",
+            Fore.LIGHTBLACK_EX,
+        )
 
-    regime_mode, regime_metrics = detect_regime(df_30m, higher_tf)
     higher_trend_bias = None
     higher_trend_label = "неопределён"
     if regime_metrics.get("higher_ema20") is not None and regime_metrics.get("higher_ema50") is not None:
@@ -11273,8 +11307,9 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "risk_pct": RISK_PCT,
                 "configured_leverage": LEVERAGE,
                 "min_notional_usdt": MIN_NOTIONAL_USDT,
-                "sl_atr_mult": SL_ATR,
-                "tp_atr_mult": TP_ATR
+                "sl_atr_mult": sl_mult_local,
+                "tp_atr_mult": tp_mult_local,
+                "notional_scale": notional_scale,
             },
             "капитал": equity,
             "индикаторы": current_context,

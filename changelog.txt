@@ -313,5 +313,8 @@ Changelog (newest first)
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
 
 
+2025.12.02.6
+- Regime now adjusts per-symbol SL/TP multipliers and notional scaling (trend keeps full size, flat/counter tightens targets and reduces size), logs include regime/indicators/risk tweaks, and initial context keeps a minimal 30m slice under token trimming.
+
 2025.12.02.5
 - Regime detection (TREND_UP/TREND_DOWN/FLAT/COUNTER) is computed algorithmically, logged with each symbol, and passed into ai_decision along with the active indicator set for better model guidance.
