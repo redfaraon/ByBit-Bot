@@ -313,6 +313,9 @@ Changelog (newest first)
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
 
 
+2025.12.04.1
+- Initial AI context now always starts from a single prioritized indicator list in .env (up to eight indicators per TF), sends OHLCV plus this set where possible, and trims tokens by reducing timeframe depth first and then dropping the lowest-priority indicators while keeping core EMAs.
+
 2025.12.02.6
 - Regime now adjusts per-symbol SL/TP multipliers and notional scaling (trend keeps full size, flat/counter tightens targets and reduces size), logs include regime/indicators/risk tweaks, and initial context keeps a minimal 30m slice under token trimming.
 

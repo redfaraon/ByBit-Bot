@@ -2181,14 +2181,14 @@ def _ensure_initial_indicators(
             break
         if fallback not in selected:
             col = _apply_indicator_to_df(df, fallback)
-            if col:
+            if col and col not in selected:
                 selected.append(col)
     extras: list[str] = []
     for candidate in remaining:
         if len(extras) >= extra_count:
             break
         normalized_lower = candidate.lower()
-        if normalized_lower.startswith("ema") or normalized_lower in {"volume", "vol"}:
+        if normalized_lower in {"volume", "vol"}:
             continue
         col = _apply_indicator_to_df(df, normalized_lower)
         if col and col not in selected and col not in extras:
@@ -11135,6 +11135,18 @@ def ai_decision(
         min(DEFAULT_CONTEXT_4H, len(higher_tf)) if higher_tf else 0,
     )
 
+    active_indicator_columns_by_tf: dict[str, list[str]] = {
+        tf_name: list(cols) for tf_name, cols in indicator_columns_by_tf.items()
+    }
+    indicator_priority: list[str] = list(indicator_columns_by_tf.get(primary_initial_tf, []))
+    if not indicator_priority:
+        for cols in indicator_columns_by_tf.values():
+            if cols:
+                indicator_priority = list(cols)
+                break
+    indicator_trim_index = len(indicator_priority)
+    MIN_INDICATORS_PER_TF = 2
+
     base_rows = initial_frames_data.get(primary_initial_tf) or higher_tf
     latest_row = base_rows[-1] if base_rows else None
     regime_mode, regime_metrics = detect_regime(df_30m, higher_tf)
@@ -11274,7 +11286,30 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             if not tf_name or limit <= 0:
                 return []
             entries = initial_frames_data.get(tf_name, [])
-            return entries[-limit:] if entries else []
+            if not entries:
+                return []
+            active_cols = {
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            }
+            active_cols.update(
+                active_indicator_columns_by_tf.get(
+                    tf_name, indicator_columns_by_tf.get(tf_name, [])
+                )
+                or []
+            )
+            sliced = entries[-limit:] if limit > 0 else entries
+            trimmed_rows: list[dict[str, Any]] = []
+            for row in sliced:
+                if not isinstance(row, dict):
+                    trimmed_rows.append(row)
+                else:
+                    trimmed_rows.append({k: v for k, v in row.items() if k in active_cols})
+            return trimmed_rows
 
         tf_30m = _slice_context("30m", context_counts.get("30m", 0))
         tf_4h = _slice_context("4h", context_counts.get("4h", 0))
@@ -11378,6 +11413,7 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         return json.dumps(prompt, ensure_ascii=False)
 
     def prepare_messages(stage="initial", extra=None, bias=False):
+        nonlocal indicator_trim_index
         nonlocal current_context
         prev_counts = context_counts.copy()
         trimmed = False
@@ -11411,6 +11447,24 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 new_val = max(MIN_CONTEXT_4H, context_counts["4h"] - CONTEXT_STEP_4H)
                 if new_val < context_counts["4h"]:
                     context_counts["4h"] = new_val
+                    trimmed_step = True
+            # If depth trimming is exhausted, progressively drop lowest-priority indicators.
+            if not trimmed_step and indicator_trim_index > MIN_INDICATORS_PER_TF:
+                removed_indicator = None
+                while indicator_trim_index > MIN_INDICATORS_PER_TF and not removed_indicator:
+                    candidate = indicator_priority[indicator_trim_index - 1]
+                    indicator_trim_index -= 1
+                    if not candidate:
+                        continue
+                    removed_somewhere = False
+                    for tf_name, cols in active_indicator_columns_by_tf.items():
+                        if candidate in cols and len(cols) > MIN_INDICATORS_PER_TF:
+                            cols.remove(candidate)
+                            removed_somewhere = True
+                    if removed_somewhere:
+                        removed_indicator = candidate
+                        trim_sources.append(f"ind:{candidate}")
+                if removed_indicator:
                     trimmed_step = True
             if not trimmed_step:
                 break
