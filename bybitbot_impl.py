@@ -11123,8 +11123,17 @@ def ai_decision(
         tf: len(initial_frames_data.get(tf, []))
         for tf in AI_INITIAL_TIMEFRAMES
     }
-    context_counts.setdefault("30m", len(initial_frames_data.get("30m", [])))
-    context_counts.setdefault("4h", len(higher_tf))
+    # Гарантируем, что 30m контекст не обнуляется: используем фактическую длину df_30m,
+    # но не более дефолтного лимита.
+    context_counts.setdefault(
+        "30m",
+        min(DEFAULT_CONTEXT_30M, len(df_30m)) if isinstance(df_30m, pd.DataFrame) else 0,
+    )
+    # Для 4h по умолчанию используем ограничение DEFAULT_CONTEXT_4H, если данных больше.
+    context_counts.setdefault(
+        "4h",
+        min(DEFAULT_CONTEXT_4H, len(higher_tf)) if higher_tf else 0,
+    )
 
     base_rows = initial_frames_data.get(primary_initial_tf) or higher_tf
     latest_row = base_rows[-1] if base_rows else None
