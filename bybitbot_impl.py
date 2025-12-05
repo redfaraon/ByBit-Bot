@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.05.1"
+BOT_VERSION = "2025.12.05.2"
 BOT_CHANGELOG = (
-    "Fixed AI prompt context so position summaries and margin data are always supplied to the model, and refreshed the graph utility with timeline PnL, flexible state dirs, and clearer signal coverage logs."
+    "Fixed execute_extra_orders to use the current position payload when summarizing size (prevents NameError on raw_position_payload) and keeps protection/extra-order flows alive across symbols."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -10731,6 +10731,7 @@ def execute_extra_orders(
             "has_position": bool(size_val),
         }
 
+    raw_position_payload = current_position if isinstance(current_position, dict) else None
     position_summary = _summarize_position(raw_position_payload)
     position_side = ((current_position or {}).get("side") or "").lower()
     # Determine market category (spot/linear/inverse)

@@ -1,3 +1,6 @@
+2025.12.05.2
+- execute_extra_orders now builds the prompt summary from the current position payload (no more raw_position_payload NameError), keeping manage/extra-order flows alive across symbols.
+
 2025.12.05.1
 - Fixed the AI decision prompt context so margin/position summaries are always present (resolving the `position_summary` NameError) and ensured master-position sharing logic feeds every request.
 - analyze_graphs.py now discovers state files in both `assets` and script directories (plus `BYBITBOT_STATE_DIR`), plots closed PnL on a proper datetime axis, and logs coverage for the signal/action distribution chart.
