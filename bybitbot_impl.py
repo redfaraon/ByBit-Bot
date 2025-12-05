@@ -116,6 +116,9 @@ LOG_EXTRA_SETTLE_POSITIONS = str(os.getenv("LOG_EXTRA_SETTLE_POSITIONS", "")).st
 GRAPH_OUTPUT_DIR = SCRIPT_DIR / "assets" / "graphs"
 GRAPH_SEND_INTERVAL_DEFAULT = 60
 
+MASTER_PROMPT_POSITION_CACHE: dict[str, dict[str, Any]] = {}
+MASTER_PROMPT_SHARE = os.getenv("MASTER_PROMPT_SHARE", "1").strip().lower() not in {"0", "false", "no"}
+
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
     raw_value = os.getenv(env_name)
@@ -4006,6 +4009,17 @@ def _append_user_bybit_log(user_id: str | int | None, text: str) -> None:
     except Exception:
         # keep non-fatal
         pass
+
+
+def _select_prompt_position(symbol: str, summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not MASTER_PROMPT_SHARE:
+        return summary or {"has_position": False}
+    cached = MASTER_PROMPT_POSITION_CACHE.get(symbol)
+    if cached:
+        return cached
+    value = summary or {"has_position": False}
+    MASTER_PROMPT_POSITION_CACHE[symbol] = value
+    return value
 
 
 def _append_trade_log(text: str) -> None:
@@ -11171,6 +11185,12 @@ def ai_decision(
         selected = [col for col in ["timestamp", "open", "high", "low", "close", "volume"] if col in trimmed.columns]
         initial_frames_data[primary_initial_tf] = _serialize_df(trimmed[selected])
     higher_tf = initial_frames_data.get("4h", [])
+    missing_initial_tfs = [tf for tf in normalized_initial_tfs if tf not in initial_frames_data]
+    if missing_initial_tfs:
+        log(
+            f"[WARN] {symbol}: initial timeframe(s) unavailable {','.join(missing_initial_tfs)}",
+            Fore.YELLOW,
+        )
     context_counts = {
         tf: len(initial_frames_data.get(tf, []))
         for tf in normalized_initial_tfs
@@ -11411,14 +11431,50 @@ def ai_decision(
         if margin_ratio is not None:
             account_payload["available_margin_pct"] = margin_ratio
 
-        position_for_prompt = position_summary or {"has_position": False}
+        position_for_prompt = _select_prompt_position(symbol, position_summary)
         higher_tf_hints = [f"higher_tf:{tf}" for tf in (normalized_initial_tfs or [])]
         lower_tf_hints = [
             f"lower_tf:{tf}"
             for tf in AI_NEEDS_TF_DEPTHS.keys()
             if tf and tf not in (normalized_initial_tfs or [])
         ]
-        indicator_hints = sorted(set(AI_INITIAL_INDICATOR_POOL or BASE_INDICATOR_CANDIDATES))
+        additional_indicator_hints = [
+            "ema10",
+            "ema75",
+            "ema100",
+            "ema150",
+            "ema300",
+            "sma20",
+            "sma50",
+            "sma100",
+            "sma200",
+            "rsi7",
+            "rsi21",
+            "stoch21",
+            "macd_signal",
+            "macd_hist",
+            "atr7",
+            "atr21",
+            "bbands50",
+            "bbands100",
+            "vwma50",
+            "vwma100",
+            "supertrend10",
+            "supertrend20",
+            "adx14",
+            "adx20",
+            "cci20",
+            "cci50",
+            "obv",
+            "mfi14",
+            "roc10",
+            "tema20",
+            "keltner20",
+            "dmi14",
+        ]
+        indicator_hints = sorted(
+            set((AI_INITIAL_INDICATOR_POOL or []) + additional_indicator_hints)
+        )
         prompt = {
             "symbol": symbol,
             "account": account_payload,
@@ -11431,14 +11487,18 @@ def ai_decision(
                     "action": "open|close|manage|skip",
                     "side": "buy|sell|flat",
                     "confidence": "0..1",
-                    "reason": "??????",
-                    "orders": "???????????: ?????? ??????? (?????? CCXT, amountPercent ??????????????)",
-                    "needs": "???????????: ?????? ???????? ????????????",
+                    "reason": "short explanation in Russian or English",
+                    "orders": "optional list of CCXT-style orders (type, side, amount/percent, price, params)",
+                    "needs": "optional list of extra context requests",
                 },
+                "needs_rules": [
+                    "Request only new context that is not already provided in context.initial_timeframes.",
+                    "Specify concrete items (e.g., \"higher_tf:2h\", \"indicator:rsi21\", \"news:macro\").",
+                ],
                 "notes": [
-                    "????????? ??????????????? ?????? ??? ????????? ?? ?????????.",
-                    "???? ??????? needs, ?? ???????? ??, ??? ??? ???? ? context.initial_timeframes.",
-                    "??? ????????? ??????????? ??????? ????????? reduceOnly ???, ??? ?????????.",
+                    "Make decisions based solely on the provided data; no strategy templates are pre-baked.",
+                    "Prefer amountPercent when sizing orders; engine will scale to each account.",
+                    "Use reduceOnly=true when closing or trimming existing positions.",
                 ],
             },
             "available_data": {
@@ -12321,6 +12381,8 @@ def run_cycle():
         reason = f"✅ Обнаружен новый коммит {short_hash}, перезапускаем бота для загрузки обновлений."
         _restart_with_latest_code(reason)
     ex = init_exchange()
+    if MASTER_PROMPT_SHARE:
+        MASTER_PROMPT_POSITION_CACHE.clear()
     
     def _execute_limit_fallback(symbol: str, pending_info: dict[str, Any] | None, open_orders_list: list[dict[str, Any]] | None) -> bool:
         """Execute a market fallback if limit entry wasn't filled within timeout.
