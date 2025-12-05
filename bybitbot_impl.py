@@ -11090,11 +11090,22 @@ def ai_decision(
     extra_context_payload = extra_context if isinstance(extra_context, dict) else {}
     news_payload_payload = news_payload if isinstance(news_payload, dict) else None
 
-    primary_initial_tf = AI_INITIAL_TIMEFRAMES[0] if AI_INITIAL_TIMEFRAMES else normalize_requested_timeframe(TIMEFRAME or "30m")
+    primary_initial_tf = (
+        normalize_requested_timeframe(AI_INITIAL_TIMEFRAMES[0])
+        if AI_INITIAL_TIMEFRAMES
+        else normalize_requested_timeframe(TIMEFRAME or "30m")
+    )
+    normalized_initial_tfs: list[str] = []
+    for tf in AI_INITIAL_TIMEFRAMES:
+        normalized_tf = normalize_requested_timeframe(tf)
+        if normalized_tf and normalized_tf not in normalized_initial_tfs:
+            normalized_initial_tfs.append(normalized_tf)
+    if not normalized_initial_tfs and primary_initial_tf:
+        normalized_initial_tfs.append(primary_initial_tf)
     initial_frames_data: dict[str, list[dict[str, Any]]] = {}
     indicator_columns_by_tf: dict[str, list[str]] = {}
-    for tf in AI_INITIAL_TIMEFRAMES:
-        df_tf = _load_initial_dataframe(exchange, symbol, tf, df_primary, primary_initial_tf)
+    for tf in normalized_initial_tfs:
+        df_tf = _load_initial_dataframe(exchange, symbol, tf, df_primary, primary_initial_tf or tf)
         if df_tf is None or df_tf.empty:
             continue
         indicator_columns = _ensure_initial_indicators(
@@ -11108,7 +11119,18 @@ def ai_decision(
         for col in indicator_columns:
             if col not in columns:
                 columns.append(col)
-        depth = max(1, int(AI_INITIAL_TF_DEPTHS.get(tf, AI_INITIAL_TF_DEPTHS.get(primary_initial_tf, int(DEFAULT_CONTEXT_30M)))))
+        depth = max(
+            1,
+            int(
+                AI_INITIAL_TF_DEPTHS.get(
+                    tf,
+                    AI_INITIAL_TF_DEPTHS.get(
+                        primary_initial_tf or tf,
+                        int(DEFAULT_CONTEXT_30M),
+                    ),
+                )
+            ),
+        )
         trimmed = df_tf.tail(depth)
         selected_columns = [col for col in columns if col in trimmed.columns]
         if not selected_columns:
@@ -11121,19 +11143,30 @@ def ai_decision(
     higher_tf = initial_frames_data.get("4h", [])
     context_counts = {
         tf: len(initial_frames_data.get(tf, []))
-        for tf in AI_INITIAL_TIMEFRAMES
+        for tf in normalized_initial_tfs
     }
-    # Гарантируем, что 30m контекст не обнуляется: используем фактическую длину df_30m,
-    # но не более дефолтного лимита.
-    context_counts.setdefault(
-        "30m",
-        min(DEFAULT_CONTEXT_30M, len(df_30m)) if isinstance(df_30m, pd.DataFrame) else 0,
-    )
-    # Для 4h по умолчанию используем ограничение DEFAULT_CONTEXT_4H, если данных больше.
-    context_counts.setdefault(
-        "4h",
-        min(DEFAULT_CONTEXT_4H, len(higher_tf)) if higher_tf else 0,
-    )
+    if not context_counts and primary_initial_tf:
+        context_counts[primary_initial_tf] = len(initial_frames_data.get(primary_initial_tf, []))
+
+    trim_order = list(normalized_initial_tfs)
+    if not trim_order and primary_initial_tf:
+        trim_order.append(primary_initial_tf)
+    min_context_by_tf: dict[str, int] = {}
+    step_context_by_tf: dict[str, int] = {}
+    if trim_order:
+        first_tf = trim_order[0]
+        min_context_by_tf[first_tf] = MIN_CONTEXT_30M
+        step_context_by_tf[first_tf] = CONTEXT_STEP_30M
+        if len(trim_order) > 1:
+            second_tf = trim_order[1]
+            min_context_by_tf[second_tf] = MIN_CONTEXT_4H
+            step_context_by_tf[second_tf] = CONTEXT_STEP_4H
+        for extra_tf in trim_order[2:]:
+            min_context_by_tf.setdefault(extra_tf, MIN_CONTEXT_4H)
+            step_context_by_tf.setdefault(extra_tf, CONTEXT_STEP_4H)
+
+    for tf_name in trim_order:
+        context_counts.setdefault(tf_name, len(initial_frames_data.get(tf_name, [])))
 
     active_indicator_columns_by_tf: dict[str, list[str]] = {
         tf_name: list(cols) for tf_name, cols in indicator_columns_by_tf.items()
@@ -11281,6 +11314,15 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         Fore.LIGHTBLACK_EX,
     )
 
+    primary_context_key = trim_order[0] if trim_order else (primary_initial_tf or None)
+    secondary_context_key = (
+        trim_order[1] if len(trim_order) > 1 else ("4h" if "4h" in initial_frames_data else None)
+    )
+    if primary_context_key and primary_context_key not in context_counts:
+        context_counts[primary_context_key] = len(initial_frames_data.get(primary_context_key, []))
+    if secondary_context_key and secondary_context_key not in context_counts:
+        context_counts[secondary_context_key] = len(initial_frames_data.get(secondary_context_key, []))
+
     def build_context():
         def _slice_context(tf_name: str, limit: int) -> list[dict[str, Any]]:
             if not tf_name or limit <= 0:
@@ -11311,11 +11353,12 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                     trimmed_rows.append({k: v for k, v in row.items() if k in active_cols})
             return trimmed_rows
 
-        tf_30m = _slice_context("30m", context_counts.get("30m", 0))
-        tf_4h = _slice_context("4h", context_counts.get("4h", 0))
+        tf_30m = _slice_context(primary_context_key, context_counts.get(primary_context_key, 0)) if primary_context_key else []
+        tf_4h = _slice_context(secondary_context_key, context_counts.get(secondary_context_key, 0)) if secondary_context_key else []
         context = {"tf_30m": tf_30m, "tf_4h": tf_4h}
         initial_payload: dict[str, list[dict[str, Any]]] = {}
-        for tf_name in AI_INITIAL_TIMEFRAMES:
+        frame_keys = normalized_initial_tfs or ([primary_initial_tf] if primary_initial_tf else [])
+        for tf_name in frame_keys:
             limit = context_counts.get(tf_name, len(initial_frames_data.get(tf_name, [])))
             initial_payload[tf_name] = _slice_context(tf_name, limit)
         context["initial_timeframes"] = initial_payload
@@ -11438,16 +11481,16 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 break
             trimmed_step = False
             trim_reason = "hard" if exceeded_hard else "soft"
-            if context_counts["30m"] > MIN_CONTEXT_30M:
-                new_val = max(MIN_CONTEXT_30M, context_counts["30m"] - CONTEXT_STEP_30M)
-                if new_val < context_counts["30m"]:
-                    context_counts["30m"] = new_val
-                    trimmed_step = True
-            if not trimmed_step and context_counts["4h"] > MIN_CONTEXT_4H:
-                new_val = max(MIN_CONTEXT_4H, context_counts["4h"] - CONTEXT_STEP_4H)
-                if new_val < context_counts["4h"]:
-                    context_counts["4h"] = new_val
-                    trimmed_step = True
+            for tf_name in trim_order:
+                current_limit = context_counts.get(tf_name, 0)
+                min_limit = min_context_by_tf.get(tf_name, 1)
+                step_value = step_context_by_tf.get(tf_name, 1)
+                if current_limit > min_limit:
+                    new_val = max(min_limit, current_limit - step_value)
+                    if new_val < current_limit:
+                        context_counts[tf_name] = new_val
+                        trimmed_step = True
+                        break
             # If depth trimming is exhausted, progressively drop lowest-priority indicators.
             if not trimmed_step and indicator_trim_index > MIN_INDICATORS_PER_TF:
                 removed_indicator = None
@@ -11477,10 +11520,15 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         trimmed = trimmed or (context_counts != prev_counts)
         if trimmed:
             reasons_text = "/".join(sorted(set(trim_sources))) if trim_sources else "unknown"
+            counts_display = ", ".join(
+                f"{context_counts.get(tf, 0)}?{tf}" for tf in trim_order if tf
+            )
+            if not counts_display and primary_context_key:
+                counts_display = f"{context_counts.get(primary_context_key, 0)}?{primary_context_key}"
             trim_text = (
-                f"ℹ️ контекст обрезан ({reasons_text}) до "
-                f"{context_counts['30m']}?30m и {context_counts['4h']}?4h "
-                f"из-за лимита ({tokens} токенов, этап: {stage}) для {symbol}"
+                f" ???????? ??????? ({reasons_text}) ?? "
+                f"{counts_display or 'n/a'} "
+                f"??-?? ?????? ({tokens} ???????, ????: {stage}) ??? {symbol}"
             )
             log(trim_text, Fore.MAGENTA)
             send_tg(trim_text)
