@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.02.6"
+BOT_VERSION = "2025.12.05.0"
 BOT_CHANGELOG = (
-    "Regime now drives per-symbol SL/TP multipliers and notional scaling; logs show regime, indicators, and applied risk tweaks. Initial context preserves a minimal 30m slice during token trimming."
+    "Master bot now owns all OpenAI calls and shares cached per-symbol decisions, prompts/logs are ASCII again, and the graph tool plots equity by date with fallback-driven PnL and signal stats."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -88,6 +88,7 @@ def _configure_state_paths() -> None:
     global SUPPORT_SANDBOX_ROOT
     global SUPPORT_SANDBOX_STATE_FILE
     global COMMANDS_HELP_STATE_FILE
+    global MASTER_DECISIONS_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
         STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else REPO_ROOT)
@@ -106,6 +107,7 @@ def _configure_state_paths() -> None:
     SUPPORT_SANDBOX_ROOT = STATE_DIR / "support_sandboxes"
     SUPPORT_SANDBOX_STATE_FILE = STATE_DIR / "support_sandboxes.json"
     COMMANDS_HELP_STATE_FILE = STATE_DIR / "commands_help_state.json"
+    MASTER_DECISIONS_FILE = STATE_DIR / "master_decisions.json"
     try:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -118,6 +120,18 @@ GRAPH_SEND_INTERVAL_DEFAULT = 60
 
 MASTER_PROMPT_POSITION_CACHE: dict[str, dict[str, Any]] = {}
 MASTER_PROMPT_SHARE = os.getenv("MASTER_PROMPT_SHARE", "1").strip().lower() not in {"0", "false", "no"}
+DEFAULT_CONTEXT_30M = int(os.getenv("AI_DEFAULT_CONTEXT_30M", "120"))
+DEFAULT_CONTEXT_4H = int(os.getenv("AI_DEFAULT_CONTEXT_4H", "48"))
+MIN_CONTEXT_30M = int(os.getenv("AI_MIN_CONTEXT_30M", "16"))
+MIN_CONTEXT_4H = int(os.getenv("AI_MIN_CONTEXT_4H", "8"))
+CONTEXT_STEP_30M = max(1, int(os.getenv("AI_CONTEXT_STEP_30M", "8")))
+CONTEXT_STEP_4H = max(1, int(os.getenv("AI_CONTEXT_STEP_4H", "4")))
+MIN_INDICATORS_PER_TF = max(1, int(os.getenv("AI_MIN_INDICATORS_PER_TF", "3")))
+MASTER_DECISIONS_SHARE = os.getenv("MASTER_DECISIONS_SHARE", "1").strip().lower() not in {"0", "false", "no"}
+MASTER_PROMPT_MASTER_ID = os.getenv("MASTER_PROMPT_MASTER_ID")
+MASTER_DECISIONS_FILE: Optional[Path] = None
+MASTER_DECISION_CACHE: dict[str, Any] = {}
+MASTER_DECISION_META: dict[str, Any] = {}
 
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
@@ -398,6 +412,85 @@ def _append_user_bybit_log(user_id: str | None, text: str) -> None:
             fp.write(text + "\n")
     except Exception:
         pass
+
+def _select_prompt_position(symbol: str, summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not MASTER_PROMPT_SHARE:
+        return summary or {"has_position": False}
+    cached = MASTER_PROMPT_POSITION_CACHE.get(symbol)
+    if cached:
+        return cached
+    value = summary or {"has_position": False}
+    MASTER_PROMPT_POSITION_CACHE[symbol] = value
+    return value
+
+
+def _load_master_decision_store() -> dict[str, Any]:
+    if not (MASTER_DECISIONS_SHARE and MASTER_DECISIONS_FILE):
+        return {}
+    try:
+        with MASTER_DECISIONS_FILE.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log(f"[WARN] Failed to read {MASTER_DECISIONS_FILE}: {exc}", Fore.YELLOW)
+        return {}
+    decisions = payload.get("decisions")
+    if isinstance(decisions, dict):
+        return decisions
+    return {}
+
+
+def _save_master_decision_store(decisions: Mapping[str, Any], *, meta: Mapping[str, Any] | None = None) -> None:
+    if not (MASTER_DECISIONS_SHARE and MASTER_DECISIONS_FILE):
+        return
+    payload: dict[str, Any] = {"decisions": decisions}
+    if meta:
+        payload.update(meta)
+    payload.setdefault("updated_at", datetime.datetime.utcnow().isoformat() + "Z")
+    try:
+        MASTER_DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with MASTER_DECISIONS_FILE.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        log(f"[WARN] Failed to persist master decision cache: {exc}", Fore.YELLOW)
+
+
+def _cache_master_decision(symbol: str, decision: Mapping[str, Any]) -> None:
+    if not MASTER_DECISIONS_SHARE:
+        return
+    key = _canonical_decision_symbol(symbol) or symbol
+    if not key:
+        return
+    MASTER_DECISION_CACHE[key] = json.loads(json.dumps(decision))
+
+
+def _persist_master_decisions(meta: Mapping[str, Any] | None = None) -> None:
+    if not (MASTER_DECISIONS_SHARE and MASTER_DECISION_CACHE):
+        return
+    _save_master_decision_store(MASTER_DECISION_CACHE, meta=meta)
+
+
+def _load_master_decisions_runtime() -> dict[str, Any]:
+    if MASTER_DECISION_CACHE:
+        return MASTER_DECISION_CACHE
+    loaded = _load_master_decision_store()
+    if loaded:
+        MASTER_DECISION_CACHE.update(loaded)
+    return loaded
+
+
+def _pull_master_decision(symbol: str) -> dict[str, Any] | None:
+    if not MASTER_DECISIONS_SHARE:
+        return None
+    key = _canonical_decision_symbol(symbol) or symbol
+    if not key:
+        return None
+    cache = _load_master_decisions_runtime()
+    entry = cache.get(key)
+    if not entry:
+        return None
+    return json.loads(json.dumps(entry))
 
 LIMIT_ORDER_FALLBACK_SECONDS = float(os.getenv("LIMIT_ORDER_FALLBACK_SECONDS", "30"))
 LIMIT_ORDER_PENDING: dict[tuple[str, str], dict[str, Any]] = {}
@@ -11325,12 +11418,13 @@ def ai_decision(
 
     # >>>>>>>>>>>> system_msg обновлён <<<<<<<<<<<<
     system_msg = (
-        "Ты — ИИ-аналитик для сбалансированной интрадей-стратегии. "
-        "Мы передаём тебе данные по одному инструменту: OHLCV на нескольких таймфреймах, индикаторы, новости, сведения об открытой позиции и ордера. "
-        "Ты самостоятельно решаешь: открыть новую позицию, изменить/удержать/закрыть текущую или пропустить сигнал. "
-        "Если данных недостаточно, верни поле 'needs' с конкретным списком недостающего контекста (timeframes, indicators, news и т.д.). "
-        "Ответ ВСЕГДА должен быть строго в формате JSON без свободного текста."
+        "You are an intraday multi-symbol trading assistant. "
+        "You receive structured context only (OHLCV per timeframe, derived indicators, sentiment, regime hints, risk settings, open orders, anonymized position summary, and optional news items). "
+        "Decide whether to open, close, manage, or skip positions and describe any protective orders required. "
+        "When more data is necessary, reply with a needs array listing exact gaps (timeframes, indicators, news categories, etc.). "
+        "Always answer with a strict JSON object that follows the declared response_format schema."
     )
+
 
     ema_trend_bias = None
     ema_trend_label = "неопределён"
@@ -11364,7 +11458,7 @@ def ai_decision(
     if secondary_context_key and secondary_context_key not in context_counts:
         context_counts[secondary_context_key] = len(initial_frames_data.get(secondary_context_key, []))
 
-    def build_context():
+    def build_context(position_summary=position_summary):
         def _slice_context(tf_name: str, limit: int) -> list[dict[str, Any]]:
             if not tf_name or limit <= 0:
                 return []
@@ -11410,7 +11504,7 @@ def ai_decision(
             context["open_orders"] = open_orders
         return context
 
-    def build_prompt(extra=None, bias=False):
+    def build_prompt(extra=None, bias=False, position_summary=position_summary):
         provider_mode = (NEWS_PROVIDER or "hybrid").strip().lower()
         if provider_mode in NEWS_PROVIDER_ALIAS_CC:
             news_desc = "CryptoCompare API (fallback: RSS feeds)"
@@ -11518,8 +11612,10 @@ def ai_decision(
             prompt["requested_context"] = extra_context_payload
         if news_payload_payload:
             prompt["news_focus"] = news_payload_payload
-        if extra: prompt["доп_контекст"] = extra
-        if bias: prompt["режим"] = "чуть более уверенный после допконтекста"
+        if extra:
+            prompt["extra_notes"] = extra
+        if bias:
+            prompt["bias_hint"] = "maintain existing bias to reduce flip-flops"
         return json.dumps(prompt, ensure_ascii=False)
 
     def prepare_messages(stage="initial", extra=None, bias=False):
@@ -11593,9 +11689,9 @@ def ai_decision(
             if not counts_display and primary_context_key:
                 counts_display = f"{context_counts.get(primary_context_key, 0)}?{primary_context_key}"
             trim_text = (
-                f" контекст обрезан ({reasons_text}) до "
+                f"Context trimmed ({reasons_text}) to "
                 f"{counts_display or 'n/a'} "
-                f"из-за лимита ({tokens} токенов, этап: {stage}) для {symbol}"
+                f"due to token limit ({tokens} tokens, stage: {stage}) for {symbol}"
             )
             log(trim_text, Fore.MAGENTA)
             send_tg(trim_text)
@@ -12352,6 +12448,11 @@ def run_cycle():
     global AUTO_MARGIN_SCALE_RATIO
     global AUTO_MARGIN_CONFIDENCE_MULT
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
+    is_master_user = (
+        (not MASTER_DECISIONS_SHARE)
+        or (MASTER_PROMPT_MASTER_ID is None)
+        or (str(active_user_id) == str(MASTER_PROMPT_MASTER_ID))
+    )
     user_tag = f"[user={active_user_id}]"
 
     def log_user(msg: str, *, color: str = Fore.LIGHTBLACK_EX) -> None:
@@ -12383,6 +12484,10 @@ def run_cycle():
     ex = init_exchange()
     if MASTER_PROMPT_SHARE:
         MASTER_PROMPT_POSITION_CACHE.clear()
+    if MASTER_DECISIONS_SHARE:
+        MASTER_DECISION_CACHE.clear()
+        if not is_master_user:
+            _load_master_decisions_runtime()
     
     def _execute_limit_fallback(symbol: str, pending_info: dict[str, Any] | None, open_orders_list: list[dict[str, Any]] | None) -> bool:
         """Execute a market fallback if limit entry wasn't filled within timeout.
@@ -13416,20 +13521,41 @@ def run_cycle():
             if initial_payload:
                 initial_payload["symbol"] = sym
 
-            dec = ai_decision(
-                sym,
-                df,
-                equity,
-                available_margin,
-                ex,
-                current_position=current_position,
-                open_orders=open_orders_symbol,
-                extra_context=extra_serialized,
-                target_meta=symbol_meta,
-                news_payload=news_payload_symbol,
-                initial_decision=initial_payload,
-                priority_symbol=has_priority_exposure,
-            )
+            dec = None
+            master_decision_used = False
+            if MASTER_DECISIONS_SHARE and not is_master_user:
+                dec = _pull_master_decision(sym)
+                if dec:
+                    master_decision_used = True
+                    log(
+                        f"[AI SHARE] {sym}: using master decision action={dec.get('action')} reason={(dec.get('reason') or '')[:120]}",
+                        Fore.LIGHTBLACK_EX,
+                    )
+                else:
+                    log(
+                        f"[WARN] {sym}: master decision unavailable; skipping AI call for follower user {active_user_id}",
+                        Fore.YELLOW,
+                    )
+                    dec = {
+                        "symbol": sym,
+                        "action": "skip",
+                        "reason": "master decision unavailable for follower run",
+                    }
+            if dec is None:
+                dec = ai_decision(
+                    sym,
+                    df,
+                    equity,
+                    available_margin,
+                    ex,
+                    current_position=current_position,
+                    open_orders=open_orders_symbol,
+                    extra_context=extra_serialized,
+                    target_meta=symbol_meta,
+                    news_payload=news_payload_symbol,
+                    initial_decision=initial_payload,
+                    priority_symbol=has_priority_exposure,
+                )
 
             if not dec:
                 if initial_payload:
@@ -13455,6 +13581,8 @@ def run_cycle():
                         "action": default_action,
                         "reason": default_reason,
                     }
+            if MASTER_DECISIONS_SHARE and is_master_user and not master_decision_used and dec:
+                _cache_master_decision(sym, dec)
             decision_confidence_raw = dec.get("confidence")
             if decision_confidence_raw is not None:
                 try:
@@ -14539,6 +14667,8 @@ def run_cycle():
                 _append_user_bybit_log(USER_ID, detail_msg)
             except Exception:
                 pass
+    if MASTER_DECISIONS_SHARE and is_master_user:
+        _persist_master_decisions({"user_id": active_user_id})
 
     final_positions_map, final_positions_count = fetch_positions_snapshot(ex)
     final_positions_available = final_positions_count is not None

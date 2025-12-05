@@ -1,3 +1,8 @@
+2025.12.05.0
+- Master bot is now the sole OpenAI caller: its per-symbol decisions are cached to disk and reused by follower bots while prompts/logs regained readable ASCII text (fixes the missing `position_summary` NameError).
+- analyze_graphs.py plots equity against actual timestamps with date grids, reuses equity data for PnL when needed, and falls back to ai_decisions.log for signal distribution so all three charts render even without results_state.json.
+- Added master-decision persistence controls and warning logs so follower cycles skip AI calls gracefully whenever no fresh master snapshot is available.
+
 2025.12.02.4
 - Initial context now reports OHLC plus EMA/volume and five additional indicators (configurable via env), timeframes/depths are parameterized, needs-depth overrides obey new env map, and news limits/provider can be controlled for initial requests.
 

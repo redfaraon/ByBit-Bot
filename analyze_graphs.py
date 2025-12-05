@@ -4,19 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import math
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
-import base64
 
 try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # type: ignore[import]
+    import matplotlib.dates as mdates  # type: ignore[import]
 except Exception as exc:  # pragma: no cover - protects from missing dependencies
     plt = None  # type: ignore[assignment]
+    mdates = None  # type: ignore[assignment]
     print(f"[WARN] matplotlib unavailable: {exc}", file=sys.stderr)
 
 # 1x1 PNG placeholder (white) for environments without matplotlib
@@ -69,6 +72,58 @@ def _save_plot_with_formats(output_dir: Path, base_name: str) -> None:
         print(f"[INFO] Saved {base_name} plot to {png_path}")
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            try:
+                return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            except Exception:
+                return None
+        try:
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _load_signal_history_from_ai_log(path: Path, limit: int = 1000) -> List[Dict[str, Any]]:
+    if not path or not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        print(f"[WARN] Failed to read {path}: {exc}", file=sys.stderr)
+        return []
+    if limit > 0:
+        lines = lines[-limit:]
+    history: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        decision = payload.get("decision") or {}
+        if not isinstance(decision, dict):
+            continue
+        history.append(decision)
+    return history
+
+
 def read_json(path: Path) -> Any:
     if not path.exists():
         return None
@@ -88,17 +143,21 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
     if not history:
         _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
         return
-    equities = []
-    availables = []
+    equities: List[float] = []
+    availables: List[float] = []
+    timestamps: List[datetime] = []
     for entry in history:
         equity = entry.get("equity") or entry.get("equity_total")
-        available = entry.get("available") or entry.get("available_margin")
-        if equity is None:
+        ts = entry.get("timestamp") or entry.get("time") or entry.get("ts")
+        parsed_ts = _parse_timestamp(ts)
+        if equity is None or parsed_ts is None:
             continue
         try:
             equities.append(float(equity))
         except Exception:
             continue
+        timestamps.append(parsed_ts)
+        available = entry.get("available") or entry.get("available_margin")
         try:
             availables.append(float(available) if available is not None else math.nan)
         except Exception:
@@ -107,35 +166,57 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
         _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
         return
     try:
-        plt.figure(figsize=(12, 4))
-        plt.plot(equities, label="Equity")
+        fig, ax = plt.subplots(figsize=(12, 4))
+        x_values = timestamps if timestamps else list(range(len(equities)))
+        ax.plot(x_values, equities, label="Equity")
         if any(math.isfinite(x) for x in availables):
-            plt.plot(availables, label="Available", linestyle="--")
-        plt.title("Equity / Available Margin")
-        plt.xlabel("Samples")
-        plt.ylabel("USDT")
-        plt.legend()
-        plt.tight_layout()
+            ax.plot(x_values, availables, label="Available", linestyle="--")
+        ax.set_title("Equity / Available Margin")
+        ax.set_ylabel("USDT")
+        if timestamps and mdates is not None:
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+            ax.set_xlabel("Time")
+            ax.grid(axis="x", linestyle=":", alpha=0.4)
+            fig.autofmt_xdate()
+        else:
+            ax.set_xlabel("Samples")
+        ax.legend()
+        fig.tight_layout()
         _save_plot_with_formats(output_dir, "equity")
-        plt.close()
+        plt.close(fig)
     except Exception as exc:
         print(f"[WARN] Failed to plot equity graph: {exc}", file=sys.stderr)
         return
 
 
-def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
+def plot_pnl(history: List[Dict[str, Any]], output_dir: Path, fallback_history: List[Dict[str, Any]] | None = None) -> None:
     if plt is None:
         print("[WARN] Matplotlib not available; using minimal placeholder for PnL.")
         _write_fallback_png(output_dir, "pnl.png")
         return
+    if not history and fallback_history:
+        history = fallback_history
     if not history:
         _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
         return
     closed_pnls = []
     unrealized = []
     for entry in history:
-        closed = entry.get("closed_pnl") or entry.get("closedPnL")
-        unreal = entry.get("unrealized")
+        closed = (
+            entry.get("closed_pnl")
+            or entry.get("closedPnL")
+            or entry.get("realized")
+            or entry.get("realized_pnl")
+            or entry.get("realizedPnl")
+        )
+        unreal = (
+            entry.get("unrealized")
+            or entry.get("unrealized_pnl")
+            or entry.get("unrealizedPnl")
+        )
         try:
             closed_pnls.append(float(closed) if closed is not None else math.nan)
         except Exception:
@@ -164,11 +245,13 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path) -> None:
         return
 
 
-def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path) -> None:
+def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path, *, fallback_log: Path | None = None) -> None:
     if plt is None:
         print("[WARN] Matplotlib not available; using minimal placeholder for signal distribution.")
         _write_fallback_png(output_dir, "signals.png")
         return
+    if not history and fallback_log:
+        history = _load_signal_history_from_ai_log(fallback_log)
     if not history:
         _save_placeholder(output_dir, "signals.png", "Signal distribution")
         return
@@ -235,18 +318,20 @@ def main() -> int:
 
         equity_data = read_json(equity_path)
         if isinstance(equity_data, dict):
-            history = equity_data.get("history") or equity_data.get("entries") or []
+            equity_history = equity_data.get("history") or equity_data.get("entries") or []
         else:
-            history = equity_data or []
-        plot_equity(history, args.output)
+            equity_history = equity_data or []
+        plot_equity(equity_history, args.output)
 
         results_data = read_json(results_path)
         if isinstance(results_data, dict):
-            history = results_data.get("history") or results_data.get("entries") or []
+            results_history = results_data.get("history") or results_data.get("entries") or []
         else:
-            history = results_data or []
-        plot_pnl(history, args.output)
-        plot_signal_distribution(history, args.output)
+            results_history = results_data or []
+        plot_pnl(results_history, args.output, fallback_history=equity_history)
+
+        ai_log_path = next((d / "ai_decisions.log" for d in candidate_dirs if (d / "ai_decisions.log").exists()), state_dir / "ai_decisions.log")
+        plot_signal_distribution(results_history, args.output, fallback_log=ai_log_path)
 
         return 0
     except Exception as exc:  # pragma: no cover - ensures CLI is resilient
