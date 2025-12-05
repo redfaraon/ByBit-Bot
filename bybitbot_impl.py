@@ -9594,12 +9594,11 @@ def _evaluate_position_protection(position_payload: dict[str, Any] | None, order
         except (TypeError, ValueError):
             continue
         if entry_price is not None and math.isfinite(entry_price):
-            if is_long and stop_val < entry_price - 1e-9:
-                has_stop_loss = True
-            elif not is_long and stop_val > entry_price + 1e-9:
+            if (is_long and stop_val < entry_price - 1e-9) or (not is_long and stop_val > entry_price + 1e-9):
                 has_stop_loss = True
             else:
-                # Stop is on the profitable side; treat as take-profit equivalent.
+                # Stop is on the profitable side; it still protects capital, so count as stop + (bonus) take.
+                has_stop_loss = True
                 has_take_profit = True or has_take_profit
         else:
             # Without entry price, treat any stop as protection to avoid false negatives.
