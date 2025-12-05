@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.05.2"
+BOT_VERSION = "2025.12.05.3"
 BOT_CHANGELOG = (
-    "Fixed execute_extra_orders to use the current position payload when summarizing size (prevents NameError on raw_position_payload) and keeps protection/extra-order flows alive across symbols."
+    "Changelog cleaned up: release entries now stay in chronological order with commit/date metadata for recent versions."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 

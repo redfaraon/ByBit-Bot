@@ -1,18 +1,32 @@
-2025.12.05.2
+Changelog (newest first)
+
+2025.12.05.3 (2025-12-05, commit pending)
+- Sorted the changelog chronologically, removed duplicate sections, and added commit/date metadata for recent releases.
+
+2025.12.05.2 (2025-12-05, commit 8040030)
 - execute_extra_orders now builds the prompt summary from the current position payload (no more raw_position_payload NameError), keeping manage/extra-order flows alive across symbols.
 
-2025.12.05.1
+2025.12.05.1 (2025-12-05, commit 3de8cf9)
 - Fixed the AI decision prompt context so margin/position summaries are always present (resolving the `position_summary` NameError) and ensured master-position sharing logic feeds every request.
 - analyze_graphs.py now discovers state files in both `assets` and script directories (plus `BYBITBOT_STATE_DIR`), plots closed PnL on a proper datetime axis, and logs coverage for the signal/action distribution chart.
+- Initial AI context now normalizes configured timeframes, only loads those slices (two for intraday) and trims their depths in order of priority, with log messages showing the actual TF counts; indicator trimming still kicks in after depth limits. 30m/4h hard-coding removed.
+- `.env` tuned for balanced intraday style: primary TF 1h with secondary 4h, deeper histories (72/36 bars), and an eight-indicator priority list `[ema20, ema50, ema200, vwma20, atr14, rsi14, macd, stoch14]` shared between BASE and initial pools; needs-depths updated to 16/10/8 bars.
 
-2025.12.05.0
+2025.12.05.0 (2025-12-05, commit b82a4bd)
 - Master bot is now the sole OpenAI caller: its per-symbol decisions are cached to disk and reused by follower bots while prompts/logs regained readable ASCII text (fixes the missing `position_summary` NameError).
 - analyze_graphs.py plots equity against actual timestamps with date grids, reuses equity data for PnL when needed, and falls back to ai_decisions.log for signal distribution so all three charts render even without results_state.json.
 - Added master-decision persistence controls and warning logs so follower cycles skip AI calls gracefully whenever no fresh master snapshot is available.
 
-2025.12.02.4
-- Initial context now reports OHLC plus EMA/volume and five additional indicators (configurable via env), timeframes/depths are parameterized, needs-depth overrides obey new env map, and news limits/provider can be controlled for initial requests.
+2025.12.04.1 (2025-12-04, commit n/a)
+- Initial AI context now always starts from a single prioritized indicator list in .env (up to eight indicators per TF), sends OHLCV plus this set where possible, and trims tokens by reducing timeframe depth first and then dropping the lowest-priority indicators while keeping core EMAs.
 
+2025.12.02.6 (2025-12-02, commit n/a)
+- Regime now adjusts per-symbol SL/TP multipliers and notional scaling (trend keeps full size, flat/counter tightens targets and reduces size), logs include regime/indicators/risk tweaks, and initial context keeps a minimal 30m slice under token trimming.
+
+2025.12.02.5 (2025-12-02, commit n/a)
+- Regime detection (TREND_UP/TREND_DOWN/FLAT/COUNTER) is computed algorithmically, logged with each symbol, and passed into ai_decision along with the active indicator set for better model guidance.
+
+2025.12.02.4 (2025-12-02, commit n/a)
 2025.12.02.3
 - Logs now report the latest close/EMA20/EMA50/RSI/ATR before making an AI decision, improving indicator visibility.
 
@@ -323,17 +337,3 @@ Changelog (newest first)
 2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
-
-
-2025.12.05.1
-- Initial AI context now normalizes configured timeframes, only loads those slices (two for intraday) and trims their depths in order of priority, with log messages showing the actual TF counts; indicator trimming still kicks in after depth limits. 30m/4h hard-coding removed.
-- `.env` tuned for balanced intraday style: primary TF 1h with secondary 4h, deeper histories (72/36 bars), and an eight-indicator priority list `[ema20, ema50, ema200, vwma20, atr14, rsi14, macd, stoch14]` shared between BASE and initial pools; needs-depths updated to 16/10/8 bars.
-
-2025.12.04.1
-- Initial AI context now always starts from a single prioritized indicator list in .env (up to eight indicators per TF), sends OHLCV plus this set where possible, and trims tokens by reducing timeframe depth first and then dropping the lowest-priority indicators while keeping core EMAs.
-
-2025.12.02.6
-- Regime now adjusts per-symbol SL/TP multipliers and notional scaling (trend keeps full size, flat/counter tightens targets and reduces size), logs include regime/indicators/risk tweaks, and initial context keeps a minimal 30m slice under token trimming.
-
-2025.12.02.5
-- Regime detection (TREND_UP/TREND_DOWN/FLAT/COUNTER) is computed algorithmically, logged with each symbol, and passed into ai_decision along with the active indicator set for better model guidance.
