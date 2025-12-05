@@ -11526,9 +11526,9 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
             if not counts_display and primary_context_key:
                 counts_display = f"{context_counts.get(primary_context_key, 0)}?{primary_context_key}"
             trim_text = (
-                f" ???????? ??????? ({reasons_text}) ?? "
+                f" контекст обрезан ({reasons_text}) до "
                 f"{counts_display or 'n/a'} "
-                f"??-?? ?????? ({tokens} ???????, ????: {stage}) ??? {symbol}"
+                f"из-за лимита ({tokens} токенов, этап: {stage}) для {symbol}"
             )
             log(trim_text, Fore.MAGENTA)
             send_tg(trim_text)
