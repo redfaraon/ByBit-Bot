@@ -11273,22 +11273,13 @@ def ai_decision(
     open_orders = open_orders or []
 
     # >>>>>>>>>>>> ИСПРАВЛЕНО: system_msg как тройная строка без \u-escape <<<<<<<<<<<<
-    system_msg = """Ты — ИИ-помощник по трейдингу в сбалансированном интрадей стиле. 
-Работаешь по сценарию: (1) если тренды 30m и 4h совпадают и RSI не в экстремумах — входи по тренду; 
-(2) если 30m показывает зарождающийся разворот против слабого тренда на 4h — допускается контртренд с короткой целью; 
-(3) skip используется только при реальном конфликте сигналов или явной неопределённости. 
-Обязательно анализируй EMA20/EMA50, RSI(14), ATR(14) на 30m и 4h, формируй понятный риск/идею. 
-Если уверенность < 70% или сигналы расходятся — сначала запроси дополнительные данные через поле 'needs' 
-(доступно: higher_tf:<tf>, funding, open_interest, news, а также {"timeframes":["1h"],"indicators":[{"indicator":"ema","length":55}, "atr14"]}), и только после доп. проверки выбирай конечное действие. 
-Если позиция уже открыта, не открывай её заново: оцени необходимость частичного сокращения, закрытия или удержания. 
-Если по символу есть активные лимитные/стоп-ордера (open_orders), не дублируй их без пересмотра. 
-Для отмены/замены ордеров передавай cancel_orders и replace_orders. 
-Для частичных закрытий, дополнительных лимитов/стопов, трейлингов и других операций используй массив 'orders', 
-описывая ордера в стиле CCXT (type, side, amount/percent, price, params). 
-Если выбираешь action="skip", обязательно укажи причину, опираясь на показания этих индикаторов. 
-Ответ строго в формате JSON без текста.
-Decide decisively. Always include a numeric "confidence" between 0 and 1 and target values >=0.70 when signals align. If confidence would fall below the threshold, request the missing context via "needs" with concrete items instead of hesitating. Make recommendations with clear reasoning."""
-    # >>>>>>>>>>>> конец исправления <<<<<<<<<<<<
+    system_msg = (
+        "?? ? ??-???????? ??? ???????????????? ????????-?????????. "
+        "?? ???????? ???? ?????? ?? ?????? ???????????: OHLCV ?? ?????????? ???????????, ??????????, ???????, ??????? ??????? ? ???????? ??????. "
+        "?? ??? ???????, ??? ??????: ??????? ???????, ???????? ???????????? (???????? ??????? / ???????? / ??????????? ??????), ?????????? ??? ????????? ??? ?????????? ??????. "
+        "???? ?????? ????????????, ????? ???? 'needs' ? ?????????? ???????? ??????????????? ????????? (timeframes, indicators, news ? ?.?.), ??????? ???? ?????. "
+        "????? ?????? ?????? ???? ?????? ? ??????? JSON-??????? ??? ??????? ??????."
+    )
 
     ema_trend_bias = None
     ema_trend_label = "неопределён"
@@ -11377,8 +11368,8 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         else:
             news_desc = "CryptoCompare + RSS headlines"
         prompt = {
-            "символ": symbol,
-            "финансы": {
+            "symbol": symbol,
+            "account": {
                 "equity_total": equity,
                 "available_margin": available_margin,
                 "risk_pct": RISK_PCT,
@@ -11388,62 +11379,34 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
                 "tp_atr_mult": tp_mult_local,
                 "notional_scale": notional_scale,
             },
-            "капитал": equity,
-            "индикаторы": current_context,
-            "текущая_позиция": position_payload or {"статус": "нет позиции"},
-            "открытые_ордера": open_orders,
-            "как_создавать_ордеры": [
-                "Возвращай массив 'orders', если нужно выставить дополнительные заявки.",
-                "Пример: orders=[{\"type\":\"limit\",\"side\":\"sell\",\"amount\":0.001,\"price\":111500,\"reduceOnly\":true,\"note\":\"частичный тейк\"}].",
-                "Для частичного закрытия можно указать amountPercent вместо amount; trailing_stop передавай через params (например, {'trailingStop':50}).",
-                "Учитывай open_orders (см. поле 'open_orders'): избегай дублирования существующих лимитов/стопов.",
-                "Для обновления тейков/стопов используй cancel_orders или replace_orders (сначала укажи id заявки, затем опиши новый ордер)."
-            ],
-            "сценарий": {
-                "алгоритм": [
-                    "1) Проверь тренды 30m/4h и RSI.",
-                    "2) Если уверенность <70% или сигналы расходятся — запроси needs (higher_tf:<tf>, funding, open_interest, news).",
-                    "3) После получения дополнительных данных выбери окончательное действие."
+            "context": current_context,
+            "position": position_payload or {"note": "no position"},
+            "open_orders": open_orders,
+            "regime": regime_metrics,
+            "instructions": {
+                "style": "balanced intraday",
+                "goal": "?? ?????? ?????? ??????: ??????? ???????, ????????/????????/??????? ???????????? ??? ?????????? ??????.",
+                "response_format": {
+                    "action": "open | close | manage | skip",
+                    "side": "buy | sell | flat",
+                    "confidence": "????? 0..1",
+                    "reason": "??????? ?????????? ?? ???????",
+                    "orders": "???????????: ?????? ??????? ? ????? CCXT (type, side, amount/percent, price, params)",
+                    "needs": "???????????: ?????? ???????? ???????????? (timeframes, indicators, news ? ?.?.)",
+                },
+                "needs_rules": [
+                    "?????????? ?????? ??? ????????, ???????? ??? ? context.initial_timeframes ??? ??? ?????? ? prompt.",
+                    "?????????? needs ???, ????? ?? ????? ???? ????????????? ? ????????? ??????????.",
                 ],
-                "базовый_тренд": {
-                    "рекомендуемое_действие": "open" if ema_trend_bias else "skip",
-                    "сторона": ema_trend_bias,
-                     "описание": (
-                         f"Доминирующий тренд {ema_trend_label} по EMA20/EMA50 на 30m."
-                         f" На 4h тренд {higher_trend_label}. Текущий режим: {regime_mode}."
-                         f" При TREND_UP/TREND_DOWN отдавай предпочтение входу по тренду, при COUNTER будь осторожнее, при FLAT — сокращай цели и полагайся на осцилляторы."
-                     ),
-                    "наклон_ema20": ema_slope
-                },
-                "контртренд": {
-                    "условие": "RSI выходит из экстремума 30m, а ATR падает",
-                    "напоминание": "если 4h тренд сильный, уменьши размер и ставь плотный SL"
-                },
-                "пороговые_значения": {
-                    "long": {"rsi_30m": "<=55", "rsi_4h": "<=60"},
-                    "short": {"rsi_30m": ">=45", "rsi_4h": ">=40"},
-                    "atr": "избегай входа, если текущий ATR выше среднего за 14?1.8"
-                },
-                "skip": "используй только при конфликте трендов или резком росте ATR/новостях"
             },
-            "доступные_данные": {
-                "higher_tf": ["higher_tf:4h", "higher_tf:1h", "higher_tf:30m"],
+            "available_data": {
+                "higher_tf": higher_tf_hints,
                 "funding": "fetchFundingRate",
                 "open_interest": "fetchOpenInterestHistory",
-                "news": news_desc
+                "news": news_desc,
             },
-            "если_неуверен": {
-                "action": "open" if ema_trend_bias else "skip",
-                "side": ema_trend_bias,
-                "reason": (
-                    "следуем доминирующему тренду с умеренным риском после запроса needs"
-                    if ema_trend_bias else "недостаточно уверенности — запроси needs"
-                ),
-                "до_решения": "обязательно запроси дополнительные данные через needs перед финальным выбором",
-                "sl_atr": SL_ATR,
-                "tp_atr": TP_ATR
-            }
         }
+
         if portfolio_guidance:
             prompt["portfolio_guidance"] = portfolio_guidance
         if extra_context_payload:
