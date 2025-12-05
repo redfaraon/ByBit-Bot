@@ -1,5 +1,8 @@
 Changelog (newest first)
 
+2025.12.05.4 (2025-12-05, commit pending)
+- reduce-only extra orders now flip to the closing side (buy for shorts, sell for longs) before hitting Bybit so "same side as current position" rejections vanish.
+
 2025.12.05.3 (2025-12-05, commit pending)
 - Sorted the changelog chronologically, removed duplicate sections, and added commit/date metadata for recent releases.
 

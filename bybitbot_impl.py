@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.05.3"
+BOT_VERSION = "2025.12.05.4"
 BOT_CHANGELOG = (
-    "Changelog cleaned up: release entries now stay in chronological order with commit/date metadata for recent versions."
+    "Reduce-only extra orders now flip to the appropriate closing side so we stop hitting 'same side as current position' errors."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -13761,6 +13761,12 @@ def run_cycle():
                         elif has_position and position_side and not same_direction:
                             allow_order = True
                     if allow_order:
+                        if reduce_only_flag and position_side:
+                            desired_close_side = "buy" if position_side in ("short", "sell") else "sell"
+                            if not order_side or order_side == position_side:
+                                order["side"] = desired_close_side
+                            elif order_side != desired_close_side:
+                                order["side"] = desired_close_side
                         filtered_orders.append(order)
                     else:
                         summary = f"{order_side.upper()} {order.get('type') or 'order'}"
