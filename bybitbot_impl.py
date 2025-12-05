@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.05.4"
+BOT_VERSION = "2025.12.05.5"
 BOT_CHANGELOG = (
-    "Reduce-only extra orders now flip to the appropriate closing side so we stop hitting 'same side as current position' errors."
+    "Expanded results_state diagnostics so closed-order counts and IDs are visible per cycle; launcher now reads version from the changelog instead of a hardcoded constant."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -15160,6 +15160,13 @@ def run_cycle():
             else:
                 results_lines.append("📆 Ежесуточный PnL (%): недостаточно данных.")
 
+            if closed_order_details:
+                sample_ids = [str(detail.get("id") or "") for detail in closed_order_details[:5]]
+                log(
+                    f"[RESULTS] closed_order_details count={len(closed_order_details)} sample_ids={', '.join(sample_ids)}",
+                    Fore.LIGHTBLACK_EX,
+                )
+
             reported_ids = set(results_state.get("closed_order_ids") or [])
             new_orders: list[dict[str, Any]] = []
             new_keys: list[str] = []
@@ -15170,6 +15177,11 @@ def run_cycle():
                 new_orders.append(detail)
                 new_keys.append(key)
             if new_orders:
+                sample_new_ids = [str(detail.get("id") or "") for detail in new_orders[:5]]
+                log(
+                    f"[RESULTS] new_closed_orders count={len(new_orders)} sample_ids={', '.join(sample_new_ids)}",
+                    Fore.LIGHTBLACK_EX,
+                )
                 total_new_pnl = sum(
                     detail.get("pnl", 0.0) for detail in new_orders if isinstance(detail.get("pnl"), (int, float))
                 )

@@ -32,8 +32,29 @@ def _resolve_repo_root(script_path: Path) -> Path:
 
 
 REPO_ROOT = _resolve_repo_root(Path(__file__).resolve().parent)
-BOT_VERSION = os.getenv("BYBITBOT_VERSION", "12.2")
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
+
+
+def _detect_version_from_changelog() -> str:
+    """Best-effort version detection: prefer top entry from CHANGELOG, else env, else fallback."""
+    env_version = os.getenv("BYBITBOT_VERSION")
+    if env_version:
+        return env_version
+    try:
+        content = CHANGELOG_FILE.read_text(encoding="utf-8")
+    except Exception:
+        return "0.0.0"
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Changelog"):
+            continue
+        # Expect lines like "2025.12.05.4 (...." – take the first token as version.
+        version_token = line.split()[0]
+        return version_token
+    return "0.0.0"
+
+
+BOT_VERSION = _detect_version_from_changelog()
 STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT))
 
 def _refresh_state_paths() -> None:
