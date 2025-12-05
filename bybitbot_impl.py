@@ -11699,17 +11699,23 @@ Decide decisively. Always include a numeric "confidence" between 0 and 1 and tar
         decision["needs"] = needs
 
     if low_confidence:
+        initial_tfs_set = set(normalized_initial_tfs or ([primary_initial_tf] if primary_initial_tf else []))
         structured_timeframes: list[str] = []
         for tf in LOW_CONFIDENCE_TIMEFRAMES:
             tf_clean = str(tf).strip()
-            if tf_clean and tf_clean not in structured_timeframes:
+            if not tf_clean or tf_clean in initial_tfs_set:
+                continue
+            if tf_clean not in structured_timeframes:
                 structured_timeframes.append(tf_clean)
         if structured_timeframes and NEEDS_MAX_TIMEFRAMES:
             structured_timeframes = structured_timeframes[:NEEDS_MAX_TIMEFRAMES]
+        provided_initial_indicators = set(indicator_columns_by_tf.get(primary_initial_tf, []))
         structured_indicators: list[str] = []
         for ind in LOW_CONFIDENCE_INDICATORS:
             ind_clean = str(ind).strip()
-            if ind_clean and ind_clean not in structured_indicators:
+            if not ind_clean or ind_clean in provided_initial_indicators:
+                continue
+            if ind_clean not in structured_indicators:
                 structured_indicators.append(ind_clean)
         if structured_indicators and NEEDS_MAX_INDICATORS:
             structured_indicators = structured_indicators[:NEEDS_MAX_INDICATORS]
