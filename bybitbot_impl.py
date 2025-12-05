@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.05.0"
+BOT_VERSION = "2025.12.05.1"
 BOT_CHANGELOG = (
-    "Master bot now owns all OpenAI calls and shares cached per-symbol decisions, prompts/logs are ASCII again, and the graph tool plots equity by date with fallback-driven PnL and signal stats."
+    "Fixed AI prompt context so position summaries and margin data are always supplied to the model, and refreshed the graph utility with timeline PnL, flexible state dirs, and clearer signal coverage logs."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -4102,17 +4102,6 @@ def _append_user_bybit_log(user_id: str | int | None, text: str) -> None:
     except Exception:
         # keep non-fatal
         pass
-
-
-def _select_prompt_position(symbol: str, summary: dict[str, Any] | None) -> dict[str, Any]:
-    if not MASTER_PROMPT_SHARE:
-        return summary or {"has_position": False}
-    cached = MASTER_PROMPT_POSITION_CACHE.get(symbol)
-    if cached:
-        return cached
-    value = summary or {"has_position": False}
-    MASTER_PROMPT_POSITION_CACHE[symbol] = value
-    return value
 
 
 def _append_trade_log(text: str) -> None:
@@ -11405,6 +11394,13 @@ def ai_decision(
         return fallback_decision
     current_context = {}
     raw_position_payload = None
+    equity_value = safe_float(equity)
+    available_margin_value = safe_float(available_margin)
+    margin_ratio = (
+        (available_margin_value / equity_value)
+        if equity_value and available_margin_value and equity_value != 0
+        else None
+    )
     if current_position:
         raw_position_payload = {
             "side": current_position.get("side"),
@@ -11415,6 +11411,27 @@ def ai_decision(
             "liquidationPrice": current_position.get("liquidationPrice"),
         }
     open_orders = open_orders or []
+    def _summarize_position_for_prompt(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not payload:
+            return None
+        size_val = safe_float(payload.get("amount"))
+        entry_val = safe_float(payload.get("entryPrice"))
+        notional = None
+        if size_val is not None and entry_val is not None:
+            notional = abs(size_val * entry_val)
+        size_pct = (
+            (notional / equity_value)
+            if notional is not None and equity_value and equity_value != 0
+            else None
+        )
+        return {
+            "side": payload.get("side"),
+            "size_pct": size_pct,
+            "entry_price": entry_val,
+            "unrealized_pnl": payload.get("unrealizedPnl"),
+            "has_position": bool(size_val),
+        }
+    position_summary = _summarize_position_for_prompt(raw_position_payload)
 
     # >>>>>>>>>>>> system_msg обновлён <<<<<<<<<<<<
     system_msg = (

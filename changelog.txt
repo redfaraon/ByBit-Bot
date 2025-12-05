@@ -1,3 +1,7 @@
+2025.12.05.1
+- Fixed the AI decision prompt context so margin/position summaries are always present (resolving the `position_summary` NameError) and ensured master-position sharing logic feeds every request.
+- analyze_graphs.py now discovers state files in both `assets` and script directories (plus `BYBITBOT_STATE_DIR`), plots closed PnL on a proper datetime axis, and logs coverage for the signal/action distribution chart.
+
 2025.12.05.0
 - Master bot is now the sole OpenAI caller: its per-symbol decisions are cached to disk and reused by follower bots while prompts/logs regained readable ASCII text (fixes the missing `position_summary` NameError).
 - analyze_graphs.py plots equity against actual timestamps with date grids, reuses equity data for PnL when needed, and falls back to ai_decisions.log for signal distribution so all three charts render even without results_state.json.

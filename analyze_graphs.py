@@ -7,6 +7,7 @@ import argparse
 import base64
 import json
 import math
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,6 +121,9 @@ def _load_signal_history_from_ai_log(path: Path, limit: int = 1000) -> List[Dict
         decision = payload.get("decision") or {}
         if not isinstance(decision, dict):
             continue
+        ts_val = payload.get("timestamp") or payload.get("time") or payload.get("ts")
+        if ts_val and "_source_timestamp" not in decision:
+            decision["_source_timestamp"] = ts_val
         history.append(decision)
     return history
 
@@ -192,22 +196,32 @@ def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
         return
 
 
-def plot_pnl(history: List[Dict[str, Any]], output_dir: Path, fallback_history: List[Dict[str, Any]] | None = None) -> None:
+def plot_pnl(
+    history: List[Dict[str, Any]],
+    output_dir: Path,
+    fallback_history: List[Dict[str, Any]] | None = None,
+) -> None:
     if plt is None:
         print("[WARN] Matplotlib not available; using minimal placeholder for PnL.")
         _write_fallback_png(output_dir, "pnl.png")
         return
+    used_fallback = False
     if not history and fallback_history:
         history = fallback_history
+        used_fallback = True
     if not history:
         _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
         return
-    closed_pnls = []
-    unrealized = []
+    closed_pnls: List[float] = []
+    unrealized: List[float] = []
+    timestamps: List[datetime | None] = []
     for entry in history:
         closed = (
-            entry.get("closed_pnl")
+            entry.get("cycle_closed_pnl")
+            or entry.get("closed_pnl")
             or entry.get("closedPnL")
+            or (entry.get("pnl") or {}).get("cycle")
+            or (entry.get("pnl") or {}).get("closed")
             or entry.get("realized")
             or entry.get("realized_pnl")
             or entry.get("realizedPnl")
@@ -216,7 +230,11 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path, fallback_history: 
             entry.get("unrealized")
             or entry.get("unrealized_pnl")
             or entry.get("unrealizedPnl")
+            or (entry.get("pnl") or {}).get("unrealized")
         )
+        ts = entry.get("timestamp") or entry.get("time") or entry.get("ts")
+        parsed_ts = _parse_timestamp(ts)
+        timestamps.append(parsed_ts)
         try:
             closed_pnls.append(float(closed) if closed is not None else math.nan)
         except Exception:
@@ -229,39 +247,68 @@ def plot_pnl(history: List[Dict[str, Any]], output_dir: Path, fallback_history: 
         _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
         return
     try:
-        plt.figure(figsize=(12, 4))
-        plt.plot(closed_pnls, label="Closed PnL")
+        fig, ax = plt.subplots(figsize=(12, 4))
+        valid_time = all(ts is not None for ts in timestamps) and mdates is not None
+        if valid_time:
+            x_values = [ts for ts in timestamps if ts is not None]
+            locator = mdates.AutoDateLocator()
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+            ax.set_xlabel("Time")
+            ax.grid(axis="x", linestyle=":", alpha=0.4)
+        else:
+            x_values = list(range(len(closed_pnls)))
+            ax.set_xlabel("Samples")
+        ax.plot(x_values, closed_pnls, label="Closed PnL")
         if any(math.isfinite(x) for x in unrealized):
-            plt.plot(unrealized, label="Unrealized", linestyle="--")
-        plt.title("PnL over time")
-        plt.xlabel("Samples")
-        plt.ylabel("USDT")
-        plt.legend()
-        plt.tight_layout()
+            ax.plot(x_values, unrealized, label="Unrealized", linestyle="--")
+        ax.set_title("PnL over time")
+        ax.set_ylabel("USDT")
+        ax.legend()
+        fig.tight_layout()
+        source_label = "results_state" if not used_fallback else "equity_history"
+        if x_values:
+            if valid_time:
+                start = x_values[0].isoformat()
+                end = x_values[-1].isoformat()
+                print(f"[INFO] Closed PnL: {len(closed_pnls)} points ({source_label}, {start} -> {end})")
+            else:
+                print(f"[INFO] Closed PnL: {len(closed_pnls)} points ({source_label})")
         _save_plot_with_formats(output_dir, "pnl")
-        plt.close()
+        plt.close(fig)
     except Exception as exc:
         print(f"[WARN] Failed to plot PnL graph: {exc}", file=sys.stderr)
         return
 
 
-def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path, *, fallback_log: Path | None = None) -> None:
+def plot_signal_distribution(
+    history: List[Dict[str, Any]],
+    output_dir: Path,
+    *,
+    fallback_log: Path | None = None,
+    source_label: str = "results_state",
+) -> None:
     if plt is None:
         print("[WARN] Matplotlib not available; using minimal placeholder for signal distribution.")
         _write_fallback_png(output_dir, "signals.png")
         return
+    source_used = source_label
     if not history and fallback_log:
         history = _load_signal_history_from_ai_log(fallback_log)
+        source_used = "ai_decisions.log"
     if not history:
         _save_placeholder(output_dir, "signals.png", "Signal distribution")
         return
     actions = {}
+    timestamps: List[datetime | None] = []
     for entry in history:
         action = (entry.get("action") or entry.get("summary") or "").lower()
         if not action:
             continue
         key = "open" if "open" in action else "close" if "close" in action else "skip"
         actions[key] = actions.get(key, 0) + 1
+        ts_val = entry.get("timestamp") or entry.get("time") or entry.get("_source_timestamp")
+        timestamps.append(_parse_timestamp(ts_val))
     if not actions:
         _save_placeholder(output_dir, "signals.png", "Signal distribution")
         return
@@ -273,6 +320,16 @@ def plot_signal_distribution(history: List[Dict[str, Any]], output_dir: Path, *,
         plt.title("Signal/Action Distribution")
         plt.axis("equal")
         plt.tight_layout()
+        if timestamps:
+            valid_ts = [ts for ts in timestamps if ts is not None]
+            if valid_ts:
+                start = min(valid_ts).isoformat()
+                end = max(valid_ts).isoformat()
+                print(f"[INFO] Signal distribution: {len(history)} entries ({source_used}, {start} -> {end})")
+            else:
+                print(f"[INFO] Signal distribution: {len(history)} entries ({source_used}, no timestamps)")
+        else:
+            print(f"[INFO] Signal distribution: {len(history)} entries ({source_used})")
         _save_plot_with_formats(output_dir, "signals")
         plt.close()
     except Exception as exc:
@@ -305,16 +362,39 @@ def main() -> int:
     try:
         args.output.mkdir(parents=True, exist_ok=True)
         script_dir = Path(__file__).resolve().parent
-        # Resolve state dir: prefer provided; otherwise auto-detect nearby files
         state_dir = args.state_dir.expanduser()
-        candidate_dirs = [state_dir, script_dir, script_dir / "assets"]
+        env_state_dir = os.getenv("BYBITBOT_STATE_DIR")
+        raw_candidates = [
+            state_dir,
+            script_dir,
+            script_dir / "assets",
+            script_dir.parent,
+            Path.cwd(),
+            Path.cwd() / "assets",
+        ]
+        if env_state_dir:
+            raw_candidates.append(Path(env_state_dir).expanduser())
+        candidate_dirs: List[Path] = []
+        for candidate in raw_candidates:
+            if not candidate:
+                continue
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved not in candidate_dirs:
+                candidate_dirs.append(resolved)
 
         def _find_state_path(name: str) -> Path:
-            # If explicit path is given via args, honor it
             return next((d / name for d in candidate_dirs if (d / name).exists()), state_dir / name)
 
         equity_path = args.equity or _find_state_path("equity_history.json")
         results_path = args.results or _find_state_path("results_state.json")
+        print(f"[INFO] Equity source: {equity_path}")
+        if results_path.exists():
+            print(f"[INFO] Results source: {results_path}")
+        else:
+            print(f"[WARN] Results state file not found; falling back to equity history where needed.")
 
         equity_data = read_json(equity_path)
         if isinstance(equity_data, dict):
@@ -331,7 +411,12 @@ def main() -> int:
         plot_pnl(results_history, args.output, fallback_history=equity_history)
 
         ai_log_path = next((d / "ai_decisions.log" for d in candidate_dirs if (d / "ai_decisions.log").exists()), state_dir / "ai_decisions.log")
-        plot_signal_distribution(results_history, args.output, fallback_log=ai_log_path)
+        plot_signal_distribution(
+            results_history,
+            args.output,
+            fallback_log=ai_log_path,
+            source_label="results_state",
+        )
 
         return 0
     except Exception as exc:  # pragma: no cover - ensures CLI is resilient
