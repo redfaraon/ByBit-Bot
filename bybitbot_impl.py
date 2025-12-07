@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.05.5"
+BOT_VERSION = "2025.12.07.0"
 BOT_CHANGELOG = (
-    "Expanded results_state diagnostics so closed-order counts and IDs are visible per cycle; launcher now reads version from the changelog instead of a hardcoded constant."
+    "Log improvements: /logs can now return up to 500 lines, manage summaries distinguish symbols with no open position, and results_state diagnostics remain enabled."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -5991,7 +5991,8 @@ def _handle_logs_command(args: list[str]) -> str:
                 minutes = extra
     if symbol and minutes is None:
         minutes = 60
-    count = max(5, min(200, count))
+    # Allow larger windows but keep a hard cap to avoid Telegram limits.
+    count = max(5, min(500, count))
     filtered = _filter_log_history(symbol=symbol, minutes=minutes, limit=count)
     if not filtered:
         detail = f" по {symbol}" if symbol else ""
@@ -14556,7 +14557,10 @@ def run_cycle():
                     direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                     detail_entry = f"[{sym}] - closed {direction or 'position'} (lev x{symbol_leverage})"
                 elif action == "manage":
-                    detail_entry = f"[{sym}] - managing position ({'orders updated' if orders_activity else 'orders unchanged'})"
+                    if initial_position_amount == 0.0 and final_position_amount == 0.0:
+                        detail_entry = f"[{sym}] - manage with no open position ({'orders updated' if orders_activity else 'orders unchanged'})"
+                    else:
+                        detail_entry = f"[{sym}] - managing position ({'orders updated' if orders_activity else 'orders unchanged'})"
                 elif action in ("hold", "none"):
                     change_parts: list[str] = []
                     if position_changed:
