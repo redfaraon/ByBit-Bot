@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.07.0"
+BOT_VERSION = "2025.12.07.1"
 BOT_CHANGELOG = (
-    "Log improvements: /logs can now return up to 500 lines, manage summaries distinguish symbols with no open position, and results_state diagnostics remain enabled."
+    "Log rotation no longer deletes older archives; rotated bybit logs are kept indefinitely so external tools can manage cleanup."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -355,7 +355,7 @@ def log(msg: str, color=Fore.WHITE):
 
 
 def _maybe_rotate_file(path: Path, max_bytes: int, backups: int) -> None:
-    if max_bytes <= 0 or backups <= 0:
+    if max_bytes <= 0:
         return
     try:
         if not path.exists():
@@ -371,19 +371,8 @@ def _maybe_rotate_file(path: Path, max_bytes: int, backups: int) -> None:
         path.rename(rotated)
     except OSError:
         return
-    try:
-        rotated_files = sorted(
-            [candidate for candidate in path.parent.glob(f"{path.name}.*") if candidate.is_file()],
-            key=lambda candidate: candidate.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return
-    for old_file in rotated_files[backups:]:
-        try:
-            old_file.unlink(missing_ok=True)
-        except OSError:
-            continue
+    # Keep all rotated files; do not prune older archives.
+    # External tooling (e.g., logrotate) can be used if cleanup is desired.
 
 
 def _append_main_log(text: str) -> None:
@@ -11612,6 +11601,8 @@ def ai_decision(
                 ],
                 "notes": [
                     "Make decisions based solely on the provided data; no strategy templates are pre-baked.",
+                    "Consider both long and short opportunities: selling/shorting is valid when regime and momentum are bearish, while buys should be justified by supportive evidence.",
+                    "If signals conflict or no position exists to manage, prefer skip/manage (or request extra context) rather than forcing a new entry.",
                     "Prefer amountPercent when sizing orders; engine will scale to each account.",
                     "Use reduceOnly=true when closing or trimming existing positions.",
                 ],

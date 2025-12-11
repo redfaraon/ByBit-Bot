@@ -1,9 +1,15 @@
 Changelog (newest first)
 
-2025.12.05.4 (2025-12-05, commit pending)
+2025.12.07.0 (2025-12-07, commit pending)
+- Log improvements: /logs can now return up to 500 lines, manage summaries explicitly mark symbols with no open position, and results_state diagnostics stay enabled for closed-order debugging.
+
+2025.12.05.5 (2025-12-05, commit a2d663a)
+- Expanded results_state diagnostics: logs now show how many closed orders were fetched into the PnL window and which IDs were treated as new for this cycle.
+
+2025.12.05.4 (2025-12-05, commit b1f7108)
 - reduce-only extra orders now flip to the closing side (buy for shorts, sell for longs) before hitting Bybit so "same side as current position" rejections vanish.
 
-2025.12.05.3 (2025-12-05, commit pending)
+2025.12.05.3 (2025-12-05, commit 251a9f2)
 - Sorted the changelog chronologically, removed duplicate sections, and added commit/date metadata for recent releases.
 
 2025.12.05.2 (2025-12-05, commit 8040030)
