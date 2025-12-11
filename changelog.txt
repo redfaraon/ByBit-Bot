@@ -1,6 +1,13 @@
 Changelog (newest first)
 
-2025.12.07.3 (2025-12-07, commit pending)
+1.0.0 (2025-12-11, commit pending)
+- Switched the release counter to semantic MAJOR.MINOR.PATCH values so future versions are no longer tied to calendar dates.
+- Centralized the protection refresh logic that runs for manage/hold/open paths, giving every active position another chance to reapply stops before fallback closures fire.
+
+2025.12.07.4 (2025-12-07, commit pending)
+- Prompt now explicitly ranks regime priorities (trend > flat > counter) while keeping long/short neutral and countertrend allowed.
+
+2025.12.07.3 (2025-12-07, commit c6cb840)
 - Prompt wording neutralized: trend-following remains preferred, countertrend is low priority, and long/short are treated symmetrically with no side bias.
 
 2025.12.07.2 (2025-12-07, commit c330b4c)

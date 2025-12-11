@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.07.4"
+BOT_VERSION = "1.0.0"
 BOT_CHANGELOG = (
-    "Prompt now explicitly ranks regimes (trend > flat > counter) while keeping long/short neutral and countertrend allowed."
+    "Adopted semantic MAJOR.MINOR.PATCH releases and centralized the protection refresh checks so manage/hold/open flows always reapply stop/trail orders before triggering fallback closures."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -10593,6 +10593,56 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
 
 
+
+def _prepare_protection_dataframe(
+    df_candidate: pd.DataFrame | None,
+    df_primary: pd.DataFrame | None,
+    symbol: str,
+) -> pd.DataFrame | None:
+    candidate = None
+    if isinstance(df_candidate, pd.DataFrame) and not df_candidate.empty:
+        candidate = df_candidate.copy()
+    elif isinstance(df_primary, pd.DataFrame) and not df_primary.empty:
+        candidate = df_primary.copy()
+    if candidate is None:
+        return None
+    if "atr" not in candidate.columns:
+        try:
+            candidate["atr"] = atr(candidate, 14)
+        except Exception as exc:
+            log(
+                f"[WARN] {symbol}: failed to prepare ATR for protection refresh: {exc}",
+                Fore.YELLOW,
+            )
+            return None
+    return candidate
+
+
+def _refresh_position_protection_if_possible(
+    exchange,
+    symbol: str,
+    position: dict[str, Any] | None,
+    df_candidate: pd.DataFrame | None,
+    df_primary: pd.DataFrame | None,
+    open_orders,
+    symbol_meta: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]] | None, bool]:
+    if position is None:
+        return None, False
+    protection_df = _prepare_protection_dataframe(df_candidate, df_primary, symbol)
+    if protection_df is None:
+        return None, False
+    updated_orders = ensure_position_protection(
+        exchange,
+        symbol,
+        position,
+        protection_df,
+        open_orders,
+        config=symbol_meta,
+    )
+    return updated_orders, True
+
+
 def _format_decimal(value: numbers.Real, precision: int = 6) -> str:
     try:
         text = f"{float(value):.{precision}f}"
@@ -13416,6 +13466,7 @@ def run_cycle():
             else:
                 available_margin = last_available_margin
             symbol_meta = dict(target_map.get(sym, {}) or {})
+            protection_refreshed = False
             canonical_lookup = _canonical_decision_symbol(sym)
             preloaded_decision = decisions_map.get(canonical_lookup)
             decision_target = preloaded_decision.get("target") if isinstance(preloaded_decision, dict) else {}
@@ -13968,8 +14019,36 @@ def run_cycle():
                 log(f"🔷 Удерживаем {sym} ({reason})", Fore.BLUE)
                 send_tg(f"ℹ️ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
-                    updated_orders = ensure_position_protection(ex, sym, current_position, df, open_orders_symbol, config=symbol_meta)
-                    if updated_orders is not None:
+                    updated_orders, refreshed = _refresh_position_protection_if_possible(
+                        ex,
+                        sym,
+                        current_position,
+                        df,
+                        df_primary,
+                        open_orders_symbol,
+                        symbol_meta,
+                    )
+                    if refreshed:
+                        protection_refreshed = True
+                    if refreshed and isinstance(updated_orders, list):
+                        open_orders_symbol = updated_orders
+                        open_orders_cache[sym] = updated_orders
+            elif action == "manage":
+                log(f"🔧 Управляем {sym} ({reason})", Fore.BLUE)
+                send_tg(f"ℹ️ {sym}: управление позицией — {reason or 'причина не указана'}")
+                if current_position and abs(float(current_position.get('amount') or 0)) > 0:
+                    updated_orders, refreshed = _refresh_position_protection_if_possible(
+                        ex,
+                        sym,
+                        current_position,
+                        df,
+                        df_primary,
+                        open_orders_symbol,
+                        symbol_meta,
+                    )
+                    if refreshed:
+                        protection_refreshed = True
+                    if refreshed and isinstance(updated_orders, list):
                         open_orders_symbol = updated_orders
                         open_orders_cache[sym] = updated_orders
             elif action == "needs":
@@ -13992,27 +14071,20 @@ def run_cycle():
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
                     send_tg(f"ℹ️ {sym}: позиция уже открыта, сигнал open пропущен")
-                    protection_df = df.copy() if isinstance(df, pd.DataFrame) else None
-                    if protection_df is None or protection_df.empty:
-                        protection_df = df_primary.copy() if isinstance(df_primary, pd.DataFrame) else None
-                    if protection_df is not None and "atr" not in protection_df.columns:
-                        try:
-                            protection_df["atr"] = atr(protection_df, 14)
-                        except Exception as exc_atr:
-                            log(f"[WARN] {sym}: failed to prepare ATR for protection refresh: {exc_atr}", Fore.YELLOW)
-                            protection_df = None
-                    if protection_df is not None:
-                        updated_orders = ensure_position_protection(
-                            ex,
-                            sym,
-                            current_position,
-                            protection_df,
-                            open_orders_symbol,
-                            config=symbol_meta,
-                        )
-                        if isinstance(updated_orders, list):
-                            open_orders_symbol = updated_orders
-                            open_orders_cache[sym] = updated_orders
+                    updated_orders, refreshed = _refresh_position_protection_if_possible(
+                        ex,
+                        sym,
+                        current_position,
+                        df,
+                        df_primary,
+                        open_orders_symbol,
+                        symbol_meta,
+                    )
+                    if refreshed:
+                        protection_refreshed = True
+                    if refreshed and isinstance(updated_orders, list):
+                        open_orders_symbol = updated_orders
+                        open_orders_cache[sym] = updated_orders
                     continue
                 elif max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
                     log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), пропускаем {sym}", Fore.YELLOW)
@@ -14484,6 +14556,26 @@ def run_cycle():
                     positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
                     current_position = positions_map.get(sym)
                     open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
+
+            if (
+                not protection_refreshed
+                and current_position
+                and abs(float(current_position.get("amount") or 0)) > 0
+            ):
+                updated_orders, refreshed = _refresh_position_protection_if_possible(
+                    ex,
+                    sym,
+                    current_position,
+                    df,
+                    df_primary,
+                    open_orders_symbol,
+                    symbol_meta,
+                )
+                if refreshed:
+                    protection_refreshed = True
+                if refreshed and isinstance(updated_orders, list):
+                    open_orders_symbol = updated_orders
+                    open_orders_cache[sym] = updated_orders
 
             final_position_payload = positions_map.get(sym)
             final_position_amount = safe_float(
