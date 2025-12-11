@@ -1,5 +1,8 @@
 Changelog (newest first)
 
+1.0.3 (2025-12-11, commit pending)
+- Reduce-only stop orders now force the correct trigger direction (falling for long exits, rising for short exits), fixing the Bybit `retCode 110092` rejection observed on ETH/USDT extra orders.
+
 1.0.2 (2025-12-11, commit pending)
 - Clarified to the AI prompt that we trade perpetual futures, can go long or short, and should adjust current exposure (scale/add, trim, close, or flip) based on the expected directional bias.
 
