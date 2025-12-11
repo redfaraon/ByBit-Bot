@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.4"
+BOT_VERSION = "1.0.5"
 BOT_CHANGELOG = (
-    "Extra-order sizing now understands snake_case fields such as amount_percent/size_pct so reduce-only instructions from the AI no longer get skipped for missing amounts."
+    "Universe instructions now request style/aggression/horizon/time metadata, and the run cycle applies those fields to the initial prompts so the AI matches the requested intraday style."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -2352,15 +2352,18 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         " Do NOT reuse previous universes or cached pairs; every run must produce a fresh shortlist."
         " Respond strictly in JSON with keys:\n"
         '  "pairs": list of up to 8 symbols to analyze this cycle (mix bullish/bearish narratives based on news),\n'
-        '  "timeframes": list of exactly two short timeframes (e.g., "30m","4h"),\n'
-        '  "indicators": list containing six to eight items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one or two additional momentum/volatility indicators),\n'
+        '  "timeframes": list of exactly two short timeframes (e.g., "30m","4h") to apply globally, plus optional "initial_timeframes" for the first pass,\n'
+        '  "indicators": list containing six to eight items ({"indicator":"ema","length":20}, {"indicator":"ema","length":50}, "volume", "rsi14", "macd", plus one or two additional momentum/volatility indicators) that will drive the primary data bundles,\n'
         '  "initial_timeframes": list of up to two primary timeframes to inspect first (e.g., ["30m","4h"]),\n'
         '  "aggression": risk posture label (e.g., conservative, balanced, optimal, aggressive),\n'
-        '  "trade_horizon": trading horizon label (e.g., scalping, intraday, swing, midterm),\n'
+        '  "style": trading style label (e.g., balanced_intraday, momentum, risk-off) so the follow-up trade prompt can adopt a matching voice,\n'
+        '  "trade_horizon": trading horizon label (e.g., scalping, intraday, short-term, midterm),\n'
         '  "max_positions": integer cap for concurrently open symbols (factor in current exposure + liquidity),\n'
         '  "next_run_minutes": float delay before the next cycle (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
-        '  "notes": optional rationale.'
+        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or the equivalent offset),\n'
+        '  "notes": optional rationale describing how the news/indicators shaped this universe.'
         " Also include optional field 'news_requests' (symbols needing full news text)."
+        " All of the returned metadata (timeframes, indicators, aggression, style, horizon, max positions, next run timing) will be applied directly to downstream initial requests and scheduling."
     )
     messages = [
         {"role": "system", "content": system_msg},
@@ -2506,10 +2509,20 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     universe_payload["initial_timeframes"] = initial_timeframes[:2]
     aggression_level = result.get("aggression") or result.get("riskProfile") or result.get("risk_profile")
     trade_horizon = result.get("trade_horizon") or result.get("tradeHorizon") or result.get("horizon")
+    style_label = (
+        result.get("style")
+        or result.get("trade_style")
+        or result.get("tradeStyle")
+        or result.get("strategy_style")
+        or result.get("strategyStyle")
+        or result.get("strategy")
+    )
     if aggression_level:
         universe_payload["aggression"] = str(aggression_level).strip()
     if trade_horizon:
         universe_payload["trade_horizon"] = str(trade_horizon).strip()
+    if style_label:
+        universe_payload["style"] = str(style_label).strip()
     max_positions_value = None
     limit_sources: list[Any] = []
     limits_block = result.get("limits")
@@ -2552,8 +2565,13 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         selection_result["global_timeframes"] = list(universe_payload["initial_timeframes"])
     if aggression_level:
         selection_result["aggression"] = str(aggression_level).strip()
-    if trade_horizon:
-        selection_result["trade_horizon"] = str(trade_horizon).strip()
+        if trade_horizon:
+            selection_result["trade_horizon"] = str(trade_horizon).strip()
+        style_label = selection_result.get("style")
+        if style_label:
+            selection_style = str(style_label).strip()
+    if style_label:
+        selection_result["style"] = str(style_label).strip()
     if max_positions_value:
         selection_result["limits"] = {"max_positions": max_positions_value}
         selection_result["max_positions"] = max_positions_value
@@ -2570,6 +2588,8 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         universe_state["aggression"] = str(aggression_level).strip()
     if trade_horizon:
         universe_state["trade_horizon"] = str(trade_horizon).strip()
+    if style_label:
+        universe_state["style"] = str(style_label).strip()
     if max_positions_value:
         universe_state["max_positions"] = max_positions_value
     _record_ai_exchange(
@@ -11600,8 +11620,10 @@ def ai_decision(
         else:
             news_desc = "CryptoCompare + RSS headlines"
 
+        bundle_meta = bundle.get("meta") if isinstance(bundle, dict) else {}
+        account_style_value = bundle_meta.get("style") or "balanced_intraday"
         account_payload = {
-            "style": "balanced_intraday",
+            "style": account_style_value,
             "risk_pct": RISK_PCT,
             "configured_leverage": LEVERAGE,
             "sl_atr_mult": sl_mult_local,
@@ -13002,6 +13024,8 @@ def run_cycle():
             overview_lines.append(f"Aggression: {aggression_level}")
         if trade_horizon:
             overview_lines.append(f"Horizon: {trade_horizon}")
+        if selection_style:
+            overview_lines.append(f"Style: {selection_style}")
         if max_positions_limit > 0:
             overview_lines.append(f"Max positions: {max_positions_limit}")
         preview_pairs = selection_result.get("pairs") or []
@@ -13225,6 +13249,7 @@ def run_cycle():
     selection_missing_symbols: list[str] = []
     selection_next_run = None
     selection_next_time = None
+    selection_style: str | None = None
 
     if selection:
         global_timeframes = selection.get("global_timeframes") or []
@@ -13335,11 +13360,13 @@ def run_cycle():
         if summary_timeframes:
             bundle_meta["selection_timeframes"] = summary_timeframes
         if summary_indicators:
-            bundle_meta["selection_indicators"] = summary_indicators
+        bundle_meta["selection_indicators"] = summary_indicators
         if bundle_orders:
             open_orders_cache.update(bundle_orders)
         bundle_meta["active_symbols"] = sorted(position_symbols)
         bundle_meta["pending_symbols"] = sorted(order_symbols_non_reduce)
+        if selection_style:
+            bundle_meta["style"] = selection_style
         trade_plan = ai_plan_trades(
             ex,
             bundle,
