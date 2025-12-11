@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.3"
+BOT_VERSION = "1.0.4"
 BOT_CHANGELOG = (
-    "Stop-loss extra orders now force falling triggers for longs (and rising for shorts) so Bybit no longer rejects reduce-only stops with retCode 110092."
+    "Extra-order sizing now understands snake_case fields such as amount_percent/size_pct so reduce-only instructions from the AI no longer get skipped for missing amounts."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -8916,26 +8916,48 @@ def fetch_unified_cash_flows(exchange, *, limit: int = 20) -> dict[str, Any]:
 
 
 def compute_order_amount(order, current_position):
-    amount = order.get("amount") or order.get("qty") or order.get("quantity")
-    if amount not in (None, "", 0):
-        try:
-            val = float(amount)
-            if abs(val) > 0:
-                return abs(val)
-        except (TypeError, ValueError):
-            pass
-    percent = order.get("amountPercent") or order.get("percent")
-    if percent and current_position:
-        try:
-            pct = float(percent)
-            if pct <= 0:
-                return None
-            base = abs(float(current_position.get("amount") or 0))
-            if base <= 0:
-                return None
-            return base * pct / 100.0
-        except (TypeError, ValueError):
+    if not isinstance(order, dict):
+        return None
+
+    def _extract_number(keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            value = order.get(key)
+            if value in (None, "", 0):
+                continue
+            try:
+                candidate = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(candidate) and abs(candidate) > 0:
+                return candidate
+        return None
+
+    amount_keys = ("amount", "qty", "quantity", "size", "contracts", "volume")
+    amount_value = _extract_number(amount_keys)
+    if amount_value is not None:
+        return abs(amount_value)
+
+    percent_keys = (
+        "amountPercent",
+        "amount_percent",
+        "amount_pct",
+        "percent",
+        "sizePercent",
+        "size_percent",
+        "size_pct",
+    )
+    percent_value = _extract_number(percent_keys)
+    if percent_value is not None and current_position:
+        if percent_value <= 0:
             return None
+        base_amount = safe_float(
+            (current_position or {}).get("amount")
+            or (current_position or {}).get("contracts")
+            or (current_position or {}).get("size")
+        )
+        if base_amount is None or not math.isfinite(base_amount) or base_amount == 0:
+            return None
+        return abs(base_amount) * percent_value / 100.0
     return None
 
 
