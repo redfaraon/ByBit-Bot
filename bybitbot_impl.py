@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.07.3"
+BOT_VERSION = "2025.12.07.4"
 BOT_CHANGELOG = (
-    "Prompt wording made neutral: trend-following preferred, countertrend is lower priority, and long/short are symmetric with no bias."
+    "Prompt now explicitly ranks regimes (trend > flat > counter) while keeping long/short neutral and countertrend allowed."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -11601,7 +11601,7 @@ def ai_decision(
                 ],
                 "notes": [
                     "Make decisions based solely on the provided data; no strategy templates are pre-baked.",
-                    "Default to trading with the dominant regime: go with the trend on TREND_UP/TREND_DOWN unless there is strong evidence for a reversal.",
+                    "Default to trading with the dominant regime: TREND_UP/TREND_DOWN setups have the highest priority, FLAT/range ideas are secondary, and COUNTER plays are lowest priority and require stronger confirmation.",
                     "Treat countertrend entries as lower priority and only when multiple signals support them; otherwise prefer skip/manage or ask for more context.",
                     "Act in the direction the data supports: buy/long when regime and momentum are bullish, sell/short when they are bearish; there is no built-in bias toward either side.",
                     "If signals conflict or no position exists to manage, prefer skip/manage (or request extra context) rather than forcing a new entry.",
