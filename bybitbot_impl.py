@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.2"
+BOT_VERSION = "1.0.3"
 BOT_CHANGELOG = (
-    "Clarified to the AI prompt that we trade perpetual futures, can go long or short, and should adjust existing positions according to the expected directional bias."
+    "Stop-loss extra orders now force falling triggers for longs (and rising for shorts) so Bybit no longer rejects reduce-only stops with retCode 110092."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -11105,7 +11105,9 @@ def execute_extra_orders(
                 price = None
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                reference_price = resolve_reference_price(order, price)
+                reference_price = None
+                if not _is_truthy_flag(params.get("reduceOnly")):
+                    reference_price = resolve_reference_price(order, price)
                 params.setdefault(
                     "triggerDirection",
                     get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
@@ -11124,7 +11126,9 @@ def execute_extra_orders(
                 ccxt_type = "limit"
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                reference_price = resolve_reference_price(order, price)
+                reference_price = None
+                if not _is_truthy_flag(params.get("reduceOnly")):
+                    reference_price = resolve_reference_price(order, price)
                 params.setdefault(
                     "triggerDirection",
                     get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
