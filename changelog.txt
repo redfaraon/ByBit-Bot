@@ -1,6 +1,12 @@
 Changelog (newest first)
 
-2025.12.07.0 (2025-12-07, commit pending)
+2025.12.07.2 (2025-12-07, commit pending)
+- Prompt adjusted to favor trend-following entries by default and treat countertrend setups as lower priority unless strongly confirmed; log-rotation change from 12.07.1 is kept.
+
+2025.12.07.1 (2025-12-07, commit f2adb40)
+- Log rotation keeps all archived bybit logs without deleting older files; external tools (logrotate, manual cleanup) can manage long-term retention.
+
+2025.12.07.0 (2025-12-07, commit b29c6ef)
 - Log improvements: /logs can now return up to 500 lines, manage summaries explicitly mark symbols with no open position, and results_state diagnostics stay enabled for closed-order debugging.
 
 2025.12.05.5 (2025-12-05, commit a2d663a)
