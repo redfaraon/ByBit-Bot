@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "2025.12.07.1"
+BOT_VERSION = "2025.12.07.2"
 BOT_CHANGELOG = (
-    "Log rotation no longer deletes older archives; rotated bybit logs are kept indefinitely so external tools can manage cleanup."
+    "Prompt now nudges the model to favor trend-following entries and treat countertrend as lower priority; log-rotation change from 12.07.1 is preserved."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -11601,6 +11601,8 @@ def ai_decision(
                 ],
                 "notes": [
                     "Make decisions based solely on the provided data; no strategy templates are pre-baked.",
+                    "Default to trading with the dominant regime: go with the trend on TREND_UP/TREND_DOWN unless there is strong evidence for a reversal.",
+                    "Treat countertrend entries as lower priority and only when multiple signals support them; otherwise prefer skip/manage or ask for more context.",
                     "Consider both long and short opportunities: selling/shorting is valid when regime and momentum are bearish, while buys should be justified by supportive evidence.",
                     "If signals conflict or no position exists to manage, prefer skip/manage (or request extra context) rather than forcing a new entry.",
                     "Prefer amountPercent when sizing orders; engine will scale to each account.",
