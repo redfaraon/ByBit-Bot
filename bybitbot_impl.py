@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.1"
+BOT_VERSION = "1.0.2"
 BOT_CHANGELOG = (
-    "Fixes the protection refresh path so refreshes for manage/hold/open don’t crash when trailing ATR multipliers are absent."
+    "Clarified to the AI prompt that we trade perpetual futures, can go long or short, and should adjust existing positions according to the expected directional bias."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -11481,6 +11481,7 @@ def ai_decision(
         "You are an intraday multi-symbol trading assistant. "
         "You receive structured context only (OHLCV per timeframe, derived indicators, sentiment, regime hints, risk settings, open orders, anonymized position summary, and optional news items). "
         "Decide whether to open, close, manage, or skip positions and describe any protective orders required. "
+        "You trade perpetual futures and may hold long or short exposure per symbol. If you expect a coin to fall, favor short entries; if you expect it to rise, favor longs. When you already hold a long and expect further upside, you may add to the position; when holding a short and expecting a bounce, reduce or close it (or flip to long). Mirror this logic when holding a long but expecting weakness—trim, close, or flip to short. "
         "When more data is necessary, reply with a needs array listing exact gaps (timeframes, indicators, news categories, etc.). "
         "Always answer with a strict JSON object that follows the declared response_format schema."
     )
