@@ -1,5 +1,9 @@
 Changelog (newest first)
 
+1.0.1 (2025-12-11, commit pending)
+- Prevented `_refresh_position_protection_if_possible` from raising `trailing_mult` reference errors by precomputing the trailing settings before matching existing protective orders.
+- Adjusted the public release metadata to describe the latest resilience fixes.
+
 1.0.0 (2025-12-11, commit pending)
 - Switched the release counter to semantic MAJOR.MINOR.PATCH values so future versions are no longer tied to calendar dates.
 - Centralized the protection refresh logic that runs for manage/hold/open paths, giving every active position another chance to reapply stops before fallback closures fire.
