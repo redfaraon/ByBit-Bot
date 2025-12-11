@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.5"
+BOT_VERSION = "1.0.6"
 BOT_CHANGELOG = (
-    "Universe instructions now request style/aggression/horizon/time metadata, and the run cycle applies those fields to the initial prompts so the AI matches the requested intraday style."
+    "Next-cycle scheduling now honors the universe’s UTC+03 timestamp instead of intervals, ensuring runtime sleep/alerts match the requested start time."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -2523,6 +2523,13 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         universe_payload["trade_horizon"] = str(trade_horizon).strip()
     if style_label:
         universe_payload["style"] = str(style_label).strip()
+    next_run_time_value = (
+        result.get("next_run_time")
+        or result.get("nextRunTime")
+        or result.get("next_run")
+    )
+    if next_run_time_value:
+        universe_payload["next_run_time"] = str(next_run_time_value).strip()
     max_positions_value = None
     limit_sources: list[Any] = []
     limits_block = result.get("limits")
@@ -2565,8 +2572,12 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         selection_result["global_timeframes"] = list(universe_payload["initial_timeframes"])
     if aggression_level:
         selection_result["aggression"] = str(aggression_level).strip()
-        if trade_horizon:
-            selection_result["trade_horizon"] = str(trade_horizon).strip()
+    if trade_horizon:
+        selection_result["trade_horizon"] = str(trade_horizon).strip()
+    if style_label:
+        selection_result["style"] = str(style_label).strip()
+    if universe_payload.get("next_run_time"):
+        selection_result["next_run_time"] = universe_payload["next_run_time"]
         style_label = selection_result.get("style")
         if style_label:
             selection_style = str(style_label).strip()
@@ -13410,13 +13421,13 @@ def run_cycle():
                             Fore.LIGHTBLACK_EX,
                         )
             trade_next_minutes = trade_plan.get("next_run_minutes")
-            if trade_next_minutes is not None:
+            if trade_next_minutes is not None and selection_next_time is None:
                 try:
                     selection_next_run = float(trade_next_minutes)
                 except (TypeError, ValueError):
                     log("[WARN] Invalid next_run_minutes from trade plan.", Fore.YELLOW)
             trade_next_time = trade_plan.get("next_run_time")
-            if trade_next_time:
+            if trade_next_time and selection_next_time is None:
                 selection_next_time = trade_next_time
         if trade_plan:
             for decision in (trade_plan.get("decisions") or []):
