@@ -1,5 +1,11 @@
 Changelog (newest first)
 
+1.0.6 (2025-12-11, commit pending)
+- Next-cycle scheduling now honors the universe-provided UTC+03 timestamp instead of relying on a delay, so the runtime sleep resumes exactly on the requested start time.
+
+1.0.5 (2025-12-11, commit pending)
+- Universe instructions now request style/aggression/horizon/news/indicator/timeframe metadata (next run also in UTC+03) and the resulting values feed straight into the initial prompts/bundles so the AI respects the desired intraday posture.
+
 1.0.4 (2025-12-11, commit pending)
 - Extra-order sizing now reads snake_case fields such as `amount_percent`/`size_pct`, so reduce-only instructions from the AI no longer get skipped for “Unable to determine amount”.
 

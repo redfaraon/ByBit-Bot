@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.6"
+BOT_VERSION = "1.0.7"
 BOT_CHANGELOG = (
-    "Next-cycle scheduling now honors the universe’s UTC+03 timestamp instead of intervals, ensuring runtime sleep/alerts match the requested start time."
+    "Fixed a bad indent in universe metadata handling so selection indicators/timeframes are applied without crashing the loader."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -13371,7 +13371,7 @@ def run_cycle():
         if summary_timeframes:
             bundle_meta["selection_timeframes"] = summary_timeframes
         if summary_indicators:
-        bundle_meta["selection_indicators"] = summary_indicators
+            bundle_meta["selection_indicators"] = summary_indicators
         if bundle_orders:
             open_orders_cache.update(bundle_orders)
         bundle_meta["active_symbols"] = sorted(position_symbols)
