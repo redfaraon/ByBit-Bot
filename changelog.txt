@@ -1,5 +1,12 @@
 Changelog (newest first)
 
+1.0.8 (2025-12-12, commit pending)
+- Changelog parsing now reads the first (newest) entry, fixing the backup mode loop that occurred after fresh commits.
+- Guarded `selection_style` so plan builds without a universe response no longer crash on `UnboundLocalError`.
+
+1.0.7 (2025-12-11, commit pending)
+- Fixed an indentation error in universe metadata application so selection indicators/timeframes no longer crash the loader.
+
 1.0.6 (2025-12-11, commit pending)
 - Next-cycle scheduling now honors the universe-provided UTC+03 timestamp instead of relying on a delay, so the runtime sleep resumes exactly on the requested start time.
 
