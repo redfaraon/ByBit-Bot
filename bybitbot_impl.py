@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.9"
+BOT_VERSION = "1.1.0"
 BOT_CHANGELOG = (
     "Changelog parsing now reads the newest entry (top of the file) so new commits exit backup mode properly."
 )
@@ -11189,7 +11189,7 @@ def execute_extra_orders(
                 price = None
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                reference_price = resolve_reference_price(order, price)
+                reference_price = _resolve_market_price() if is_reduce_only else resolve_reference_price(order, price)
                 params["triggerDirection"] = get_trigger_direction_for_side(
                     side,
                     trigger_price=trigger_price,
@@ -11209,7 +11209,7 @@ def execute_extra_orders(
                 ccxt_type = "limit"
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                reference_price = resolve_reference_price(order, price)
+                reference_price = _resolve_market_price() if is_reduce_only else resolve_reference_price(order, price)
                 params["triggerDirection"] = get_trigger_direction_for_side(
                     side,
                     trigger_price=trigger_price,
@@ -11220,7 +11220,7 @@ def execute_extra_orders(
                 params.pop("stop_price", None)
             elif trigger_price is not None and math.isfinite(trigger_price):
                 params.setdefault("triggerPrice", trigger_price)
-                reference_price = resolve_reference_price(order, price)
+                reference_price = _resolve_market_price() if is_reduce_only else resolve_reference_price(order, price)
                 params["triggerDirection"] = get_trigger_direction_for_side(
                     side,
                     trigger_price=trigger_price,

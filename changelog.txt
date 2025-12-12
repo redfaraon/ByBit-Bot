@@ -1,5 +1,8 @@
 Changelog (newest first)
 
+1.1.0 (2025-12-12, commit pending)
+- Reduce-only stop/stop-limit/trigger orders now force triggerDirection based on the live ticker price when closing positions, preventing Bybit `110092/110093` rejections like the DOGE/USDT stop error observed at 17:40 UTC+03.
+
 1.0.9 (2025-12-12, commit pending)
 - Extra order trigger directions now fallback to the live ticker price when no reference was provided, eliminating Bybit `110092/110093` errors on reduce-only stops such as LTC/USDT.
 
