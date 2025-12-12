@@ -13003,6 +13003,7 @@ def run_cycle():
     if selection_result is None:
         selection_result = None
 
+    selection_style: str | None = None
     if selection_result:
         limit_candidates: list[Any] = []
         limits_block = selection_result.get("limits")
@@ -13035,6 +13036,9 @@ def run_cycle():
         initial_timeframes = selection_result.get("initial_timeframes") or selection_result.get("global_timeframes") or []
         aggression_level = selection_result.get("aggression")
         trade_horizon = selection_result.get("trade_horizon")
+        style_value = selection_result.get("style")
+        if isinstance(style_value, str):
+            selection_style = style_value.strip() or None
         overview_lines: list[str] = []
         if initial_timeframes:
             overview_lines.append(f"TF: {', '.join(initial_timeframes[:2])}")
