@@ -1508,6 +1508,26 @@ def main():
     head_status = None
     if head_hash:
         head_status = history.setdefault("commits", {}).get(head_hash)
+
+    # If HEAD changed since the last failed head, leave backup mode and
+    # give the new commit a clean run even if the previous HEAD failed.
+    failed_head = history.get("fallback_failed_head")
+    if head_hash and failed_head and head_hash != failed_head:
+        print(
+            f"[BOOT] New HEAD {head_hash[:8]} detected (previous failed {failed_head[:8]}), "
+            "leaving backup mode.",
+            file=sys.stderr,
+        )
+        history.setdefault("commits", {})[head_hash] = None
+        history["fallback_active"] = False
+        history["fallback_cycles"] = 0
+        history["fallback_last_head"] = None
+        history["fallback_source"] = None
+        history["fallback_target"] = None
+        history["fallback_failed_head"] = None
+        history["fallback_branch_next"] = "stable"
+        _save_fallback_history(history)
+        head_status = None
     if head_hash and head_status == "failed":
         retry_state = history.setdefault("failed_head_retry", {})
         retry_interval = max(60, int(os.getenv("BYBITBOT_FAILED_HEAD_RETRY_INTERVAL", "900")))
