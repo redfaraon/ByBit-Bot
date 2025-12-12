@@ -12951,11 +12951,8 @@ def run_cycle():
     if spot_position_symbols:
         position_symbols.update(spot_position_symbols)
 
-    position_limit_reached = (
-        max_positions_limit > 0
-        and open_positions is not None
-        and open_positions >= max_positions_limit
-    )
+    # Defer position limit evaluation until after universe/model overrides.
+    position_limit_reached = False
 
     normalized_pair_list: list[str] = []
     for raw_pair in PAIR_LIST:
