@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.8"
+BOT_VERSION = "1.0.9"
 BOT_CHANGELOG = (
     "Changelog parsing now reads the newest entry (top of the file) so new commits exit backup mode properly."
 )
@@ -10882,6 +10882,27 @@ def execute_extra_orders(
     cancel_errors = []
     order_errors: list[str] = []
 
+    last_price_snapshot: float | None = None
+    last_price_checked = False
+
+    def _resolve_market_price() -> float | None:
+        nonlocal last_price_snapshot, last_price_checked
+        if last_price_snapshot is not None or last_price_checked:
+            return last_price_snapshot
+        last_price_checked = True
+        try:
+            ticker = exchange.fetch_ticker(exchange_symbol)
+        except Exception:
+            ticker = None
+        if isinstance(ticker, dict):
+            last_price = ticker.get("last") or ticker.get("close")
+            if last_price is None:
+                info = ticker.get("info")
+                if isinstance(info, dict):
+                    last_price = info.get("lastPrice") or info.get("markPrice")
+            last_price_snapshot = safe_float(last_price)
+        return last_price_snapshot
+
     def resolve_reference_price(order_dict, fallback_price):
         candidates = [
             fallback_price,
@@ -10898,6 +10919,9 @@ def execute_extra_orders(
             ref = safe_float(candidate)
             if ref is not None and math.isfinite(ref):
                 return ref
+        market_price = _resolve_market_price()
+        if market_price is not None and math.isfinite(market_price):
+            return market_price
         return None
 
     for idx, order in enumerate(orders, 1):
