@@ -11165,12 +11165,11 @@ def execute_extra_orders(
                 price = None
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                reference_price = None
-                if not _is_truthy_flag(params.get("reduceOnly")):
-                    reference_price = resolve_reference_price(order, price)
-                params.setdefault(
-                    "triggerDirection",
-                    get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
+                reference_price = resolve_reference_price(order, price)
+                params["triggerDirection"] = get_trigger_direction_for_side(
+                    side,
+                    trigger_price=trigger_price,
+                    reference_price=reference_price,
                 )
                 params.setdefault("closeOnTrigger", True)
                 params.pop("stopLoss", None)
@@ -11186,12 +11185,11 @@ def execute_extra_orders(
                 ccxt_type = "limit"
                 params.setdefault("reduceOnly", True)
                 params["triggerPrice"] = trigger_price
-                reference_price = None
-                if not _is_truthy_flag(params.get("reduceOnly")):
-                    reference_price = resolve_reference_price(order, price)
-                params.setdefault(
-                    "triggerDirection",
-                    get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
+                reference_price = resolve_reference_price(order, price)
+                params["triggerDirection"] = get_trigger_direction_for_side(
+                    side,
+                    trigger_price=trigger_price,
+                    reference_price=reference_price,
                 )
                 params.pop("stopLoss", None)
                 params.pop("stopPrice", None)
@@ -11199,9 +11197,10 @@ def execute_extra_orders(
             elif trigger_price is not None and math.isfinite(trigger_price):
                 params.setdefault("triggerPrice", trigger_price)
                 reference_price = resolve_reference_price(order, price)
-                params.setdefault(
-                    "triggerDirection",
-                    get_trigger_direction_for_side(side, trigger_price=trigger_price, reference_price=reference_price),
+                params["triggerDirection"] = get_trigger_direction_for_side(
+                    side,
+                    trigger_price=trigger_price,
+                    reference_price=reference_price,
                 )
         if ccxt_type not in VALID_ORDER_TYPES:
             fallback_type = "limit" if price is not None else "market"
@@ -11638,8 +11637,22 @@ def ai_decision(
         else:
             news_desc = "CryptoCompare + RSS headlines"
 
-        bundle_meta = bundle.get("meta") if isinstance(bundle, dict) else {}
-        account_style_value = bundle_meta.get("style") or "balanced_intraday"
+        # Resolve account style from extra context or portfolio guidance; default to balanced intraday.
+        style_value: str | None = None
+        if isinstance(extra, dict):
+            meta_candidate = extra.get("meta") or extra.get("bundle_meta")
+            if isinstance(meta_candidate, dict):
+                raw_style = meta_candidate.get("style")
+                if isinstance(raw_style, str) and raw_style.strip():
+                    style_value = raw_style.strip()
+        if style_value is None and isinstance(portfolio_guidance, dict):
+            raw_style = (
+                portfolio_guidance.get("style")
+                or (portfolio_guidance.get("target") or {}).get("style")
+            )
+            if isinstance(raw_style, str) and raw_style.strip():
+                style_value = raw_style.strip()
+        account_style_value = style_value or "balanced_intraday"
         account_payload = {
             "style": account_style_value,
             "risk_pct": RISK_PCT,
