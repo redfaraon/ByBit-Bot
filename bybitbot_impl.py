@@ -13070,6 +13070,13 @@ def run_cycle():
             header = " ".join(header_tokens)
             send_tg(header + "\n" + "\n".join(f"- {line}" for line in overview_lines))
 
+    # Recalculate position limit after applying model-requested max_positions_limit.
+    position_limit_reached = (
+        max_positions_limit > 0
+        and open_positions is not None
+        and open_positions >= max_positions_limit
+    )
+
     open_orders_prefetch: dict[str, list] = {}
     order_symbols: set[str] = set()
     order_symbols_non_reduce: set[str] = set()
