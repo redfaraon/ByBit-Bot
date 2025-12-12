@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.0.7"
+BOT_VERSION = "1.0.8"
 BOT_CHANGELOG = (
-    "Fixed a bad indent in universe metadata handling so selection indicators/timeframes are applied without crashing the loader."
+    "Changelog parsing now reads the newest entry (top of the file) so new commits exit backup mode properly."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -1747,7 +1747,14 @@ def _read_change_log_entry() -> Tuple[str, str]:
     blocks = [block.strip() for block in raw.split("\n\n") if block.strip()]
     if not blocks:
         return version, changelog_text
-    latest_block = blocks[-1]
+    latest_block = None
+    for block in blocks:
+        first_line = block.splitlines()[0].strip()
+        if first_line and first_line[0].isdigit():
+            latest_block = block
+            break
+    if latest_block is None:
+        latest_block = blocks[-1]
     lines = [line.strip() for line in latest_block.splitlines() if line.strip()]
     if not lines:
         return version, changelog_text
