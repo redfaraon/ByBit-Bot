@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.1"
+BOT_VERSION = "1.1.2"
 BOT_CHANGELOG = (
-    "Embedded structured market-mode guidance into prompts and applied per-mode risk/confidence controls."
+    "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -307,6 +307,18 @@ DRAWDOWN_RULES: tuple[tuple[float, float, float, float], ...] = (
     (40.0, 0.50, 0.65, 0.60),
     (30.0, 0.70, 0.75, 0.80),
 )
+DEFAULT_VOLATILITY_NEWS_PRIORITY_ATR = 0.02
+DEFAULT_VOLATILITY_TA_PRIORITY_ATR = 0.012
+VOLATILITY_NEWS_PRIORITY_ATR = max(
+    0.0,
+    _float_from_env("VOLATILITY_NEWS_PRIORITY_ATR", DEFAULT_VOLATILITY_NEWS_PRIORITY_ATR),
+)
+VOLATILITY_TA_PRIORITY_ATR = max(
+    0.0,
+    _float_from_env("VOLATILITY_TA_PRIORITY_ATR", DEFAULT_VOLATILITY_TA_PRIORITY_ATR),
+)
+if 0 < VOLATILITY_NEWS_PRIORITY_ATR < VOLATILITY_TA_PRIORITY_ATR:
+    VOLATILITY_TA_PRIORITY_ATR = VOLATILITY_NEWS_PRIORITY_ATR * 0.75
 
 
 def detect_regime(
@@ -391,6 +403,36 @@ def _regime_to_market_mode(regime_label: str | None) -> str:
     if regime_label == "FLAT":
         return "range"
     return "trend"
+
+
+def _resolve_analysis_balance(atr_ratio: float | None) -> dict[str, Any]:
+    """Determine how much weight to assign to news vs technicals based on ATR/price."""
+    ratio = float(atr_ratio or 0.0)
+    news_weight = 0.5
+    ta_weight = 0.5
+    mode = "balanced"
+    guidance = "Use news and technicals evenly."
+    if VOLATILITY_NEWS_PRIORITY_ATR and ratio >= VOLATILITY_NEWS_PRIORITY_ATR:
+        mode = "news_priority"
+        news_weight = 0.65
+        ta_weight = 0.35
+        guidance = (
+            "Volatile conditions: prioritize news/sentiment catalysts; still confirm with key indicators."
+        )
+    elif VOLATILITY_TA_PRIORITY_ATR and 0 < ratio <= VOLATILITY_TA_PRIORITY_ATR:
+        mode = "technical_priority"
+        news_weight = 0.35
+        ta_weight = 0.65
+        guidance = (
+            "Calm market: lean on technical structure/indicators; treat news as a secondary tiebreaker."
+        )
+    return {
+        "mode": mode,
+        "atr_ratio": ratio,
+        "news_weight": round(news_weight, 2),
+        "technical_weight": round(ta_weight, 2),
+        "guidance": guidance,
+    }
 
 
 def _parse_env_list(raw: str | None, default: Sequence[str] | None) -> list[str]:
@@ -11562,6 +11604,8 @@ def ai_decision(
     regime_mode, regime_metrics = detect_regime(df_30m, higher_tf)
     market_mode_label = _regime_to_market_mode(regime_mode)
     regime_metrics["market_mode"] = market_mode_label
+    analysis_balance = _resolve_analysis_balance(regime_metrics.get("atr_ratio"))
+    regime_metrics["analysis_balance"] = analysis_balance
     mode_config = MARKET_MODE_CONFIG.get(market_mode_label, {})
     sl_mult_local = max(0.05, SL_ATR * (mode_config.get("sl_scale") or 1.0))
     tp_mult_local = TP_ATR
@@ -11605,7 +11649,8 @@ def ai_decision(
         )
         log(
             f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}; "
-            f"regime={regime_mode} mode={market_mode_label} sl_atr={sl_mult_local:.2f} tp_atr={tp_mult_local:.2f} notional_scale={notional_scale:.2f}",
+            f"regime={regime_mode} mode={market_mode_label} sl_atr={sl_mult_local:.2f} tp_atr={tp_mult_local:.2f} "
+            f"notional_scale={notional_scale:.2f} analysis={analysis_balance.get('mode')}",
             Fore.LIGHTBLACK_EX,
         )
 
@@ -11769,6 +11814,7 @@ def ai_decision(
         context["initial_timeframes"] = initial_payload
         context["regime"] = regime_metrics
         context["market_mode"] = market_mode_label
+        context["analysis_balance"] = analysis_balance
         if position_summary:
             context["position"] = position_summary
         if open_orders:
@@ -11810,6 +11856,7 @@ def ai_decision(
             "account_scale": 1.0,
         }
         account_payload["market_mode"] = market_mode_label
+        account_payload["analysis_balance"] = analysis_balance
         if mode_confidence_required:
             account_payload["confidence_floor"] = mode_confidence_required
         if margin_ratio is not None:
@@ -11907,6 +11954,13 @@ def ai_decision(
             instructions_block["active_market_mode"] = market_mode_label
         if mode_confidence_required:
             instructions_block["confidence_required"] = mode_confidence_required
+        instructions_block["analysis_balance"] = analysis_balance
+        balance_note = (
+            "Adjust reliance on news vs technicals according to analysis_balance "
+            "(news_priority = heed catalysts first; technical_priority = rely on structure/indicators)."
+        )
+        if balance_note not in instructions_block["notes"]:
+            instructions_block["notes"].append(balance_note)
         prompt["instructions"] = instructions_block
 
         if portfolio_guidance:
