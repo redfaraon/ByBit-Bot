@@ -9900,7 +9900,7 @@ def _categorize_protection_orders(orders) -> dict[str, list[tuple]]:
             summary["stop"].append((_safe_round(stop_price, 6), amount_round))
         else:
             if take_price is None and order_type not in ("takeprofit", "take_profit"):
-                take_price = stop_price if stop_price is not None else trailing_val
+                continue
             summary["take_profit"].append((_safe_round(take_price, 6), amount_round))
     for key in summary:
         summary[key].sort()
