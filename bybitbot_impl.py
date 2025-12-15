@@ -54,9 +54,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.0"
+BOT_VERSION = "1.1.1"
 BOT_CHANGELOG = (
-    "Changelog parsing now reads the newest entry (top of the file) so new commits exit backup mode properly."
+    "Embedded structured market-mode guidance into prompts and applied per-mode risk/confidence controls."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -112,6 +112,110 @@ def _configure_state_paths() -> None:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+
+MARKET_MODE_GUIDE: dict[str, Any] = {
+    "market_modes": {
+        "trend": {
+            "open_position": "yes",
+            "conditions": {
+                "trend_alignment": "EMA20 > EMA50 для long или EMA20 < EMA50 для short; тренд 4h совпадает",
+                "rsi": "не в экстремумах (long: RSI < 70; short: RSI > 30)",
+                "atr": "не выше 1.8 × среднего ATR",
+            },
+            "risk": {
+                "risk_multiplier": 1.0,
+                "sl_atr": "1.0 × ATR",
+                "tp_atr": "2.0 × ATR",
+            },
+            "confidence_required": 0.75,
+            "needs_confirmation": {
+                "required": False,
+                "when": [
+                    "если 30m и 4h частично расходятся",
+                    "если RSI в зоне экстремума",
+                    "если ATR резко вырос",
+                ],
+                "confirm_with": [
+                    "higher_tf:4h",
+                    "funding",
+                    "open_interest",
+                    "news",
+                ],
+            },
+        },
+        "countertrend": {
+            "open_position": "conditional",
+            "conditions": {
+                "rsi": "выход из экстремума (long: RSI < 30 → вверх; short: RSI > 70 → вниз)",
+                "atr": "снижается относительно среднего",
+                "trend_strength": "4h тренд слабый, нет усиления",
+            },
+            "risk": {
+                "risk_multiplier": 0.5,
+                "sl_atr": "0.7 × ATR",
+                "tp_atr": "1.0 × ATR",
+            },
+            "confidence_required": 0.80,
+            "needs_confirmation": {
+                "required": True,
+                "confirm_with": [
+                    "higher_tf:30m",
+                    "higher_tf:1h",
+                    "funding",
+                    "open_interest",
+                    "news",
+                ],
+            },
+        },
+        "range": {
+            "open_position": "only_at_boundaries",
+            "conditions": {
+                "price_location": "у верхней или нижней границы диапазона",
+                "rsi": "должен подтверждать разворот от границы",
+                "atr": "ниже среднего, рынок маловолатилен",
+            },
+            "risk": {
+                "risk_multiplier": 0.25,
+                "sl_atr": "0.6–0.8 × ATR",
+                "tp_target": "до противоположной границы диапазона",
+            },
+            "confidence_required": 0.70,
+            "needs_confirmation": {
+                "required": True,
+                "confirm_with": [
+                    "higher_tf:30m",
+                    "higher_tf:1h",
+                    "atr_low_vol",
+                    "news_neutral",
+                    "funding≈0",
+                ],
+            },
+        },
+    }
+}
+
+MARKET_MODE_CONFIG: dict[str, dict[str, float]] = {
+    "trend": {
+        "risk_multiplier": 1.0,
+        "sl_scale": 1.0,
+        "tp_ratio": 2.0,
+        "confidence_required": 0.75,
+    },
+    "countertrend": {
+        "risk_multiplier": 0.5,
+        "sl_scale": 0.7,
+        "tp_ratio": 1.4286,
+        "confidence_required": 0.80,
+    },
+    "range": {
+        "risk_multiplier": 0.25,
+        "sl_scale": 0.7,
+        "tp_ratio": 1.0,
+        "confidence_required": 0.70,
+    },
+}
+
+SYMBOL_MARKET_MODE_HINTS: dict[str, dict[str, Any]] = {}
 
 _LOG_HISTORY: deque[str] = deque(maxlen=200)
 LOG_EXTRA_SETTLE_POSITIONS = str(os.getenv("LOG_EXTRA_SETTLE_POSITIONS", "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -276,6 +380,17 @@ def detect_regime(
     metrics["mode"] = mode
     metrics["higher_bias"] = higher_bias
     return mode, metrics
+
+
+def _regime_to_market_mode(regime_label: str | None) -> str:
+    """Map TREND/COUNTER/FLAT regimes into prompt-friendly market modes."""
+    if regime_label in {"TREND_UP", "TREND_DOWN"}:
+        return "trend"
+    if regime_label == "COUNTER":
+        return "countertrend"
+    if regime_label == "FLAT":
+        return "range"
+    return "trend"
 
 
 def _parse_env_list(raw: str | None, default: Sequence[str] | None) -> list[str]:
@@ -11445,23 +11560,23 @@ def ai_decision(
     base_rows = initial_frames_data.get(primary_initial_tf) or higher_tf
     latest_row = base_rows[-1] if base_rows else None
     regime_mode, regime_metrics = detect_regime(df_30m, higher_tf)
-    sl_mult_local = SL_ATR
+    market_mode_label = _regime_to_market_mode(regime_mode)
+    regime_metrics["market_mode"] = market_mode_label
+    mode_config = MARKET_MODE_CONFIG.get(market_mode_label, {})
+    sl_mult_local = max(0.05, SL_ATR * (mode_config.get("sl_scale") or 1.0))
     tp_mult_local = TP_ATR
-    notional_scale = 1.0
-    if regime_mode == "FLAT":
-        tp_mult_local = TP_ATR * 0.75
-        notional_scale = 0.7
-    elif regime_mode == "COUNTER":
-        sl_mult_local = SL_ATR * 0.9
-        tp_mult_local = TP_ATR * 0.65
-        notional_scale = 0.55
-    elif regime_mode in {"TREND_UP", "TREND_DOWN"}:
-        tp_mult_local = TP_ATR * 1.1
-        notional_scale = 1.0
+    tp_ratio = mode_config.get("tp_ratio")
+    if tp_ratio and tp_ratio > 0:
+        tp_mult_local = max(0.05, sl_mult_local * tp_ratio)
+    notional_scale = max(0.05, mode_config.get("risk_multiplier", 1.0))
+    mode_confidence_required = mode_config.get("confidence_required")
 
     cfg_local = target_meta.setdefault("config", {}) if isinstance(target_meta, dict) else {}
     cfg_local["sl_atr"] = sl_mult_local
     cfg_local["tp_atr"] = tp_mult_local
+    cfg_local["market_mode"] = market_mode_label
+    if mode_confidence_required:
+        cfg_local["confidence_required"] = mode_confidence_required
 
     base_notional = (
         target_meta.get("notional_pct")
@@ -11490,9 +11605,16 @@ def ai_decision(
         )
         log(
             f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}; "
-            f"regime={regime_mode} sl_atr={sl_mult_local:.2f} tp_atr={tp_mult_local:.2f} notional_scale={notional_scale:.2f}",
+            f"regime={regime_mode} mode={market_mode_label} sl_atr={sl_mult_local:.2f} tp_atr={tp_mult_local:.2f} notional_scale={notional_scale:.2f}",
             Fore.LIGHTBLACK_EX,
         )
+
+    guide_modes = (MARKET_MODE_GUIDE.get("market_modes") or {}) if isinstance(MARKET_MODE_GUIDE, dict) else {}
+    SYMBOL_MARKET_MODE_HINTS[symbol] = {
+        "mode": market_mode_label,
+        "confidence_required": mode_confidence_required,
+        "needs_confirmation": (guide_modes.get(market_mode_label, {}) or {}).get("needs_confirmation"),
+    }
 
     higher_trend_bias = None
     higher_trend_label = "неопределён"
@@ -11593,7 +11715,7 @@ def ai_decision(
 
     selected_indicator_names = indicator_columns_by_tf.get(primary_initial_tf, [])
     log(
-        f"[INFO] {symbol}: regime={regime_mode} indicators={','.join(selected_indicator_names) or 'none'}",
+        f"[INFO] {symbol}: regime={regime_mode} mode={market_mode_label} indicators={','.join(selected_indicator_names) or 'none'}",
         Fore.LIGHTBLACK_EX,
     )
 
@@ -11646,6 +11768,7 @@ def ai_decision(
             initial_payload[tf_name] = _slice_context(tf_name, limit)
         context["initial_timeframes"] = initial_payload
         context["regime"] = regime_metrics
+        context["market_mode"] = market_mode_label
         if position_summary:
             context["position"] = position_summary
         if open_orders:
@@ -11686,6 +11809,9 @@ def ai_decision(
             "notional_scale": notional_scale,
             "account_scale": 1.0,
         }
+        account_payload["market_mode"] = market_mode_label
+        if mode_confidence_required:
+            account_payload["confidence_floor"] = mode_confidence_required
         if margin_ratio is not None:
             account_payload["available_margin_pct"] = margin_ratio
 
@@ -11740,6 +11866,7 @@ def ai_decision(
             "position": position_for_prompt,
             "open_orders": open_orders,
             "regime": regime_metrics,
+            "market_mode": market_mode_label,
             "instructions": {
                 "response_format": {
                     "action": "open|close|manage|skip",
@@ -11772,7 +11899,15 @@ def ai_decision(
                 "news": news_desc,
             },
         }
-
+        instructions_block = prompt["instructions"]
+        guide_modes = MARKET_MODE_GUIDE.get("market_modes") if isinstance(MARKET_MODE_GUIDE, dict) else None
+        if guide_modes:
+            instructions_block["market_modes"] = guide_modes
+        if market_mode_label:
+            instructions_block["active_market_mode"] = market_mode_label
+        if mode_confidence_required:
+            instructions_block["confidence_required"] = mode_confidence_required
+        prompt["instructions"] = instructions_block
 
         if portfolio_guidance:
             prompt["portfolio_guidance"] = portfolio_guidance
@@ -13554,6 +13689,7 @@ def run_cycle():
     if not symbols_sequence:
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
+    SYMBOL_MARKET_MODE_HINTS.clear()
     decisions_total = 0
     counts = {"open":0,"close":0,"skip":0}
     decisions_details: list[str] = []
@@ -14083,18 +14219,26 @@ def run_cycle():
                 send_tg(f"ℹ️ Не удалось отменить ордера по {sym}: {errors}")
 
             # Downgrade low-confidence opens to skip before handling branches
+            mode_hint = SYMBOL_MARKET_MODE_HINTS.get(sym) or {}
+            mode_threshold = mode_hint.get("confidence_required")
+            mode_label = mode_hint.get("mode")
+            open_conf_threshold = OPEN_MIN_CONFIDENCE
+            if isinstance(mode_threshold, (int, float)) and mode_threshold > open_conf_threshold:
+                open_conf_threshold = mode_threshold
+            # Downgrade low-confidence opens to skip before handling branches
             if action == "open" and not has_position:
                 try:
                     conf_val = float(sym_confidence_value) if sym_confidence_value is not None else 0.0
                 except Exception:
                     conf_val = 0.0
-                if conf_val < OPEN_MIN_CONFIDENCE:
+                if conf_val < open_conf_threshold:
+                    extra_note = f" (mode {mode_label})" if mode_label else ""
                     log(
-                        f"ℹ️ Пропуск {sym}: confidence {conf_val:.3f} ниже порога {OPEN_MIN_CONFIDENCE:.3f} для открытия",
+                        f"ℹ️ Пропуск {sym}: confidence {conf_val:.3f} ниже порога {open_conf_threshold:.3f}{extra_note}",
                         Fore.WHITE,
                     )
                     send_tg(
-                        f"ℹ️ {sym}: сигнал OPEN пропущен — confidence {conf_val:.3f} ниже порога {OPEN_MIN_CONFIDENCE:.3f}"
+                        f"ℹ️ {sym}: сигнал OPEN пропущен — confidence {conf_val:.3f} ниже порога {open_conf_threshold:.3f}{extra_note}"
                     )
                     action = "skip"
                     dec["action"] = "skip"
