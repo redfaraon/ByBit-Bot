@@ -11650,7 +11650,8 @@ def ai_decision(
         log(
             f"[INFO] {symbol}: initial context {primary_initial_tf} {entries}; "
             f"regime={regime_mode} mode={market_mode_label} sl_atr={sl_mult_local:.2f} tp_atr={tp_mult_local:.2f} "
-            f"notional_scale={notional_scale:.2f} analysis={analysis_balance.get('mode')}",
+            f"notional_scale={notional_scale:.2f} analysis={analysis_balance.get('mode')} "
+            f"(news={analysis_balance.get('news_weight')} ta={analysis_balance.get('technical_weight')})",
             Fore.LIGHTBLACK_EX,
         )
 
@@ -11660,6 +11661,20 @@ def ai_decision(
         "confidence_required": mode_confidence_required,
         "needs_confirmation": (guide_modes.get(market_mode_label, {}) or {}).get("needs_confirmation"),
     }
+    active_tf_indicators = {
+        tf: active_indicator_columns_by_tf.get(tf, [])
+        for tf in (trim_order or [])[:2]
+    }
+    if active_tf_indicators:
+        parts = []
+        for tf, cols in active_tf_indicators.items():
+            if cols:
+                parts.append(f"{tf}:[{','.join(cols)}]")
+        if parts:
+            log(
+                f"[INFO] {symbol}: prompt indicators {', '.join(parts)}",
+                Fore.LIGHTBLACK_EX,
+            )
 
     higher_trend_bias = None
     higher_trend_label = "неопределён"
@@ -11829,6 +11844,12 @@ def ai_decision(
             news_desc = "RSS headlines for the asset"
         else:
             news_desc = "CryptoCompare + RSS headlines"
+        news_focus = news_payload_payload.get("focus") if isinstance(news_payload_payload, dict) else None
+        if isinstance(news_focus, list) and news_focus:
+            log(
+                f"[INFO] {symbol}: news focus requested for prompt: {', '.join(map(str, news_focus))}",
+                Fore.LIGHTBLACK_EX,
+            )
 
         # Resolve account style from extra context or portfolio guidance; default to balanced intraday.
         style_value: str | None = None
