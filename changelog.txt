@@ -3,6 +3,7 @@ Changelog (newest first)
 1.1.2 (2025-12-15, commit pending)
 - Added a volatility-aware balance between news and technical analysis so the AI leans on catalysts in high ATR conditions and defaults to TA in calm markets.
 - Spot SELLs now execute against available balances (no blanket short block); skips only when balance is insufficient.
+- Highlighted open/skip decisions in the logs with regime/analysis balance details, SL/TP multipliers, reason for skipping, and any extra logic guiding the entry.
 
 1.1.1 (2025-12-15, commit pending)
 - Embedded the structured market-mode JSON guide into symbol prompts, scaled risk per regime, and enforced the new confidence floors so trend/countertrend/range behaviors match the documented rules.

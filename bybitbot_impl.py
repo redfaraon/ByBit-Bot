@@ -3167,7 +3167,55 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
                 "spotReduce": True,
             }
             log(f"{sym}: spot SELL converted to reduce amount={reduce_qty:.6f}", Fore.LIGHTBLUE_EX)
-    log(f"{sym}: action={action} side={side} reason={reason}", Fore.LIGHTBLUE_EX)
+    mode_hint = SYMBOL_MARKET_MODE_HINTS.get(sym) or {}
+    analysis_balance = mode_hint.get("analysis_balance") or {}
+    def _fmt_weight(value: float | None) -> str:
+        try:
+            return f"{float(value):.2f}"
+        except Exception:
+            return "n/a"
+    balance_mode = analysis_balance.get("mode") or "balanced"
+    balance_summary = (
+        f"{balance_mode} (news={_fmt_weight(analysis_balance.get('news_weight'))} "
+        f"ta={_fmt_weight(analysis_balance.get('technical_weight'))})"
+    )
+    reason_text = reason or "entry signal"
+    config_block = decision.get("config") or {}
+    sl_atr_conf = safe_float(config_block.get("sl_atr") or SL_ATR)
+    tp_atr_conf = safe_float(config_block.get("tp_atr") or TP_ATR)
+    sl_ratio = f"{(sl_atr_conf / SL_ATR):.2f}x" if SL_ATR else "n/a"
+    tp_ratio = f"{(tp_atr_conf / TP_ATR):.2f}x" if TP_ATR else "n/a"
+    decision_log_suffix = f"mode={mode_hint.get('mode') or 'n/a'} balance={balance_summary}"
+    log(
+        f"{sym}: action={action} side={side} reason={reason_text} {decision_log_suffix}",
+        Fore.LIGHTBLUE_EX,
+    )
+    if action == "open":
+        logic_note = analysis_balance.get("guidance")
+        open_parts = [
+            f"reason={reason_text}",
+            f"sl_atr={sl_atr_conf:.2f} ({sl_ratio})",
+            f"tp_atr={tp_atr_conf:.2f} ({tp_ratio})",
+            f"notional_pct={_format_notional_pct(notional_pct) if notional_pct is not None else 'n/a'}",
+            f"balance={balance_summary}",
+        ]
+        if logic_note:
+            open_parts.append(f"logic={logic_note}")
+        log(
+            f"[OPEN] {sym}: " + "; ".join(open_parts),
+            Fore.LIGHTGREEN_EX,
+        )
+    else:
+        if action in {"skip", "hold"}:
+            needs_payload = decision.get("needs")
+            if isinstance(needs_payload, list):
+                needs_text = ", ".join(str(item) for item in needs_payload if item)
+            else:
+                needs_text = str(needs_payload) if needs_payload else "none"
+            log(
+                f"[SKIP] {sym}: {reason_text}; balance={balance_summary}; needs={needs_text}",
+                Fore.LIGHTYELLOW_EX,
+            )
     if notional_pct is not None:
         log(f"{sym}: notional_pct={_format_notional_pct(notional_pct)}", Fore.LIGHTBLACK_EX)
     open_orders_symbol = open_orders_cache.get(sym)
@@ -11660,6 +11708,7 @@ def ai_decision(
         "mode": market_mode_label,
         "confidence_required": mode_confidence_required,
         "needs_confirmation": (guide_modes.get(market_mode_label, {}) or {}).get("needs_confirmation"),
+        "analysis_balance": analysis_balance,
     }
     active_tf_indicators = {
         tf: active_indicator_columns_by_tf.get(tf, [])
