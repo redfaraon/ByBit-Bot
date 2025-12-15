@@ -10905,6 +10905,20 @@ def _refresh_position_protection_if_possible(
         open_orders,
         config=symbol_meta,
     )
+    has_stop, has_take = _evaluate_position_protection(position, updated_orders or [])
+    if not has_take:
+        log(f"[WARN] {symbol}: protection refresh left position without take-profit, retrying once", Fore.YELLOW)
+        updated_orders = ensure_position_protection(
+            exchange,
+            symbol,
+            position,
+            protection_df,
+            updated_orders,
+            config=symbol_meta,
+        )
+        _, has_take = _evaluate_position_protection(position, updated_orders or [])
+        if not has_take:
+            log(f"[WARN] {symbol}: still no take-profit after retry; monitor manually", Fore.YELLOW)
     return updated_orders, True
 
 
