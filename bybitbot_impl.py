@@ -14672,8 +14672,11 @@ def run_cycle():
                         # Sanitize for spot and set category for Bybit v5
                         base_params = _sanitize_order_params_for_category(base_params, category)
                         if category == "spot" and side.lower() == "sell":
-                            log(f"[WARN] Skipping spot OPEN SELL for {sym}: shorting is not supported on spot", Fore.YELLOW)
-                            continue
+                            ok, err = _spot_funds_sufficient(ex, sym, side, qty, price)
+                            if not ok:
+                                log(f"[WARN] Skipping spot SELL for {sym}: {err}", Fore.YELLOW)
+                                send_tg(f"[WARN] {sym}: spot sell skipped — {err}")
+                                continue
                         scheme = ENTRY_LADDER_SCHEME if ENTRY_LADDER_SCHEME else [(1.0, 0.0)]
                         normalized_entries: list[tuple[float, float]] = []
                         for share, offset in scheme:
