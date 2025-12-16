@@ -1,8 +1,9 @@
-Changelog (newest first)
+- Changelog (newest first)
 
 1.1.3 (2025-12-16, commit pending)
-- Fixed protection checker so profit-side stops no longer count as take-profit; missing TP now triggers restoration even when a breakeven/trigger stop exists.
-- Added optional AI request context slimming flags and a dedicated UTF-8 error log (assets/error.log by default); pending restart to take effect.
+- Added directional auto-adjustments: opposing AI signals automatically trim or flip exposure while aligned signals scale into the trade, gated by confidence and configurable scale/reduce factors.
+- Anchored ATR-based stops and take-profits to the entry (when available), close immediately if the price has already violated the computed level, and log the breaching symbols for the SQLite protection history.
+- Added optional AI request context slimming plus a dedicated UTF-8 `assets/error.log` that now mirrors the raw console warnings/errors.
 
 1.1.2 (2025-12-15, commit pending)
 - Added a volatility-aware balance between news and technical analysis so the AI leans on catalysts in high ATR conditions and defaults to TA in calm markets.

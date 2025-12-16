@@ -729,6 +729,16 @@ AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
+AUTO_DIRECTION_ADJUST_ENABLED: bool = env_bool("AUTO_DIRECTION_ADJUST_ENABLED", True)
+AUTO_DIRECTION_REDUCE_FACTOR: float = max(
+    0.0, min(1.0, _float_from_env("AUTO_DIRECTION_REDUCE_FACTOR", 0.5))
+)
+AUTO_DIRECTION_SCALE_FACTOR: float = max(0.0, _float_from_env("AUTO_DIRECTION_SCALE_FACTOR", 0.25))
+AUTO_DIRECTION_MIN_QTY: float = max(0.0, _float_from_env("AUTO_DIRECTION_MIN_QTY", 0.0))
+AUTO_DIRECTION_MIN_CONFIDENCE: float = max(
+    0.0,
+    min(1.0, _float_from_env("AUTO_DIRECTION_MIN_CONFIDENCE", 0.65)),
+)
 DEFAULT_OPEN_MIN_CONFIDENCE: float = 0.7
 OPEN_MIN_CONFIDENCE: float = DEFAULT_OPEN_MIN_CONFIDENCE
 _LAST_COMMIT_HASH: Optional[str] = None
@@ -3145,6 +3155,102 @@ def ai_plan_trades(
     return None
 
 
+def _normalize_trade_side(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    if normalized in {"buy", "long"}:
+        return "buy"
+    if normalized in {"sell", "short"}:
+        return "sell"
+    return None
+
+
+def _extract_decision_confidence(decision: dict[str, Any]) -> float:
+    for key in ("confidence", "confidence_value", "confidenceValue"):
+        raw = decision.get(key)
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except Exception:
+            continue
+    return 0.0
+
+
+def _auto_directional_adjustment(
+    symbol: str,
+    decision: dict[str, Any],
+    current_position: dict[str, Any] | None,
+    extra_orders: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not AUTO_DIRECTION_ADJUST_ENABLED:
+        return extra_orders
+    position_qty = abs(
+        safe_float((current_position or {}).get("amount"))
+        or safe_float((current_position or {}).get("contracts"))
+        or 0.0
+    )
+    if not position_qty or position_qty <= 0:
+        return extra_orders
+    current_side = _normalize_trade_side((current_position or {}).get("side"))
+    if not current_side:
+        amt = (
+            safe_float((current_position or {}).get("contracts"))
+            or safe_float((current_position or {}).get("amount"))
+            or 0.0
+        )
+        if amt > 0:
+            current_side = "buy"
+        elif amt < 0:
+            current_side = "sell"
+    decision_side = _normalize_trade_side(decision.get("side"))
+    if not decision_side:
+        return extra_orders
+    action = (decision.get("action") or "").lower()
+    if action not in {"open", "manage", "close"}:
+        return extra_orders
+    confidence_value = _extract_decision_confidence(decision)
+    if confidence_value < AUTO_DIRECTION_MIN_CONFIDENCE:
+        return extra_orders
+    if any(str(order.get("note") or "").startswith("auto_direction") for order in extra_orders):
+        return extra_orders
+    if current_side and current_side != decision_side:
+        reduce_qty = min(position_qty, position_qty * AUTO_DIRECTION_REDUCE_FACTOR)
+        reduce_qty = max(reduce_qty, AUTO_DIRECTION_MIN_QTY)
+        if reduce_qty > 0:
+            extra_orders.insert(
+                0,
+                {
+                    "type": "market",
+                    "side": decision_side,
+                    "amount": reduce_qty,
+                    "reduceOnly": True,
+                    "note": "auto_direction_reduce",
+                },
+            )
+            log(
+                f"{symbol}: auto-direction reduce {reduce_qty:.6f} due to mismatch "
+                f"(position={current_side}, decision={decision_side})",
+                Fore.LIGHTBLUE_EX,
+            )
+    elif current_side == decision_side:
+        scale_qty = position_qty * AUTO_DIRECTION_SCALE_FACTOR
+        scale_qty = max(scale_qty, AUTO_DIRECTION_MIN_QTY)
+        if scale_qty > 0:
+            extra_orders.append(
+                {
+                    "type": "market",
+                    "side": decision_side,
+                    "amount": scale_qty,
+                    "note": "auto_direction_scale",
+                }
+            )
+            log(
+                f"{symbol}: auto-direction scale-in {scale_qty:.6f} (position aligned with {decision_side})",
+                Fore.LIGHTBLUE_EX,
+            )
+    return extra_orders
+
+
 def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache, counts):
     if not decision:
         return 0, positions_map, open_orders_cache
@@ -3290,6 +3396,8 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         extra_orders = []
     if spot_reduce_order:
         extra_orders.insert(0, spot_reduce_order)
+
+    extra_orders = _auto_directional_adjustment(sym, decision, current_position, extra_orders)
 
     def normalize_order_ids(value):
         if value is None:
