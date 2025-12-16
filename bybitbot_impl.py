@@ -32,6 +32,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from colorama import Fore, Style, init
 from openai import OpenAI
 from dotenv import dotenv_values
+import db_logger
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except ImportError:
@@ -77,6 +78,7 @@ def _resolve_repo_root(script_dir: Path) -> Path:
 REPO_ROOT = _resolve_repo_root(SCRIPT_DIR)
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 STATE_DIR = REPO_ROOT
+db_logger.initialize()
 def _configure_state_paths() -> None:
     global STATE_DIR
     global EQUITY_HISTORY_FILE
@@ -581,6 +583,15 @@ def _append_error_log(text: str) -> None:
         _maybe_rotate_file(path, ERROR_LOG_MAX_BYTES, ERROR_LOG_BACKUPS)
         with path.open("a", encoding="utf-8") as fp:
             fp.write(text + "\n")
+    except Exception:
+        pass
+    try:
+        severity = "INFO"
+        if "[ERROR]" in text or text.startswith("[ERROR]") or "[FAIL]" in text:
+            severity = "ERROR"
+        elif "[WARN]" in text:
+            severity = "WARN"
+        db_logger.log_error_event(text, severity=severity)
     except Exception:
         pass
 
@@ -6866,6 +6877,7 @@ def save_json_line(path, data):
             _maybe_rotate_file(p, AI_LOG_MAX_BYTES, AI_LOG_BACKUPS)
         entry = dict(data)
         entry.setdefault("timestamp", datetime.datetime.now(datetime.timezone.utc).isoformat())
+        db_logger.log_ai_decision(entry)
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
@@ -15379,6 +15391,10 @@ def run_cycle():
             log(warn_msg, Fore.YELLOW)
             try:
                 send_tg(warn_msg)
+            except Exception:
+                pass
+            try:
+                db_logger.log_protection_check(sym_active, reason, has_stop, has_take, needs_protection)
             except Exception:
                 pass
             unprotected_positions.append((sym_active, amount_val))
