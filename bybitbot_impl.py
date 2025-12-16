@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.7"
+BOT_VERSION = "1.1.8"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -11767,8 +11767,15 @@ def execute_extra_orders(
                 margin_buffer = max(0.0, margin_buffer - margin_required)
         except Exception as e:
             err_text = str(e)
-            order_errors.append(err_text)
-            log(f"[ERROR] Extra order #{idx} for {symbol} failed: {err_text}", Fore.RED)
+            text_lower = err_text.lower()
+            if "current position is zero" in text_lower or "110017" in text_lower:
+                log(
+                    f"[INFO] Extra order #{idx} for {symbol} failed due to zero position; skipping reduce-only placement.",
+                    Fore.LIGHTBLACK_EX,
+                )
+            else:
+                order_errors.append(err_text)
+                log(f"[ERROR] Extra order #{idx} for {symbol} failed: {err_text}", Fore.RED)
     if cancelled_success:
         send_tg(f"[INFO] {symbol}: cancelled reduce-only orders {', '.join(cancelled_success)}")
     if cancel_errors:

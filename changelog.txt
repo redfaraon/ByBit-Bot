@@ -6,6 +6,9 @@
 1.1.7 (2025-12-16, commit pending)
 - Prevent cleanup from cancelling reduce-only protection orders when a position was seen during the cycle (guards partial opens from losing SL/TP). Also stdout/stderr is now mirrored into the rotating main log.
 
+1.1.8 (2025-12-16, commit pending)
+- Treat Bybit 110017 (“current position is zero, cannot fix reduce-only order qty”) as a benign info case for extra orders instead of logging it as an error, avoiding noisy error spam when a reduce-only ladder overshoots residual size.
+
 1.1.5 (2025-12-16, commit 1851276)
 - Fixed protection restore crash (`entry_price` unbound) so stop/TP recalculation no longer aborts and keeps positions from being closed unnecessarily.
 
