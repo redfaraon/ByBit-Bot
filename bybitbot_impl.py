@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.6"
+BOT_VERSION = "1.1.7"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -12987,6 +12987,7 @@ def apply_trade_plan_snapshot(
     user_key = user_id or "default"
     user_tag = f"[user={user_key}]"
     open_skip_notes: defaultdict[str, list[str]] = defaultdict(list)
+    symbols_with_position_seen: set[str] = set()
 
     def log_user(msg: str) -> None:
         tagged = f"{user_tag} {msg}"
@@ -14206,6 +14207,7 @@ def run_cycle():
             has_position = abs(initial_position_amount) > 0
             if has_position:
                 clear_pending_entry(sym, active_user_id)
+                symbols_with_position_seen.add(sym)
             open_orders_symbol = open_orders_prefetch.get(sym)
             sym_confidence_text: str | None = None
             sym_confidence_value: float | None = None
@@ -15251,6 +15253,8 @@ def run_cycle():
             )
             if final_position_amount is None or not math.isfinite(final_position_amount):
                 final_position_amount = 0.0
+            if abs(final_position_amount) > 0:
+                symbols_with_position_seen.add(sym)
             final_protection_orders = _extract_protection_orders(open_orders_symbol)
             final_protection_signature = _protection_orders_signature(open_orders_symbol)
             protection_changed = initial_protection_signature != final_protection_signature
@@ -15380,6 +15384,8 @@ def run_cycle():
             combined_positions = refreshed_positions
         for sym_cleanup in cleanup_symbols:
             if not sym_cleanup:
+                continue
+            if sym_cleanup in symbols_with_position_seen:
                 continue
             position_payload = combined_positions.get(sym_cleanup)
             amount_val = safe_float(
