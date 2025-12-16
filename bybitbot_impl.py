@@ -10330,6 +10330,20 @@ def _cleanup_redundant_stop_orders(
     return cancelled_entries, cancel_errors
 
 
+def _close_position_now(
+    exchange, symbol, qty, close_side, *, position_idx: int | None = None
+) -> None:
+    params = {"reduceOnly": True}
+    if position_idx is not None:
+        params["positionIdx"] = position_idx
+    try:
+        exchange.create_order(symbol, "market", close_side, qty, None, params)
+        log(f"[INFO] {symbol}: immediate close {close_side.upper()} {qty:.6f} due to protection breach", Fore.YELLOW)
+    except Exception as exc:
+        log(f"[WARN] Failed to close {symbol} during protection check: {exc}", Fore.YELLOW)
+
+
+
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
     cfg = config or {}
     position_amount = safe_float((position or {}).get("amount"))
@@ -10426,7 +10440,11 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         return open_orders or []
 
     explicit_entry = safe_float(target_spec.get("entryPrice") or target_spec.get("entry_price"))
-    reference_price = explicit_entry if explicit_entry and math.isfinite(explicit_entry) else price
+    reference_price = price
+    if explicit_entry and math.isfinite(explicit_entry):
+        reference_price = explicit_entry
+    elif entry_price and math.isfinite(entry_price):
+        reference_price = entry_price
 
     if is_long:
         stop_price = price - sl_mult * atrv
@@ -10467,6 +10485,31 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = explicit_stop
     if explicit_take is not None and math.isfinite(explicit_take):
         take_price = explicit_take
+
+    # -- immediate exit check --
+    def _stop_breached(curr_price: float | None, target: float | None) -> bool:
+        if curr_price is None or target is None or not math.isfinite(curr_price) or not math.isfinite(target):
+            return False
+        if is_long:
+            return curr_price <= target + 1e-9
+        return curr_price >= target - 1e-9
+
+    def _take_reached(curr_price: float | None, target: float | None) -> bool:
+        if curr_price is None or target is None or not math.isfinite(curr_price) or not math.isfinite(target):
+            return False
+        if is_long:
+            return curr_price >= target - 1e-9
+        return curr_price <= target + 1e-9
+
+    if price is not None and math.isfinite(price) and entry_price is not None and math.isfinite(entry_price):
+        close_side = "sell" if is_long else "buy"
+        position_idx = get_position_idx(close_side)
+        if _stop_breached(price, stop_price):
+            _close_position_now(exchange, symbol, position_qty, close_side, position_idx=position_idx)
+            return open_orders or []
+        if _take_reached(price, take_price):
+            _close_position_now(exchange, symbol, position_qty, close_side, position_idx=position_idx)
+            return open_orders or []
 
     trailing_offset = None
     if trailing_requested:
