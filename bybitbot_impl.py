@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.2"
+BOT_VERSION = "1.1.3"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -236,6 +236,8 @@ MASTER_PROMPT_MASTER_ID = os.getenv("MASTER_PROMPT_MASTER_ID")
 MASTER_DECISIONS_FILE: Optional[Path] = None
 MASTER_DECISION_CACHE: dict[str, Any] = {}
 MASTER_DECISION_META: dict[str, Any] = {}
+AI_REQUESTS_FULL_CONTEXT = str(os.getenv("AI_REQUESTS_FULL_CONTEXT", "0")).strip().lower() in {"1", "true", "yes", "on"}
+AI_REQUESTS_MAX_CONTEXT_BARS = max(0, int(os.getenv("AI_REQUESTS_MAX_CONTEXT_BARS", "0")))
 
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
@@ -289,6 +291,18 @@ else:
 MAIN_LOG_MAX_BYTES = _bytes_from_env("BYBIT_MAIN_LOG_MAX_MB", DEFAULT_MAIN_LOG_MAX_MB)
 MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", "5")))
 MAIN_LOG_ENABLED = str(os.getenv("BYBIT_MAIN_LOG_DISABLE", "0")).lower() not in {"1", "true", "yes"}
+DEFAULT_ERROR_LOG_MAX_MB = 8.0
+_error_log_path_raw = os.getenv("BYBIT_ERROR_LOG")
+if _error_log_path_raw:
+    try:
+        ERROR_LOG_PATH = Path(_error_log_path_raw).expanduser()
+    except Exception:
+        ERROR_LOG_PATH = REPO_ROOT / "assets" / "error.log"
+else:
+    ERROR_LOG_PATH = REPO_ROOT / "assets" / "error.log"
+ERROR_LOG_MAX_BYTES = _bytes_from_env("BYBIT_ERROR_LOG_MAX_MB", DEFAULT_ERROR_LOG_MAX_MB)
+ERROR_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_ERROR_LOG_BACKUPS", "5")))
+ERROR_LOG_ENABLED = str(os.getenv("BYBIT_ERROR_LOG_DISABLE", "0")).lower() not in {"1", "true", "yes"}
 DEFAULT_ATR_GUARD_MAX_RATIO = 0.055
 DEFAULT_ATR_GUARD_MIN_RATIO = 0.018
 DEFAULT_ATR_GUARD_LOW_BOOST = 1.15
@@ -507,6 +521,15 @@ def log(msg: str, color=Fore.WHITE):
     _LOG_HISTORY.append(record)
     print(color + record + Style.RESET_ALL)
     _append_main_log(record)
+    if (
+        color in (Fore.YELLOW, Fore.RED)
+        or msg.startswith("[WARN]")
+        or msg.startswith("[ERROR]")
+        or msg.startswith("[FAIL]")
+        or "[EX] fail" in msg
+        or "Traceback" in msg
+    ):
+        _append_error_log(record)
     if TELEGRAM_FORWARD_LOGS:
         _enqueue_tg_log(record)
 
@@ -541,6 +564,21 @@ def _append_main_log(text: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         _maybe_rotate_file(path, MAIN_LOG_MAX_BYTES, MAIN_LOG_BACKUPS)
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(text + "\n")
+    except Exception:
+        pass
+
+
+def _append_error_log(text: str) -> None:
+    if not ERROR_LOG_ENABLED:
+        return
+    path = ERROR_LOG_PATH
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _maybe_rotate_file(path, ERROR_LOG_MAX_BYTES, ERROR_LOG_BACKUPS)
         with path.open("a", encoding="utf-8") as fp:
             fp.write(text + "\n")
     except Exception:
@@ -9949,9 +9987,8 @@ def _evaluate_position_protection(position_payload: dict[str, Any] | None, order
             if (is_long and stop_val < entry_price - 1e-9) or (not is_long and stop_val > entry_price + 1e-9):
                 has_stop_loss = True
             else:
-                # Stop is on the profitable side; it still protects capital, so count as stop + (bonus) take.
+                # Stop is on or beyond breakeven/profit side: treat as protection, but do NOT count as take-profit.
                 has_stop_loss = True
-                has_take_profit = True or has_take_profit
         else:
             # Without entry price, treat any stop as protection to avoid false negatives.
             has_stop_loss = True
@@ -12259,6 +12296,16 @@ def ai_decision(
         response_reason = (decision.get("reason") or "").replace("\n", " ")[:200]
         log(f"[AI RESPONSE] initial {symbol}: action={response_action} reason={response_reason}", Fore.LIGHTBLACK_EX)
 
+        context_payload = None
+        if AI_REQUESTS_FULL_CONTEXT:
+            context_payload = current_context
+        elif AI_REQUESTS_MAX_CONTEXT_BARS > 0 and isinstance(current_context, dict):
+            trimmed: dict[str, Any] = {}
+            for tf_key, tf_bars in current_context.items():
+                if isinstance(tf_bars, list) and tf_bars:
+                    trimmed[tf_key] = tf_bars[-AI_REQUESTS_MAX_CONTEXT_BARS :]
+            context_payload = trimmed
+
         save_json_line(
             AI_REQUESTS_LOG,
             {
@@ -12269,7 +12316,7 @@ def ai_decision(
                 "token_soft_limit": TOKEN_SOFT_LIMIT,
                 "duration_sec": round(duration_init, 4),
                 "context_counts": context_counts.copy(),
-                "context": current_context,
+                "context": context_payload,
                 "needs": needs,
                 "auto_needs": auto_needs_triggered,
                 "low_confidence": low_confidence,
@@ -12611,6 +12658,16 @@ def ai_decision(
         response_action_extra = (decision.get("action") or "").lower() or "skip"
         response_reason_extra = (decision.get("reason") or "").replace("\n", " ")[:200]
         log(f"[AI RESPONSE] extra {symbol}: action={response_action_extra} reason={response_reason_extra} needs_followup={needs_followup}", Fore.LIGHTBLACK_EX)
+        context_payload_extra = None
+        if AI_REQUESTS_FULL_CONTEXT:
+            context_payload_extra = current_context
+        elif AI_REQUESTS_MAX_CONTEXT_BARS > 0 and isinstance(current_context, dict):
+            trimmed_extra: dict[str, Any] = {}
+            for tf_key, tf_bars in current_context.items():
+                if isinstance(tf_bars, list) and tf_bars:
+                    trimmed_extra[tf_key] = tf_bars[-AI_REQUESTS_MAX_CONTEXT_BARS :]
+            context_payload_extra = trimmed_extra
+
         save_json_line(
             AI_REQUESTS_LOG,
             {
@@ -12621,7 +12678,7 @@ def ai_decision(
                 "token_soft_limit": TOKEN_SOFT_LIMIT,
                 "duration_sec": round(duration_extra, 4),
                 "context_counts": context_counts.copy(),
-                "context": current_context,
+                "context": context_payload_extra,
                 "extra": extra,
                 "bias": bias_flag,
                 "needs_followup": needs_followup,

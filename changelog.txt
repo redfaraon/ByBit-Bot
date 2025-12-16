@@ -1,5 +1,9 @@
 Changelog (newest first)
 
+1.1.3 (2025-12-16, commit pending)
+- Fixed protection checker so profit-side stops no longer count as take-profit; missing TP now triggers restoration even when a breakeven/trigger stop exists.
+- Added optional AI request context slimming flags and a dedicated UTF-8 error log (assets/error.log by default); pending restart to take effect.
+
 1.1.2 (2025-12-15, commit pending)
 - Added a volatility-aware balance between news and technical analysis so the AI leans on catalysts in high ATR conditions and defaults to TA in calm markets.
 - Spot SELLs now execute against available balances (no blanket short block); skips only when balance is insufficient.
