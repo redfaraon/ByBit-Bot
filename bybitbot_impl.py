@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.9"
+BOT_VERSION = "1.1.10"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -114,6 +114,9 @@ def _configure_state_paths() -> None:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+
+# Per-cycle storage for pseudo-trailing decisions.
+_PREV_UNREALIZED_PNL: dict[str, float] = {}
 
 MARKET_MODE_GUIDE: dict[str, Any] = {
     "market_modes": {
@@ -797,6 +800,9 @@ BREAKEVEN_BUFFER_ATR: float = 0.15
 TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
 TRAILING_DYNAMIC_FACTOR: float = 0.65
 TRAILING_DYNAMIC_MIN_ATR: float = 0.35
+PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
+PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
+PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
 TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
@@ -3740,6 +3746,7 @@ def refresh_settings():
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
+    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
     _configure_state_paths()
@@ -3824,6 +3831,21 @@ def refresh_settings():
     TRAILING_DYNAMIC_TRIGGER_ATR = max(0.0, TRAILING_DYNAMIC_TRIGGER_ATR)
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
+    try:
+        PSEUDOTRAIL_MIN_IMPROVE_ATR = float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+    except (TypeError, ValueError):
+        PSEUDOTRAIL_MIN_IMPROVE_ATR = 0.35
+    try:
+        PSEUDOTRAIL_STOP_LOCK_FACTOR = float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+    except (TypeError, ValueError):
+        PSEUDOTRAIL_STOP_LOCK_FACTOR = 0.35
+    try:
+        PSEUDOTRAIL_TP_EXTEND_FACTOR = float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+    except (TypeError, ValueError):
+        PSEUDOTRAIL_TP_EXTEND_FACTOR = 0.25
+    PSEUDOTRAIL_MIN_IMPROVE_ATR = max(0.0, PSEUDOTRAIL_MIN_IMPROVE_ATR)
+    PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
+    PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
     TELEGRAM_FORWARD_LOGS = env_int("TELEGRAM_FORWARD_LOGS", int(TELEGRAM_FORWARD_LOGS)) != 0
     TELEGRAM_LOG_BATCH_SIZE = max(1, env_int("TELEGRAM_LOG_BATCH_SIZE", TELEGRAM_LOG_BATCH_SIZE))
     try:
@@ -10497,6 +10519,8 @@ def _close_position_now(
 
 
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
+    global _PREV_UNREALIZED_PNL
+    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     cfg = config or {}
     position_amount = safe_float((position or {}).get("amount"))
     if position_amount is None or not math.isfinite(position_amount):
@@ -10613,6 +10637,49 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             profit_distance = max(0.0, price - entry_price)
         else:
             profit_distance = max(0.0, entry_price - price)
+
+    # Pseudo-trailing across cycles: if unrealized PnL improved since the previous cycle, gently
+    # tighten the stop and let the take-profit breathe a bit further. If PnL worsened, leave
+    # protection unchanged to avoid expanding risk.
+    current_unreal = safe_float(position.get("unrealizedPnl") or (position.get("raw") or {}).get("unrealisedPnl"))
+    prev_unreal = _PREV_UNREALIZED_PNL.get(symbol) if isinstance(_PREV_UNREALIZED_PNL, dict) else None
+    if (
+        current_unreal is not None
+        and math.isfinite(current_unreal)
+        and prev_unreal is not None
+        and math.isfinite(prev_unreal)
+        and atrv is not None
+        and math.isfinite(atrv)
+        and atrv > 0
+    ):
+        delta_unreal = current_unreal - prev_unreal
+        improve_threshold = atrv * PSEUDOTRAIL_MIN_IMPROVE_ATR
+        if delta_unreal >= improve_threshold and improve_threshold > 0:
+            lock_distance = delta_unreal * PSEUDOTRAIL_STOP_LOCK_FACTOR
+            if lock_distance > 0:
+                if is_long:
+                    candidate_stop = price - lock_distance
+                    if math.isfinite(candidate_stop) and candidate_stop > stop_price:
+                        stop_price = candidate_stop
+                else:
+                    candidate_stop = price + lock_distance
+                    if math.isfinite(candidate_stop) and candidate_stop < stop_price:
+                        stop_price = candidate_stop
+            if take_price is not None and math.isfinite(take_price):
+                extend = delta_unreal * PSEUDOTRAIL_TP_EXTEND_FACTOR
+                if extend > 0:
+                    if is_long:
+                        candidate_take = take_price + extend
+                        if math.isfinite(candidate_take):
+                            take_price = candidate_take
+                    else:
+                        candidate_take = take_price - extend
+                        if math.isfinite(candidate_take):
+                            take_price = candidate_take
+            log(
+                f"[INFO] {symbol}: pseudo-trailing tightened after PnL improvement (+{delta_unreal:.4f})",
+                Fore.LIGHTBLUE_EX,
+            )
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
         breakeven_buffer = atrv * BREAKEVEN_BUFFER_ATR
@@ -13160,6 +13227,7 @@ def run_cycle():
     global AUTO_MARGIN_SCALE
     global AUTO_MARGIN_SCALE_RATIO
     global AUTO_MARGIN_CONFIDENCE_MULT
+    global _PREV_UNREALIZED_PNL
     enable_stdio_logging()
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     is_master_user = (
@@ -13364,6 +13432,12 @@ def run_cycle():
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
     cycle_state = _load_cycle_state()
+    # Preserve previous per-symbol unrealized PnL for pseudo-trailing decisions this cycle.
+    prev_unreal_map = cycle_state.get("positions_unrealized") if isinstance(cycle_state, dict) else {}
+    try:
+        _PREV_UNREALIZED_PNL = {str(k): float(v) for k, v in (prev_unreal_map or {}).items() if v is not None}
+    except Exception:
+        _PREV_UNREALIZED_PNL = {}
     real_cycles_completed = safe_int(cycle_state.get("total_cycles")) or 0
     next_cycle_number = real_cycles_completed + 1
     cycle_counter = str(next_cycle_number)
@@ -16017,6 +16091,22 @@ def run_cycle():
     log(end_banner, Fore.MAGENTA)
     send_tg(f"{session_separator}\nEND SESSION {end_stamp}\n{session_separator}")
     _flush_tg_log_buffer(force=True)
+    # Persist per-symbol unrealized PnL snapshot for next-cycle pseudo-trailing decisions.
+    if isinstance(cycle_state, dict):
+        try:
+            cycle_state["positions_unrealized"] = {
+                str(sym): float(val)
+                for sym, val in (
+                    (
+                        symbol_key,
+                        safe_float(payload.get("unrealizedPnl") or (payload.get("raw") or {}).get("unrealisedPnl")),
+                    )
+                    for symbol_key, payload in (final_positions_map or {}).items()
+                )
+                if val is not None and math.isfinite(val)
+            }
+        except Exception:
+            pass
     cycle_commit_hash = source_hash or head_commit_hash or None
     cycle_commit_timestamp = source_timestamp_env or head_commit_timestamp or None
     _record_cycle_completion(

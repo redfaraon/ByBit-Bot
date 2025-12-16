@@ -1,5 +1,9 @@
 - Changelog (newest first)
 
+1.1.10 (2025-12-16, commit pending)
+- Added a balanced pseudo-trailing mode that tightens stops and can extend take-profits whenever unrealized PnL improves versus the previous cycle, while leaving protection untouched if the drawdown grows.
+- Remember per-symbol unrealized PnL in `cycle_state.json` so the pseudo-trailing decision can compare cycles, and expose `PSEUDOTRAIL_*` knobs for fine-grained tuning.
+
 1.1.6 (2025-12-16, commit f9f415b)
 - Auto-direction scale-ins now set `reduceOnly=False` (previously inherited reduce flag), preventing accidental instant closes when adding to an aligned position.
 
@@ -425,3 +429,14 @@ Changelog (newest first)
 2025.10.16.16B
 - Expanded default pools (PAIR_UNIVERSE / INDICATOR_POOL / DEFAULT_TIMEFRAMES) with optional env overrides.
 - Forced review of symbols with open positions or orders; session banners honour timezone; order checks now use safe_float.
+
+-
+Recent commits (last 8)
+- 2025-12-16 e430b4b fix: track position symbols in cleanup
+- 2025-12-16 c0cfe22 chore: soften zero-position reduce-only errors
+- 2025-12-16 d526cbb fix: keep protection after partial open
+- 2025-12-16 d50e4bb feat: tee stdout to main log
+- 2025-12-16 f9f415b fix: mark scale-ins non-reduce
+- 2025-12-16 1851276 fix: protect restore entry price
+- 2025-12-16 0fcad9a fix: stable fallback and env init
+- 2025-12-16 e5848b4 feat: auto adjust exposure direction
