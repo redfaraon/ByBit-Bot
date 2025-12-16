@@ -1,15 +1,15 @@
 - Changelog (newest first)
 
-1.1.4 (2025-12-16, commit pending)
-- Fixed an AUTODIRECTION env dependency at import time (no more `env_bool` NameError on fresh boots) and tuned the fallback loader to prefer `origin/stable` over the local `stable` branch when materializing backup scripts.
-
-1.1.5 (2025-12-16, commit pending)
-- Fixed protection restore crash (`entry_price` unbound) so stop/TP recalculation no longer aborts and keeps positions from being closed unnecessarily.
-
-1.1.6 (2025-12-16, commit pending)
+1.1.6 (2025-12-16, commit f9f415b)
 - Auto-direction scale-ins now set `reduceOnly=False` (previously inherited reduce flag), preventing accidental instant closes when adding to an aligned position.
 
-1.1.3 (2025-12-16, commit pending)
+1.1.5 (2025-12-16, commit 1851276)
+- Fixed protection restore crash (`entry_price` unbound) so stop/TP recalculation no longer aborts and keeps positions from being closed unnecessarily.
+
+1.1.4 (2025-12-16, commit 0fcad9a)
+- Fixed an AUTODIRECTION env dependency at import time (no more `env_bool` NameError on fresh boots) and tuned the fallback loader to prefer `origin/stable` over the local `stable` branch when materializing backup scripts.
+
+1.1.3 (2025-12-16, commit e5848b4/9800fd0)
 - Added directional auto-adjustments: opposing AI signals automatically trim or flip exposure while aligned signals scale into the trade, gated by confidence and configurable scale/reduce factors.
 - Anchored ATR-based stops and take-profits to the entry (when available), close immediately if the price has already violated the computed level, and log the breaching symbols for the SQLite protection history.
 - Added optional AI request context slimming plus a dedicated UTF-8 `assets/error.log` that now mirrors the raw console warnings/errors.
@@ -18,8 +18,6 @@
 - Added a volatility-aware balance between news and technical analysis so the AI leans on catalysts in high ATR conditions and defaults to TA in calm markets.
 - Spot SELLs now execute against available balances (no blanket short block); skips only when balance is insufficient.
 - Highlighted open/skip decisions in the logs with regime/analysis balance details, SL/TP multipliers, reason for skipping, and any extra logic guiding the entry.
-1.1.3 (2025-12-16, commit pending)
-- Anchored ATR-derived stops/TPs to the entry price whenever available, added immediate market/session closes when the price crosses those computed levels, and now log which symbol triggered the protection breach so the DB shows it reliably.
 
 1.1.1 (2025-12-15, commit pending)
 - Embedded the structured market-mode JSON guide into symbol prompts, scaled risk per regime, and enforced the new confidence floors so trend/countertrend/range behaviors match the documented rules.

@@ -596,6 +596,49 @@ def _append_error_log(text: str) -> None:
         pass
 
 
+class _StdTee:
+    """Mirror stdout/stderr into the main rotating log."""
+    def __init__(self, original_stream, prefix: str) -> None:
+        self._orig = original_stream
+        self._prefix = prefix
+
+    def write(self, data) -> None:
+        if data is None:
+            return
+        try:
+            self._orig.write(data)
+        except Exception:
+            pass
+        try:
+            for line in str(data).splitlines():
+                if not line:
+                    continue
+                _append_main_log(f"{self._prefix} {line}")
+        except Exception:
+            pass
+
+    def flush(self) -> None:
+        try:
+            self._orig.flush()
+        except Exception:
+            pass
+
+
+_STDIO_TEE_ENABLED = False
+
+
+def enable_stdio_logging() -> None:
+    global _STDIO_TEE_ENABLED
+    if _STDIO_TEE_ENABLED:
+        return
+    try:
+        sys.stdout = _StdTee(sys.stdout, "[STDOUT]")
+        sys.stderr = _StdTee(sys.stderr, "[STDERR]")
+        _STDIO_TEE_ENABLED = True
+    except Exception:
+        pass
+
+
 def _append_user_bybit_log(user_id: str | None, text: str) -> None:
     if not user_id:
         return
@@ -13109,6 +13152,7 @@ def run_cycle():
     global AUTO_MARGIN_SCALE
     global AUTO_MARGIN_SCALE_RATIO
     global AUTO_MARGIN_CONFIDENCE_MULT
+    enable_stdio_logging()
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     is_master_user = (
         (not MASTER_DECISIONS_SHARE)
