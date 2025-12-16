@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.8"
+BOT_VERSION = "1.1.9"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -13169,6 +13169,8 @@ def run_cycle():
     )
     user_tag = f"[user={active_user_id}]"
 
+    symbols_with_position_seen: set[str] = set()
+
     def log_user(msg: str, *, color: str = Fore.LIGHTBLACK_EX) -> None:
         tagged = f"{user_tag} {msg}"
         log(tagged, color)
@@ -14215,6 +14217,7 @@ def run_cycle():
             if has_position:
                 clear_pending_entry(sym, active_user_id)
                 symbols_with_position_seen.add(sym)
+                symbols_with_position_seen.add(sym)
             open_orders_symbol = open_orders_prefetch.get(sym)
             sym_confidence_text: str | None = None
             sym_confidence_value: float | None = None
@@ -15260,6 +15263,8 @@ def run_cycle():
             )
             if final_position_amount is None or not math.isfinite(final_position_amount):
                 final_position_amount = 0.0
+            if abs(final_position_amount) > 0:
+                symbols_with_position_seen.add(sym)
             if abs(final_position_amount) > 0:
                 symbols_with_position_seen.add(sym)
             final_protection_orders = _extract_protection_orders(open_orders_symbol)
