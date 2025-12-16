@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.3"
+BOT_VERSION = "1.1.4"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -729,7 +729,7 @@ AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
-AUTO_DIRECTION_ADJUST_ENABLED: bool = env_bool("AUTO_DIRECTION_ADJUST_ENABLED", True)
+AUTO_DIRECTION_ADJUST_ENABLED: bool = str(os.getenv("AUTO_DIRECTION_ADJUST_ENABLED", "1")).strip().lower() not in {"0", "false", "no"}
 AUTO_DIRECTION_REDUCE_FACTOR: float = max(
     0.0, min(1.0, _float_from_env("AUTO_DIRECTION_REDUCE_FACTOR", 0.5))
 )

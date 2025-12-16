@@ -706,16 +706,16 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
         return script_path
 
     candidate_refs: list[str] = []
-    commit_attempts: list[str] = []
 
     if "/" in target:
         candidate_refs.append(target)
     else:
-        commit_attempts.append(target)
-        candidate_refs.append(target)
+        # Prefer remote tracking ref first so stable comes from origin/stable
+        # even when a local branch with the same name exists.
         candidate_refs.append(f"origin/{target}")
+        candidate_refs.append(target)
 
-    for ref in commit_attempts + candidate_refs:
+    for ref in candidate_refs:
         path = try_show(ref)
         if path:
             return path
