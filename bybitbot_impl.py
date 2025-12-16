@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.4"
+BOT_VERSION = "1.1.5"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -10548,6 +10548,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         return open_orders or []
 
     explicit_entry = safe_float(target_spec.get("entryPrice") or target_spec.get("entry_price"))
+    entry_price = safe_float(position.get("entryPrice") or position.get("avgEntryPrice") or position.get("entry_price"))
     reference_price = price
     if explicit_entry and math.isfinite(explicit_entry):
         reference_price = explicit_entry
@@ -10561,7 +10562,6 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = price + sl_mult * atrv
         take_price = price - tp_mult * atrv
 
-    entry_price = safe_float(position.get("entryPrice") or position.get("avgEntryPrice") or position.get("entry_price"))
     breakeven_note = None
     profit_distance = 0.0
     if entry_price and math.isfinite(entry_price) and math.isfinite(price):
