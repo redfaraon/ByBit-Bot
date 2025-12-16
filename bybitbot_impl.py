@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.5"
+BOT_VERSION = "1.1.6"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -3241,6 +3241,7 @@ def _auto_directional_adjustment(
                     "type": "market",
                     "side": decision_side,
                     "amount": scale_qty,
+                    "reduceOnly": False,
                     "note": "auto_direction_scale",
                 }
             )
