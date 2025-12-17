@@ -10619,7 +10619,18 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             log(f"⚠️ {symbol}: не удалось вычислить ATR для защиты позиции ({exc})", Fore.YELLOW)
             return open_orders or []
     last_row = df_calc.iloc[-1]
-    price = safe_float(last_row.get("close"))
+    # Use live market/mark price when possible; candle close can be stale enough to create invalid triggers
+    # (e.g. stop trigger <= current price) and leave positions unprotected.
+    price = safe_float(
+        position.get("markPrice")
+        or position.get("mark_price")
+        or position.get("lastPrice")
+        or position.get("last_price")
+        or (position.get("raw") or {}).get("markPrice")
+        or (position.get("raw") or {}).get("lastPrice")
+    )
+    if price is None or not math.isfinite(price):
+        price = safe_float(last_row.get("close"))
     atrv = safe_float(last_row.get("atr"))
     if not (math.isfinite(price) and math.isfinite(atrv) and atrv and atrv > 0):
         log(f"⚠️ {symbol}: нет валидных значений ATR/цены для защиты позиции", Fore.YELLOW)
@@ -16246,16 +16257,23 @@ def main():
             delay_minutes, target_dt, override_applied = _consume_schedule_override(base_delay)
             if delay_minutes <= 0:
                 break
-            try:
-                remaining_seconds = max(0.0, float(delay_minutes) * 60.0)
-            except (TypeError, ValueError):
-                base_delay = DEFAULT_NEXT_RUN_MINUTES
-                delay_minutes = base_delay
-                continue
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            if target_dt is None:
+                try:
+                    delay_minutes = float(delay_minutes)
+                except (TypeError, ValueError):
+                    base_delay = DEFAULT_NEXT_RUN_MINUTES
+                    delay_minutes = base_delay
+                    continue
+                if not math.isfinite(delay_minutes) or delay_minutes <= 0:
+                    break
+                target_dt = now_utc + datetime.timedelta(minutes=delay_minutes)
+            if target_dt.tzinfo is None:
+                target_dt = target_dt.replace(tzinfo=datetime.timezone.utc)
+            remaining_seconds = max(0.0, (target_dt - now_utc).total_seconds())
+            delay_minutes = remaining_seconds / 60.0
             if remaining_seconds <= 0:
                 break
-            if target_dt is None:
-                target_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
             local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
             next_local = target_dt.astimezone(local_tz)
             eta_msg = (
@@ -16272,18 +16290,24 @@ def main():
             )
             interrupted = False
             try:
-                while remaining_seconds > 0:
+                while True:
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    remaining_seconds = (target_dt - now_utc).total_seconds()
+                    if remaining_seconds <= 0:
+                        break
                     step = min(progress_interval, remaining_seconds)
                     if _SCHEDULE_EVENT.wait(step):
                         _SCHEDULE_EVENT.clear()
                         interrupted = True
                         break
-                    remaining_seconds -= step
-                    if remaining_seconds <= 0 or not progress_enabled:
+                    if not progress_enabled:
+                        continue
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    remaining_seconds = max(0.0, (target_dt - now_utc).total_seconds())
+                    if remaining_seconds <= 0:
                         continue
                     minutes_left = remaining_seconds / 60.0
-                    eta_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining_seconds)
-                    eta_local = eta_dt.astimezone(local_tz)
+                    eta_local = target_dt.astimezone(local_tz)
                     progress_msg = (
                         f"ℹ️ Осталось ~{minutes_left:.1f} мин до следующей сессии "
                         f"({eta_local.strftime('%H:%M:%S %Z')})"
