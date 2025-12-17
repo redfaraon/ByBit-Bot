@@ -10652,7 +10652,10 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     delta_unreal: float | None = None
     if current_valid and prev_valid and atrv is not None and math.isfinite(atrv) and atrv > 0:
         delta_unreal = current_unreal - prev_unreal
-        improve_threshold = atrv * PSEUDOTRAIL_MIN_IMPROVE_ATR
+        # Convert ATR (price units) into approximate PnL units by scaling with position size,
+        # then require that unrealized PnL improvement clears a configurable fraction of this.
+        atr_pnl = atrv * position_qty if position_qty and math.isfinite(position_qty) else 0.0
+        improve_threshold = atr_pnl * PSEUDOTRAIL_MIN_IMPROVE_ATR if atr_pnl > 0 else 0.0
         if delta_unreal >= improve_threshold and improve_threshold > 0:
             lock_distance = delta_unreal * PSEUDOTRAIL_STOP_LOCK_FACTOR
             if lock_distance > 0:
