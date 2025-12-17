@@ -10720,32 +10720,31 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                         candidate_take = take_price - extend
                         if math.isfinite(candidate_take):
                             take_price = candidate_take
-            stop_delta = (
-                (stop_price - initial_stop_price)
-                if initial_stop_price is not None
+            def _fmt_px(value: float | None) -> str:
+                return f"{value:.4f}" if value is not None and math.isfinite(value) else "n/a"
+
+            stop_transition_text = ""
+            if (
+                initial_stop_price is not None
                 and math.isfinite(initial_stop_price)
                 and stop_price is not None
                 and math.isfinite(stop_price)
-                else None
-            )
-            take_delta = (
-                (take_price - initial_take_price)
-                if initial_take_price is not None
+            ):
+                stop_transition_text = f", stop {_fmt_px(initial_stop_price)} -> {_fmt_px(stop_price)}"
+
+            take_transition_text = ""
+            if (
+                initial_take_price is not None
                 and math.isfinite(initial_take_price)
                 and take_price is not None
                 and math.isfinite(take_price)
-                else None
-            )
-            stop_delta_text = (
-                f", stop Δ={stop_delta:+.6f}" if stop_delta is not None and math.isfinite(stop_delta) else ""
-            )
-            take_delta_text = (
-                f", take Δ={take_delta:+.6f}" if take_delta is not None and math.isfinite(take_delta) else ""
-            )
+            ):
+                take_transition_text = f", take {_fmt_px(initial_take_price)} -> {_fmt_px(take_price)}"
+
             px_text = f", ΔPx≈{delta_price_equiv:.4f}, ATR={atrv:.4f}, triggerPx={improve_threshold:.4f}, qty={position_qty:.6f}"
             keep_tp_note = f", keep_tp={existing_take_count}" if has_take else ""
             log(
-                f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_delta_text}{take_delta_text}",
+                f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_transition_text}{take_transition_text}",
                 Fore.LIGHTBLUE_EX,
             )
         else:
