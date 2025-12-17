@@ -2631,8 +2631,8 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         '  "style": trading style label (e.g., balanced_intraday, momentum, risk-off) so the follow-up trade prompt can adopt a matching voice,\n'
         '  "trade_horizon": trading horizon label (e.g., scalping, intraday, short-term, midterm),\n'
         '  "max_positions": integer cap for concurrently open symbols (factor in current exposure + liquidity),\n'
-        '  "next_run_minutes": float delay before the next cycle (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
-        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or the equivalent offset),\n'
+        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or the equivalent offset; preferred),\n'
+        '  "next_run_minutes": float delay fallback if next_run_time is unavailable (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
         '  "notes": optional rationale describing how the news/indicators shaped this universe.'
         " Also include optional field 'news_requests' (symbols needing full news text)."
         " All of the returned metadata (timeframes, indicators, aggression, style, horizon, max positions, next run timing) will be applied directly to downstream initial requests and scheduling."
@@ -3082,8 +3082,8 @@ def ai_plan_trades(
         "    }\n"
         "  ],\n"
         '  "needs": [ {"symbol":"PAIR","timeframes":["1h"],"indicators":["ema100"]}, "news" ],\n'
-        '  "next_run_minutes": float,\n'
         '  "next_run_time": "2025-01-01T10:30:00Z",\n'
+        '  "next_run_minutes": float,\n'
         '  "notes": "optional"\n'
         "}\n"
         "For each decision choose the execution market: 'spot' for cash trades, or 'linear'/'inverse'/'derivatives' for perpetuals. "
@@ -13270,6 +13270,7 @@ def run_cycle():
     global AUTO_MARGIN_SCALE_RATIO
     global AUTO_MARGIN_CONFIDENCE_MULT
     global _PREV_UNREALIZED_PNL
+    cycle_start_utc = datetime.datetime.now(datetime.timezone.utc)
     enable_stdio_logging()
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
     is_master_user = (
@@ -15818,21 +15819,11 @@ def run_cycle():
 
     next_delay_minutes = None
     next_run_dt = None
-    if selection_next_run is not None:
-        try:
-            minutes_val = float(selection_next_run)
-        except (TypeError, ValueError):
-            minutes_val = None
-        if minutes_val and minutes_val > 0:
-            next_delay_minutes = minutes_val
-            next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes_val)
-            next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
-            msg = f"Next cycle in {minutes_val:.1f} min (~{next_local.strftime('%Y-%m-%d %H:%M:%S %Z')})"
-            log(msg, Fore.CYAN)
-            send_tg(msg)
-        else:
-            log('Invalid next_run_minutes from model.', Fore.YELLOW)
-    elif selection_next_time:
+    schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+    # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
+    # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
+    if selection_next_time:
         candidate = selection_next_time.strip() if isinstance(selection_next_time, str) else ""
         if candidate:
             iso_candidate = candidate.replace("Z", "+00:00")
@@ -15840,9 +15831,9 @@ def run_cycle():
                 target_dt = datetime.datetime.fromisoformat(iso_candidate)
                 if target_dt.tzinfo is None:
                     target_dt = target_dt.replace(tzinfo=datetime.timezone.utc)
-                delta = (target_dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0
-                if delta > 0:
-                    next_delay_minutes = delta
+                remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
+                if remaining > 0:
+                    next_delay_minutes = max(0.0, remaining)
                     next_run_dt = target_dt
                     next_local = target_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
                     msg = f"Next run scheduled for {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
@@ -15852,14 +15843,40 @@ def run_cycle():
                     log('next_run_time from model is in the past.', Fore.YELLOW)
             except Exception as exc:
                 log(f"Failed to parse next_run_time '{selection_next_time}': {exc}", Fore.YELLOW)
+
+    if next_delay_minutes is None and selection_next_run is not None:
+        try:
+            minutes_val = float(selection_next_run)
+        except (TypeError, ValueError):
+            minutes_val = None
+        if minutes_val and minutes_val > 0:
+            target_dt = cycle_start_utc + datetime.timedelta(minutes=float(minutes_val))
+            remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
+            next_delay_minutes = max(0.0, remaining)
+            next_run_dt = target_dt
+            next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+            msg = (
+                f"Next cycle target {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                f"(interval {minutes_val:.1f} min from cycle start, sleep {next_delay_minutes:.1f} min)"
+            )
+            log(msg, Fore.CYAN)
+            send_tg(msg)
+        else:
+            log('Invalid next_run_minutes from model.', Fore.YELLOW)
+
     if next_delay_minutes is None:
-        next_delay_minutes = DEFAULT_NEXT_RUN_MINUTES
-        fallback_msg = f"Next cycle defaulting to {next_delay_minutes:.0f} minutes."
+        target_dt = cycle_start_utc + datetime.timedelta(minutes=float(DEFAULT_NEXT_RUN_MINUTES))
+        remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
+        next_delay_minutes = max(0.0, remaining)
+        next_run_dt = target_dt
+        fallback_msg = (
+            f"Next cycle defaulting to {DEFAULT_NEXT_RUN_MINUTES:.0f} minutes from cycle start "
+            f"(sleep {next_delay_minutes:.1f} min)."
+        )
         log(fallback_msg, Fore.LIGHTBLACK_EX)
         send_tg(fallback_msg)
-        next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=next_delay_minutes)
     elif next_run_dt is None:
-        next_run_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=next_delay_minutes)
+        next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
     changelog_state = ensure_changelog_announcement()

@@ -3,6 +3,8 @@
 1.1.10 (2025-12-16, commit pending)
 - Added a balanced pseudo-trailing mode that tightens stops and can extend take-profits whenever unrealized PnL improves versus the previous cycle, while leaving protection untouched if the drawdown grows.
 - Remember per-symbol unrealized PnL in `cycle_state.json` so the pseudo-trailing decision can compare cycles, and expose `PSEUDOTRAIL_*` knobs for fine-grained tuning.
+- Pseudo-trailing trigger now scales ATR by position size so small positions can still trigger; logs include the computed thresholds and stop/take deltas.
+- Scheduling now prefers `next_run_time` and interprets `next_run_minutes`/defaults as an interval from cycle start (not cycle end).
 
 1.1.6 (2025-12-16, commit f9f415b)
 - Auto-direction scale-ins now set `reduceOnly=False` (previously inherited reduce flag), preventing accidental instant closes when adding to an aligned position.
