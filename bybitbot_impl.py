@@ -803,6 +803,8 @@ TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
+MIN_NEXT_RUN_MINUTES: float = 5.0
+MAX_NEXT_RUN_FROM_START_MINUTES: float = 40.0
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
 TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
@@ -10621,7 +10623,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     last_row = df_calc.iloc[-1]
     # Use live market/mark price when possible; candle close can be stale enough to create invalid triggers
     # (e.g. stop trigger <= current price) and leave positions unprotected.
-    price = safe_float(
+    atrv = safe_float(last_row.get("atr"))
+    raw_mark_price = safe_float(
         position.get("markPrice")
         or position.get("mark_price")
         or position.get("lastPrice")
@@ -10629,9 +10632,22 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         or (position.get("raw") or {}).get("markPrice")
         or (position.get("raw") or {}).get("lastPrice")
     )
-    if price is None or not math.isfinite(price):
-        price = safe_float(last_row.get("close"))
-    atrv = safe_float(last_row.get("atr"))
+    close_price = safe_float(last_row.get("close"))
+    price = raw_mark_price if raw_mark_price is not None and math.isfinite(raw_mark_price) else close_price
+    # If mark price deviates слишком сильно от последней свечи (устаревший снимок), используем close.
+    if (
+        price is not None
+        and math.isfinite(price)
+        and close_price is not None
+        and math.isfinite(close_price)
+        and atrv is not None
+        and math.isfinite(atrv)
+        and atrv > 0
+        and raw_mark_price is not None
+        and math.isfinite(raw_mark_price)
+        and abs(raw_mark_price - close_price) > (5.0 * atrv)
+    ):
+        price = close_price
     if not (math.isfinite(price) and math.isfinite(atrv) and atrv and atrv > 0):
         log(f"⚠️ {symbol}: нет валидных значений ATR/цены для защиты позиции", Fore.YELLOW)
         return open_orders or []
@@ -10680,7 +10696,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         # For linear USDT contracts / spot this matches: ΔPnL ≈ ΔPrice * qty.
         delta_price_equiv = float(delta_unreal) / float(position_qty)
         improve_threshold = atrv * PSEUDOTRAIL_MIN_IMPROVE_ATR
-        if delta_price_equiv >= improve_threshold and improve_threshold > 0:
+        tol = max(improve_threshold * 1e-6, 1e-9)
+        if delta_price_equiv + tol >= improve_threshold and improve_threshold > 0:
             lock_distance = delta_price_equiv * PSEUDOTRAIL_STOP_LOCK_FACTOR
             if lock_distance > 0:
                 if is_long:
@@ -15875,6 +15892,11 @@ def run_cycle():
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
+    min_delay = max(0.0, float(MIN_NEXT_RUN_MINUTES))
+    max_delay = max(
+        0.0,
+        (cycle_start_utc + datetime.timedelta(minutes=float(MAX_NEXT_RUN_FROM_START_MINUTES)) - schedule_now_utc).total_seconds() / 60.0,
+    )
     if selection_next_time:
         candidate = selection_next_time.strip() if isinstance(selection_next_time, str) else ""
         if candidate:
@@ -15882,12 +15904,21 @@ def run_cycle():
             try:
                 target_dt = datetime.datetime.fromisoformat(iso_candidate)
                 if target_dt.tzinfo is None:
-                    target_dt = target_dt.replace(tzinfo=datetime.timezone.utc)
+                    local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
+                    target_dt = target_dt.replace(tzinfo=local_tz)
+                target_dt = target_dt.astimezone(datetime.timezone.utc)
                 remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
                 if remaining > 0:
-                    next_delay_minutes = max(0.0, remaining)
-                    next_run_dt = target_dt
-                    next_local = target_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+                    clamped = min(max(remaining, min_delay), max_delay if max_delay > 0 else remaining)
+                    if clamped != remaining:
+                        log(
+                            f"next_run_time clamped from {remaining:.2f} min to {clamped:.2f} min "
+                            f"(bounds {min_delay:.1f}-{max_delay:.1f})",
+                            Fore.YELLOW,
+                        )
+                    next_delay_minutes = clamped
+                    next_run_dt = schedule_now_utc + datetime.timedelta(minutes=clamped)
+                    next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
                     msg = f"Next run scheduled for {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
                     log(msg, Fore.CYAN)
                     send_tg(msg)
@@ -15904,8 +15935,15 @@ def run_cycle():
         if minutes_val and minutes_val > 0:
             target_dt = cycle_start_utc + datetime.timedelta(minutes=float(minutes_val))
             remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
-            next_delay_minutes = max(0.0, remaining)
-            next_run_dt = target_dt
+            clamped = min(max(remaining, min_delay), max_delay if max_delay > 0 else remaining)
+            if clamped != remaining:
+                log(
+                    f"next_run_minutes clamped from {remaining:.2f} min to {clamped:.2f} min "
+                    f"(bounds {min_delay:.1f}-{max_delay:.1f})",
+                    Fore.YELLOW,
+                )
+            next_delay_minutes = max(0.0, clamped)
+            next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
             next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             msg = (
                 f"Next cycle target {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
@@ -15919,11 +15957,12 @@ def run_cycle():
     if next_delay_minutes is None:
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(DEFAULT_NEXT_RUN_MINUTES))
         remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
-        next_delay_minutes = max(0.0, remaining)
-        next_run_dt = target_dt
+        clamped = min(max(remaining, min_delay), max_delay if max_delay > 0 else remaining)
+        next_delay_minutes = max(0.0, clamped)
+        next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
         fallback_msg = (
             f"Next cycle defaulting to {DEFAULT_NEXT_RUN_MINUTES:.0f} minutes from cycle start "
-            f"(sleep {next_delay_minutes:.1f} min)."
+            f"(sleep {next_delay_minutes:.1f} min, bounds {min_delay:.1f}-{max_delay:.1f})."
         )
         log(fallback_msg, Fore.LIGHTBLACK_EX)
         send_tg(fallback_msg)
