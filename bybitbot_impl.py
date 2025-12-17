@@ -117,6 +117,7 @@ def _configure_state_paths() -> None:
 
 # Per-cycle storage for pseudo-trailing decisions.
 _PREV_UNREALIZED_PNL: dict[str, float] = {}
+_TRAIL_PROTECTION: dict[str, dict[str, float]] = {}
 
 MARKET_MODE_GUIDE: dict[str, Any] = {
     "market_modes": {
@@ -3752,6 +3753,7 @@ def refresh_settings():
     global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
+    global IMMEDIATE_CLOSE_ON_BREACH, _TRAIL_PROTECTION
     _configure_state_paths()
     USER_ID = os.getenv("BYBITBOT_USER_ID") or USER_ID or "shared"
     USER_LABEL = os.getenv("BYBITBOT_USER_LABEL") or USER_LABEL or "redfaraon"
@@ -3850,6 +3852,8 @@ def refresh_settings():
     PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
     PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
     IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
+    if not isinstance(_TRAIL_PROTECTION, dict):
+        _TRAIL_PROTECTION = {}
     TELEGRAM_FORWARD_LOGS = env_int("TELEGRAM_FORWARD_LOGS", int(TELEGRAM_FORWARD_LOGS)) != 0
     TELEGRAM_LOG_BATCH_SIZE = max(1, env_int("TELEGRAM_LOG_BATCH_SIZE", TELEGRAM_LOG_BATCH_SIZE))
     try:
@@ -10524,6 +10528,7 @@ def _close_position_now(
 
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
     global _PREV_UNREALIZED_PNL
+    global _TRAIL_PROTECTION
     global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     cfg = config or {}
     position_amount = safe_float((position or {}).get("amount"))
@@ -10670,6 +10675,14 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         take_price = price - tp_mult * atrv
     if existing_stop_best is not None and math.isfinite(existing_stop_best):
         stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
+    # If we have trailing state from the previous cycle, use it as a baseline to avoid losing prior tightening.
+    trail_state = _TRAIL_PROTECTION.get(symbol) if isinstance(_TRAIL_PROTECTION, dict) else None
+    stored_stop = safe_float((trail_state or {}).get("stop"))
+    stored_take = safe_float((trail_state or {}).get("take"))
+    if stored_stop is not None and math.isfinite(stored_stop):
+        stop_price = stored_stop
+    if stored_take is not None and math.isfinite(stored_take):
+        take_price = stored_take
 
     breakeven_note = None
     profit_distance = 0.0
@@ -10692,6 +10705,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     prev_valid = prev_unreal is not None and isinstance(prev_unreal, (int, float)) and math.isfinite(prev_unreal)
     delta_unreal: float | None = None
     delta_price_equiv: float | None = None
+    tightened_applied = False
     if current_valid and prev_valid and atrv is not None and math.isfinite(atrv) and atrv > 0 and position_qty and math.isfinite(position_qty) and position_qty > 0:
         delta_unreal = current_unreal - prev_unreal
         # Normalize unrealized PnL delta into an approximate price movement so the trigger is position-size invariant.
@@ -10749,6 +10763,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_transition_text}{take_transition_text}",
                 Fore.LIGHTBLUE_EX,
             )
+            tightened_applied = True
         else:
             def _fmt_px(value: float | None) -> str:
                 return f"{value:.4f}" if value is not None and math.isfinite(value) else "n/a"
@@ -10773,6 +10788,17 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             missing_reasons.append("PnL not improved")
         if missing_reasons:
             log(f"{pseudo_ctx}: not applied ({'; '.join(missing_reasons)})", Fore.LIGHTBLACK_EX)
+    # Persist/restore trailing levels across cycles.
+    if tightened_applied:
+        _TRAIL_PROTECTION[symbol] = {
+            "stop": float(stop_price) if stop_price is not None and math.isfinite(stop_price) else None,
+            "take": float(take_price) if take_price is not None and math.isfinite(take_price) else None,
+        }
+    elif trail_state:
+        _TRAIL_PROTECTION[symbol] = {
+            "stop": float(stop_price) if stop_price is not None and math.isfinite(stop_price) else None,
+            "take": float(take_price) if take_price is not None and math.isfinite(take_price) else None,
+        }
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
         breakeven_buffer = atrv * BREAKEVEN_BUFFER_ATR
@@ -13557,6 +13583,18 @@ def run_cycle():
         _PREV_UNREALIZED_PNL = {str(k): float(v) for k, v in (prev_unreal_map or {}).items() if v is not None}
     except Exception:
         _PREV_UNREALIZED_PNL = {}
+    # Preserve last trailing-protection levels (stop/take) across cycles.
+    prev_trail_map = cycle_state.get("positions_trailing") if isinstance(cycle_state, dict) else {}
+    try:
+        _TRAIL_PROTECTION = {
+            str(sym): {
+                "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None else None,
+                "take": float(vals.get("take")) if isinstance(vals, dict) and vals.get("take") is not None else None,
+            }
+            for sym, vals in (prev_trail_map or {}).items()
+        }
+    except Exception:
+        _TRAIL_PROTECTION = {}
     real_cycles_completed = safe_int(cycle_state.get("total_cycles")) or 0
     next_cycle_number = real_cycles_completed + 1
     cycle_counter = str(next_cycle_number)
@@ -16261,6 +16299,16 @@ def run_cycle():
                     for symbol_key, payload in (final_positions_map or {}).items()
                 )
                 if val is not None and math.isfinite(val)
+            }
+        except Exception:
+            pass
+        try:
+            cycle_state["positions_trailing"] = {
+                str(sym): {
+                    "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None and math.isfinite(vals.get("stop")) else None,
+                    "take": float(vals.get("take")) if isinstance(vals, dict) and vals.get("take") is not None and math.isfinite(vals.get("take")) else None,
+                }
+                for sym, vals in (_TRAIL_PROTECTION or {}).items()
             }
         except Exception:
             pass
