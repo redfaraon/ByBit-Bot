@@ -805,6 +805,7 @@ PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 5.0
 MAX_NEXT_RUN_FROM_START_MINUTES: float = 40.0
+IMMEDIATE_CLOSE_ON_BREACH: bool = False
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
 TELEGRAM_LOG_FLUSH_INTERVAL: float = 5.0
@@ -3848,6 +3849,7 @@ def refresh_settings():
     PSEUDOTRAIL_MIN_IMPROVE_ATR = max(0.0, PSEUDOTRAIL_MIN_IMPROVE_ATR)
     PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
     PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
+    IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
     TELEGRAM_FORWARD_LOGS = env_int("TELEGRAM_FORWARD_LOGS", int(TELEGRAM_FORWARD_LOGS)) != 0
     TELEGRAM_LOG_BATCH_SIZE = max(1, env_int("TELEGRAM_LOG_BATCH_SIZE", TELEGRAM_LOG_BATCH_SIZE))
     try:
@@ -10748,8 +10750,13 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 Fore.LIGHTBLUE_EX,
             )
         else:
+            def _fmt_px(value: float | None) -> str:
+                return f"{value:.4f}" if value is not None and math.isfinite(value) else "n/a"
+            stop_text = _fmt_px(initial_stop_price)
+            take_text = _fmt_px(initial_take_price)
             log(
-                f"{pseudo_ctx}: skipped (ΔPnL={delta_unreal:.4f}, ΔPx≈{delta_price_equiv:.4f}, triggerPx={improve_threshold:.4f})",
+                f"{pseudo_ctx}: skipped (ΔPnL={delta_unreal:.4f}, ΔPx≈{delta_price_equiv:.4f}, triggerPx={improve_threshold:.4f}, "
+                f"stop={stop_text}, take={take_text})",
                 Fore.LIGHTBLACK_EX,
             )
     else:
@@ -10794,29 +10801,30 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
 
     # -- immediate exit check --
-    def _stop_breached(curr_price: float | None, target: float | None) -> bool:
-        if curr_price is None or target is None or not math.isfinite(curr_price) or not math.isfinite(target):
-            return False
-        if is_long:
-            return curr_price <= target + 1e-9
-        return curr_price >= target - 1e-9
-
-    def _take_reached(curr_price: float | None, target: float | None) -> bool:
-        if curr_price is None or target is None or not math.isfinite(curr_price) or not math.isfinite(target):
-            return False
-        if is_long:
+    if IMMEDIATE_CLOSE_ON_BREACH:
+        def _stop_breached(curr_price: float | None, target: float | None) -> bool:
+            if curr_price is None or target is None or not math.isfinite(curr_price) or not math.isfinite(target):
+                return False
+            if is_long:
+                return curr_price <= target + 1e-9
             return curr_price >= target - 1e-9
-        return curr_price <= target + 1e-9
 
-    if price is not None and math.isfinite(price) and entry_price is not None and math.isfinite(entry_price):
-        close_side = "sell" if is_long else "buy"
-        position_idx = get_position_idx(close_side)
-        if _stop_breached(price, stop_price):
-            _close_position_now(exchange, symbol, position_qty, close_side, position_idx=position_idx)
-            return open_orders or []
-        if _take_reached(price, take_price):
-            _close_position_now(exchange, symbol, position_qty, close_side, position_idx=position_idx)
-            return open_orders or []
+        def _take_reached(curr_price: float | None, target: float | None) -> bool:
+            if curr_price is None or target is None or not math.isfinite(curr_price) or not math.isfinite(target):
+                return False
+            if is_long:
+                return curr_price >= target - 1e-9
+            return curr_price <= target + 1e-9
+
+        if price is not None and math.isfinite(price) and entry_price is not None and math.isfinite(entry_price):
+            close_side = "sell" if is_long else "buy"
+            position_idx = get_position_idx(close_side)
+            if _stop_breached(price, stop_price):
+                _close_position_now(exchange, symbol, position_qty, close_side, position_idx=position_idx)
+                return open_orders or []
+            if _take_reached(price, take_price):
+                _close_position_now(exchange, symbol, position_qty, close_side, position_idx=position_idx)
+                return open_orders or []
 
     trailing_offset = None
     if trailing_requested:
