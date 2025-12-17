@@ -10641,17 +10641,16 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     # Pseudo-trailing across cycles: if unrealized PnL improved since the previous cycle, gently
     # tighten the stop and let the take-profit breathe a bit further. If PnL worsened, leave
     # protection unchanged to avoid expanding risk.
+    initial_stop_price = stop_price
+    initial_take_price = take_price
+    pseudo_timeframe = str(cfg.get("timeframe") or TIMEFRAME or "n/a")
+    pseudo_ctx = f"[PSEUDOTRAIL] {symbol}@{pseudo_timeframe}"
     current_unreal = safe_float(position.get("unrealizedPnl") or (position.get("raw") or {}).get("unrealisedPnl"))
     prev_unreal = _PREV_UNREALIZED_PNL.get(symbol) if isinstance(_PREV_UNREALIZED_PNL, dict) else None
-    if (
-        current_unreal is not None
-        and math.isfinite(current_unreal)
-        and prev_unreal is not None
-        and math.isfinite(prev_unreal)
-        and atrv is not None
-        and math.isfinite(atrv)
-        and atrv > 0
-    ):
+    current_valid = current_unreal is not None and math.isfinite(current_unreal)
+    prev_valid = prev_unreal is not None and isinstance(prev_unreal, (int, float)) and math.isfinite(prev_unreal)
+    delta_unreal: float | None = None
+    if current_valid and prev_valid and atrv is not None and math.isfinite(atrv) and atrv > 0:
         delta_unreal = current_unreal - prev_unreal
         improve_threshold = atrv * PSEUDOTRAIL_MIN_IMPROVE_ATR
         if delta_unreal >= improve_threshold and improve_threshold > 0:
@@ -10676,10 +10675,50 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                         candidate_take = take_price - extend
                         if math.isfinite(candidate_take):
                             take_price = candidate_take
+            stop_delta = (
+                (stop_price - initial_stop_price)
+                if initial_stop_price is not None
+                and math.isfinite(initial_stop_price)
+                and stop_price is not None
+                and math.isfinite(stop_price)
+                else None
+            )
+            take_delta = (
+                (take_price - initial_take_price)
+                if initial_take_price is not None
+                and math.isfinite(initial_take_price)
+                and take_price is not None
+                and math.isfinite(take_price)
+                else None
+            )
+            stop_delta_text = (
+                f", stop Δ={stop_delta:+.6f}" if stop_delta is not None and math.isfinite(stop_delta) else ""
+            )
+            take_delta_text = (
+                f", take Δ={take_delta:+.6f}" if take_delta is not None and math.isfinite(take_delta) else ""
+            )
             log(
-                f"[INFO] {symbol}: pseudo-trailing tightened after PnL improvement (+{delta_unreal:.4f})",
+                f"{pseudo_ctx}: tightened after PnL improvement ΔPnL={delta_unreal:.4f} (trigger {improve_threshold:.4f})"
+                f"{stop_delta_text}{take_delta_text}",
                 Fore.LIGHTBLUE_EX,
             )
+        else:
+            log(
+                f"{pseudo_ctx}: skipped (ΔPnL={delta_unreal:.4f} < trigger {improve_threshold:.4f})",
+                Fore.LIGHTBLACK_EX,
+            )
+    else:
+        missing_reasons: list[str] = []
+        if not current_valid:
+            missing_reasons.append("current PnL unavailable")
+        if not prev_valid:
+            missing_reasons.append("previous PnL unavailable")
+        if atrv is None or not math.isfinite(atrv) or atrv <= 0:
+            missing_reasons.append("ATR unavailable")
+        if not missing_reasons:
+            missing_reasons.append("PnL not improved")
+        if missing_reasons:
+            log(f"{pseudo_ctx}: not applied ({'; '.join(missing_reasons)})", Fore.LIGHTBLACK_EX)
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
         breakeven_buffer = atrv * BREAKEVEN_BUFFER_ATR
