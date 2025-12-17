@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.10"
+BOT_VERSION = "1.1.11"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -10578,6 +10578,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     has_stop = False
     has_take = False
     has_trailing = False
+    existing_stop_best: float | None = None
+    existing_take_count = 0
     for existing in reduce_orders:
         try:
             if existing.get("reduceOnly") not in (True, "true", "1", 1):
@@ -10591,12 +10593,20 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         trailing_flag = safe_float(existing.get("trailingStop")) if isinstance(existing.get("trailingStop"), (int, float, str)) else None
         if order_type in ("stop", "stoploss", "stop_limit", "stoplimit") or stop_price_existing is not None:
             has_stop = True
+            if stop_price_existing is not None and math.isfinite(stop_price_existing):
+                if existing_stop_best is None:
+                    existing_stop_best = float(stop_price_existing)
+                else:
+                    if is_long:
+                        existing_stop_best = max(existing_stop_best, float(stop_price_existing))
+                    else:
+                        existing_stop_best = min(existing_stop_best, float(stop_price_existing))
         elif order_type in ("takeprofit", "limit") and existing.get("price") is not None:
             has_take = True
+            existing_take_count += 1
         elif order_type == "trailingstop" or trailing_flag:
             has_trailing = True
-    if has_stop and has_take and (trailing_mult <= 0 or has_trailing):
-        return open_orders or []
+    already_protected = has_stop and has_take and (trailing_mult <= 0 or has_trailing)
 
     df_calc = df_primary.copy() if isinstance(df_primary, pd.DataFrame) and not df_primary.empty else None
     if df_calc is None:
@@ -10629,6 +10639,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     else:
         stop_price = price + sl_mult * atrv
         take_price = price - tp_mult * atrv
+    if existing_stop_best is not None and math.isfinite(existing_stop_best):
+        stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
 
     breakeven_note = None
     profit_distance = 0.0
@@ -10650,14 +10662,15 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     current_valid = current_unreal is not None and math.isfinite(current_unreal)
     prev_valid = prev_unreal is not None and isinstance(prev_unreal, (int, float)) and math.isfinite(prev_unreal)
     delta_unreal: float | None = None
-    if current_valid and prev_valid and atrv is not None and math.isfinite(atrv) and atrv > 0:
+    delta_price_equiv: float | None = None
+    if current_valid and prev_valid and atrv is not None and math.isfinite(atrv) and atrv > 0 and position_qty and math.isfinite(position_qty) and position_qty > 0:
         delta_unreal = current_unreal - prev_unreal
-        # Convert ATR (price units) into approximate PnL units by scaling with position size,
-        # then require that unrealized PnL improvement clears a configurable fraction of this.
-        atr_pnl = atrv * position_qty if position_qty and math.isfinite(position_qty) else 0.0
-        improve_threshold = atr_pnl * PSEUDOTRAIL_MIN_IMPROVE_ATR if atr_pnl > 0 else 0.0
-        if delta_unreal >= improve_threshold and improve_threshold > 0:
-            lock_distance = delta_unreal * PSEUDOTRAIL_STOP_LOCK_FACTOR
+        # Normalize unrealized PnL delta into an approximate price movement so the trigger is position-size invariant.
+        # For linear USDT contracts / spot this matches: ΔPnL ≈ ΔPrice * qty.
+        delta_price_equiv = float(delta_unreal) / float(position_qty)
+        improve_threshold = atrv * PSEUDOTRAIL_MIN_IMPROVE_ATR
+        if delta_price_equiv >= improve_threshold and improve_threshold > 0:
+            lock_distance = delta_price_equiv * PSEUDOTRAIL_STOP_LOCK_FACTOR
             if lock_distance > 0:
                 if is_long:
                     candidate_stop = price - lock_distance
@@ -10667,8 +10680,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                     candidate_stop = price + lock_distance
                     if math.isfinite(candidate_stop) and candidate_stop < stop_price:
                         stop_price = candidate_stop
-            if take_price is not None and math.isfinite(take_price):
-                extend = delta_unreal * PSEUDOTRAIL_TP_EXTEND_FACTOR
+            # Avoid TP churn/duplication: only extend take-price when we are missing take-profit protection.
+            if not has_take and take_price is not None and math.isfinite(take_price):
+                extend = delta_price_equiv * PSEUDOTRAIL_TP_EXTEND_FACTOR
                 if extend > 0:
                     if is_long:
                         candidate_take = take_price + extend
@@ -10700,14 +10714,15 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             take_delta_text = (
                 f", take Δ={take_delta:+.6f}" if take_delta is not None and math.isfinite(take_delta) else ""
             )
+            px_text = f", ΔPx≈{delta_price_equiv:.4f}, ATR={atrv:.4f}, triggerPx={improve_threshold:.4f}, qty={position_qty:.6f}"
+            keep_tp_note = f", keep_tp={existing_take_count}" if has_take else ""
             log(
-                f"{pseudo_ctx}: tightened after PnL improvement ΔPnL={delta_unreal:.4f} (trigger {improve_threshold:.4f})"
-                f"{stop_delta_text}{take_delta_text}",
+                f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_delta_text}{take_delta_text}",
                 Fore.LIGHTBLUE_EX,
             )
         else:
             log(
-                f"{pseudo_ctx}: skipped (ΔPnL={delta_unreal:.4f} < trigger {improve_threshold:.4f})",
+                f"{pseudo_ctx}: skipped (ΔPnL={delta_unreal:.4f}, ΔPx≈{delta_price_equiv:.4f}, triggerPx={improve_threshold:.4f})",
                 Fore.LIGHTBLACK_EX,
             )
     else:
@@ -10716,6 +10731,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             missing_reasons.append("current PnL unavailable")
         if not prev_valid:
             missing_reasons.append("previous PnL unavailable")
+        if position_qty is None or not math.isfinite(position_qty) or position_qty <= 0:
+            missing_reasons.append("position qty unavailable")
         if atrv is None or not math.isfinite(atrv) or atrv <= 0:
             missing_reasons.append("ATR unavailable")
         if not missing_reasons:
@@ -10746,6 +10763,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = explicit_stop
     if explicit_take is not None and math.isfinite(explicit_take):
         take_price = explicit_take
+    if existing_stop_best is not None and math.isfinite(existing_stop_best) and stop_price is not None and math.isfinite(stop_price):
+        stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
 
     # -- immediate exit check --
     def _stop_breached(curr_price: float | None, target: float | None) -> bool:
@@ -10798,6 +10817,22 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                     log(f"🔷 {symbol}: tightened trailing offset to {trailing_offset:.4f} (profit distance {profit_distance:.4f})", Fore.LIGHTBLUE_EX)
         if trailing_offset is not None and trailing_offset <= 0:
             trailing_offset = None
+    refresh_takeprofits = not has_take
+    refresh_trailing = bool(trailing_requested) and not has_trailing
+    should_place_stop = not has_stop
+    if (
+        has_stop
+        and existing_stop_best is not None
+        and math.isfinite(existing_stop_best)
+        and stop_price is not None
+        and math.isfinite(stop_price)
+    ):
+        if is_long:
+            should_place_stop = stop_price > existing_stop_best + 1e-9
+        else:
+            should_place_stop = stop_price < existing_stop_best - 1e-9
+    if already_protected and not refresh_takeprofits and not refresh_trailing and not should_place_stop:
+        return open_orders or []
     qty = position_qty
     if not math.isfinite(qty) or qty <= 0:
         return open_orders or []
@@ -10836,169 +10871,175 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 min_amount = max(min_amount or 0.0, min_order_qty)
 
     created_log_parts: list[str] = []
-    try:
-        trigger_direction = get_trigger_direction_for_side(
-            protection_side,
-            trigger_price=stop_price,
-            reference_price=price,
-        )
-        stop_params = dict(base_params)
-        stop_params.update(
-            {
-                "triggerPrice": stop_price,
-                "triggerDirection": trigger_direction,
-                "closeOnTrigger": True,
-            }
-        )
-        stop_order = exchange.create_order(
-            exchange_symbol,
-            "market",
-            protection_side,
-            qty,
-            None,
-            stop_params,
-        )
+    if should_place_stop:
         try:
-            if isinstance(stop_order, dict):
-                stop_order_id = (
-                    stop_order.get("id")
-                    or (stop_order.get("info") or {}).get("orderId")
-                    or (stop_order.get("info") or {}).get("orderID")
-                )
-                if stop_order_id:
-                    stop_ids_preferred.add(str(stop_order_id))
-        except Exception:
-            pass
-        created_log_parts.append(f"stopLoss @ {stop_price:.2f}")
-        if breakeven_note:
-            created_log_parts.append(breakeven_note)
-    except Exception as exc:
-        log(f"⚠️ {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
+            trigger_direction = get_trigger_direction_for_side(
+                protection_side,
+                trigger_price=stop_price,
+                reference_price=price,
+            )
+            stop_params = dict(base_params)
+            stop_params.update(
+                {
+                    "triggerPrice": stop_price,
+                    "triggerDirection": trigger_direction,
+                    "closeOnTrigger": True,
+                }
+            )
+            stop_order = exchange.create_order(
+                exchange_symbol,
+                "market",
+                protection_side,
+                qty,
+                None,
+                stop_params,
+            )
+            try:
+                if isinstance(stop_order, dict):
+                    stop_order_id = (
+                        stop_order.get("id")
+                        or (stop_order.get("info") or {}).get("orderId")
+                        or (stop_order.get("info") or {}).get("orderID")
+                    )
+                    if stop_order_id:
+                        stop_ids_preferred.add(str(stop_order_id))
+            except Exception:
+                pass
+            created_log_parts.append(f"stopLoss @ {stop_price:.2f}")
+            if breakeven_note:
+                created_log_parts.append(breakeven_note)
+        except Exception as exc:
+            log(f"⚠️ {symbol}: не удалось выставить стоп-ордер защиты позиции: {exc}", Fore.YELLOW)
 
-    tp_scheme_override = target_spec.get("takeProfitLevels") or target_spec.get("take_profit_levels")
-    normalized_scheme: list[tuple[float, float]] = []
-    if isinstance(tp_scheme_override, list):
-        for item in tp_scheme_override:
-            ratio_val = None
-            multiplier_val = None
-            if isinstance(item, dict):
-                ratio_val = safe_float(item.get("ratio") or item.get("share") or item.get("size") or item.get("qty"))
-                explicit_price = safe_float(item.get("price"))
-                if explicit_price is not None and math.isfinite(explicit_price):
-                    normalized_scheme.append((float(ratio_val) if ratio_val and math.isfinite(ratio_val) else 0.0, explicit_price))
-                    continue
-                multiplier_val = safe_float(item.get("atr") or item.get("atr_mult") or item.get("multiplier") or item.get("distance"))
-            elif isinstance(item, (int, float)):
-                multiplier_val = float(item)
-            if ratio_val is None or not math.isfinite(ratio_val) or ratio_val <= 0:
-                ratio_val = 0.0
-            if multiplier_val is not None and math.isfinite(multiplier_val):
-                normalized_scheme.append((float(ratio_val), float(multiplier_val)))
-    if not normalized_scheme:
-        normalized_scheme = list(PARTIAL_TP_SCHEME) if PARTIAL_TP_SCHEME else [(1.0, tp_mult or 1.0)]
-    filtered_scheme: list[tuple[float, float]] = []
-    for ratio_val, mult_val in normalized_scheme:
-        ratio_clean = float(ratio_val) if math.isfinite(ratio_val) else 0.0
-        if ratio_clean <= 0:
-            continue
-        multiplier_clean = float(mult_val) if math.isfinite(mult_val) else 0.0
-        filtered_scheme.append((ratio_clean, multiplier_clean))
-    if not filtered_scheme:
-        filtered_scheme = [(1.0, tp_mult or 1.0)]
-    ratio_total = sum(ratio for ratio, _ in filtered_scheme) or 1.0
+    take_orders_success = bool(has_take)
+    fallback_take_price = None
+    fallback_limit_success = False
     remaining_qty = qty
+    fallback_qty_target = qty
     take_created: list[str] = []
     min_qty_violation = False
     min_notional_violation = False
     take_limit_errors: list[str] = []
-    for idx, (ratio_val, multiplier_val) in enumerate(filtered_scheme):
-        share = ratio_val / ratio_total if ratio_total else 0.0
-        target_qty = qty * share if idx < len(filtered_scheme) - 1 else remaining_qty
-        target_qty = min(target_qty, remaining_qty)
-        if target_qty <= 0:
-            continue
-        try:
-            target_qty_precise = float(exchange.amount_to_precision(exchange_symbol, target_qty))
-        except Exception:
-            target_qty_precise = float(round(target_qty, 8))
-        if target_qty_precise <= 0:
-            continue
-        if min_amount and target_qty_precise + 1e-12 < min_amount:
-            min_qty_violation = True
-            continue
-        if explicit_take is not None and math.isfinite(explicit_take):
-            if idx == 0:
-                tp_target_price = explicit_take
+
+    if refresh_takeprofits:
+        tp_scheme_override = target_spec.get("takeProfitLevels") or target_spec.get("take_profit_levels")
+        normalized_scheme: list[tuple[float, float]] = []
+        if isinstance(tp_scheme_override, list):
+            for item in tp_scheme_override:
+                ratio_val = None
+                multiplier_val = None
+                if isinstance(item, dict):
+                    ratio_val = safe_float(item.get("ratio") or item.get("share") or item.get("size") or item.get("qty"))
+                    explicit_price = safe_float(item.get("price"))
+                    if explicit_price is not None and math.isfinite(explicit_price):
+                        normalized_scheme.append((float(ratio_val) if ratio_val and math.isfinite(ratio_val) else 0.0, explicit_price))
+                        continue
+                    multiplier_val = safe_float(item.get("atr") or item.get("atr_mult") or item.get("multiplier") or item.get("distance"))
+                elif isinstance(item, (int, float)):
+                    multiplier_val = float(item)
+                if ratio_val is None or not math.isfinite(ratio_val) or ratio_val <= 0:
+                    ratio_val = 0.0
+                if multiplier_val is not None and math.isfinite(multiplier_val):
+                    normalized_scheme.append((float(ratio_val), float(multiplier_val)))
+        if not normalized_scheme:
+            normalized_scheme = list(PARTIAL_TP_SCHEME) if PARTIAL_TP_SCHEME else [(1.0, tp_mult or 1.0)]
+        filtered_scheme: list[tuple[float, float]] = []
+        for ratio_val, mult_val in normalized_scheme:
+            ratio_clean = float(ratio_val) if math.isfinite(ratio_val) else 0.0
+            if ratio_clean <= 0:
+                continue
+            multiplier_clean = float(mult_val) if math.isfinite(mult_val) else 0.0
+            filtered_scheme.append((ratio_clean, multiplier_clean))
+        if not filtered_scheme:
+            filtered_scheme = [(1.0, tp_mult or 1.0)]
+        ratio_total = sum(ratio for ratio, _ in filtered_scheme) or 1.0
+        for idx, (ratio_val, multiplier_val) in enumerate(filtered_scheme):
+            share = ratio_val / ratio_total if ratio_total else 0.0
+            target_qty = qty * share if idx < len(filtered_scheme) - 1 else remaining_qty
+            target_qty = min(target_qty, remaining_qty)
+            if target_qty <= 0:
+                continue
+            try:
+                target_qty_precise = float(exchange.amount_to_precision(exchange_symbol, target_qty))
+            except Exception:
+                target_qty_precise = float(round(target_qty, 8))
+            if target_qty_precise <= 0:
+                continue
+            if min_amount and target_qty_precise + 1e-12 < min_amount:
+                min_qty_violation = True
+                continue
+            if explicit_take is not None and math.isfinite(explicit_take):
+                if idx == 0:
+                    tp_target_price = explicit_take
+                else:
+                    tp_target_price = explicit_take + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
             else:
-                tp_target_price = explicit_take + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
-        else:
-            tp_target_price = reference_price + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
-        if tp_target_price is None or not math.isfinite(tp_target_price) or tp_target_price <= 0:
-            continue
-        layer_notional = target_qty_precise * tp_target_price
-        if layer_notional < MIN_NOTIONAL_USDT * 0.5:
-            min_notional_violation = True
-            continue
-        tp_params = dict(base_params)
-        tp_params["takeProfit"] = tp_target_price
-        tp_params.setdefault("timeInForce", "GTC")
-        try:
-            exchange.create_order(
-                exchange_symbol,
-                "limit",
-                protection_side,
-                target_qty_precise,
-                tp_target_price,
-                tp_params,
-            )
-        except Exception as exc:
-            log(f"⚠️ {symbol}: не удалось выставить тейк-профит ({target_qty_precise:.4f}@{tp_target_price:.2f}): {exc}", Fore.YELLOW)
-            continue
-        remaining_qty = max(0.0, remaining_qty - target_qty_precise)
-        take_created.append(f"takeProfit {target_qty_precise:.4f} @ {tp_target_price:.2f}")
-    take_orders_success = False
-    if take_created:
-        created_log_parts.extend(take_created)
-        take_orders_success = True
-
-    fallback_take_price = None
-    if not take_orders_success and take_price is not None and math.isfinite(take_price) and take_price > 0:
-        fallback_take_price = float(take_price)
-
-    fallback_limit_success = False
-    fallback_qty_target = max(remaining_qty, 0.0)
-    if fallback_qty_target <= 1e-9 or fallback_qty_target > qty + 1e-9:
-        fallback_qty_target = qty
-    if not take_orders_success and fallback_take_price:
-        try:
-            fallback_qty_precise = float(exchange.amount_to_precision(exchange_symbol, fallback_qty_target))
-        except Exception:
-            fallback_qty_precise = float(round(fallback_qty_target, 8))
-        if fallback_qty_precise <= 0:
-            fallback_qty_precise = fallback_qty_target
-        if min_amount and fallback_qty_precise + 1e-12 < min_amount:
-            min_qty_violation = True
-        elif min_qty_step and fallback_qty_precise + 1e-12 < min_qty_step:
-            min_qty_violation = True
-        else:
-            fallback_params = dict(base_params)
-            fallback_params["takeProfit"] = fallback_take_price
-            fallback_params.setdefault("timeInForce", "GTC")
+                tp_target_price = reference_price + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
+            if tp_target_price is None or not math.isfinite(tp_target_price) or tp_target_price <= 0:
+                continue
+            layer_notional = target_qty_precise * tp_target_price
+            if layer_notional < MIN_NOTIONAL_USDT * 0.5:
+                min_notional_violation = True
+                continue
+            tp_params = dict(base_params)
+            tp_params["takeProfit"] = tp_target_price
+            tp_params.setdefault("timeInForce", "GTC")
             try:
                 exchange.create_order(
                     exchange_symbol,
                     "limit",
                     protection_side,
-                    fallback_qty_precise,
-                    fallback_take_price,
-                    fallback_params,
+                    target_qty_precise,
+                    tp_target_price,
+                    tp_params,
                 )
             except Exception as exc:
-                take_limit_errors.append(str(exc))
+                log(f"⚠️ {symbol}: не удалось выставить тейк-профит ({target_qty_precise:.4f}@{tp_target_price:.2f}): {exc}", Fore.YELLOW)
+                continue
+            remaining_qty = max(0.0, remaining_qty - target_qty_precise)
+            take_created.append(f"takeProfit {target_qty_precise:.4f} @ {tp_target_price:.2f}")
+
+        take_orders_success = False
+        if take_created:
+            created_log_parts.extend(take_created)
+            take_orders_success = True
+
+        if not take_orders_success and take_price is not None and math.isfinite(take_price) and take_price > 0:
+            fallback_take_price = float(take_price)
+
+        fallback_qty_target = max(remaining_qty, 0.0)
+        if fallback_qty_target <= 1e-9 or fallback_qty_target > qty + 1e-9:
+            fallback_qty_target = qty
+        if not take_orders_success and fallback_take_price:
+            try:
+                fallback_qty_precise = float(exchange.amount_to_precision(exchange_symbol, fallback_qty_target))
+            except Exception:
+                fallback_qty_precise = float(round(fallback_qty_target, 8))
+            if fallback_qty_precise <= 0:
+                fallback_qty_precise = fallback_qty_target
+            if min_amount and fallback_qty_precise + 1e-12 < min_amount:
+                min_qty_violation = True
+            elif min_qty_step and fallback_qty_precise + 1e-12 < min_qty_step:
+                min_qty_violation = True
             else:
-                created_log_parts.append(f"takeProfit {fallback_qty_precise:.4f} @ {fallback_take_price:.2f}")
-                take_orders_success = True
-                fallback_limit_success = True
+                fallback_params = dict(base_params)
+                fallback_params["takeProfit"] = fallback_take_price
+                fallback_params.setdefault("timeInForce", "GTC")
+                try:
+                    exchange.create_order(
+                        exchange_symbol,
+                        "limit",
+                        protection_side,
+                        fallback_qty_precise,
+                        fallback_take_price,
+                        fallback_params,
+                    )
+                except Exception as exc:
+                    take_limit_errors.append(str(exc))
+                else:
+                    created_log_parts.append(f"takeProfit {fallback_qty_precise:.4f} @ {fallback_take_price:.2f}")
+                    take_orders_success = True
+                    fallback_limit_success = True
 
     trailing_amount = abs(trailing_offset) if trailing_offset is not None else None
     if position_category == "spot":

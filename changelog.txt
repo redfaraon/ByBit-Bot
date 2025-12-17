@@ -1,5 +1,9 @@
 - Changelog (newest first)
 
+1.1.11 (2025-12-17, commit pending)
+- Pseudo-trailing now evaluates even when a symbol already has SL/TP protection, and will tighten the stop without recreating take-profit layers (avoids TP churn while still allowing SL tightening).
+- Pseudo-trailing trigger and adjustments are now computed consistently in price units (ΔPnL normalized by position size), making it usable for small positions and small deposits.
+
 1.1.10 (2025-12-16, commit pending)
 - Added a balanced pseudo-trailing mode that tightens stops and can extend take-profits whenever unrealized PnL improves versus the previous cycle, while leaving protection untouched if the drawdown grows.
 - Remember per-symbol unrealized PnL in `cycle_state.json` so the pseudo-trailing decision can compare cycles, and expose `PSEUDOTRAIL_*` knobs for fine-grained tuning.
