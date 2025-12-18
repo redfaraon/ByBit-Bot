@@ -11823,7 +11823,25 @@ def execute_extra_orders(
                     if success:
                         cancelled_entry = f"{oid}{summary_suffix}"
                         cancelled_success.append(cancelled_entry)
-                        log(f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}{summary_suffix}", Fore.LIGHTBLUE_EX)
+                        trigger_val = safe_float(
+                            (existing_order or {}).get("stopPrice")
+                            or (existing_order or {}).get("triggerPrice")
+                            or (existing_order or {}).get("stopLoss")
+                        )
+                        price_val = safe_float((existing_order or {}).get("price"))
+                        tp_val = safe_float((existing_order or {}).get("takeProfit") or (existing_order or {}).get("tp"))
+                        level_bits: list[str] = []
+                        if trigger_val is not None and math.isfinite(trigger_val):
+                            level_bits.append(f"trigger={trigger_val:.6f}")
+                        if tp_val is not None and math.isfinite(tp_val):
+                            level_bits.append(f"tp={tp_val:.6f}")
+                        if price_val is not None and math.isfinite(price_val):
+                            level_bits.append(f"price={price_val:.6f}")
+                        level_suffix = f" ({', '.join(level_bits)})" if level_bits else ""
+                        log(
+                            f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}{summary_suffix}{level_suffix}",
+                            Fore.LIGHTBLUE_EX,
+                        )
                     else:
                         cancel_errors.append((oid, err))
                         log(f"[WARN] Failed to cancel reduce-only order {oid} for {symbol}{summary_suffix}: {err}", Fore.YELLOW)
@@ -15975,10 +15993,12 @@ def run_cycle():
         protective_orders_after = _extract_protection_orders(refreshed_orders)
         has_stop_after, has_take_after = _evaluate_position_protection(position_payload, protective_orders_after)
         if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
-            restored_parts = ["stop"] if has_stop_after else []
-            if has_take_after:
-                restored_parts.append("take")
-            parts_text = ",".join(restored_parts) if restored_parts else "n/a"
+            categorized_after = _categorize_protection_orders(protective_orders_after)
+            stop_prices = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
+            take_prices = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
+            stop_hint = f"{stop_prices[-1]:.2f}" if stop_prices else "n/a"
+            take_hint = f"{take_prices[0]:.2f}" if take_prices else "n/a"
+            parts_text = f"stop={stop_hint},take={take_hint}"
             log(
                 f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
                 Fore.CYAN,
