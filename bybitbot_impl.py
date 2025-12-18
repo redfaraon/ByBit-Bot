@@ -10172,27 +10172,27 @@ def _evaluate_position_protection(
     has_take_profit = bool(categorized["take_profit"])
     has_trailing = bool(categorized["trailing"])
 
+    expected_stop_side = "sell" if is_long else "buy"
     has_stop_loss = False
-    # Interpret stops relative to entry price direction.
-    for stop_price, _amt in categorized["stop"]:
-        if stop_price is None:
+    for order in _extract_protection_orders(orders):
+        if not (_has_stop_flag(order) or _has_trailing_flag(order)):
             continue
-        try:
-            stop_val = float(stop_price)
-        except (TypeError, ValueError):
+        order_side = str(order.get("side") or "").lower()
+        if order_side and order_side != expected_stop_side:
+            continue
+        if _has_trailing_flag(order):
+            has_stop_loss = True
+            continue
+        stop_val = safe_float(order.get("stopPrice") or order.get("triggerPrice") or order.get("stopLoss"))
+        if stop_val is None or not math.isfinite(stop_val):
             continue
         if entry_price is not None and math.isfinite(entry_price):
             if (is_long and stop_val < entry_price - 1e-9) or (not is_long and stop_val > entry_price + 1e-9):
                 has_stop_loss = True
             else:
-                # Stop is on or beyond breakeven/profit side: treat as protection, but do NOT count as take-profit.
                 has_stop_loss = True
         else:
-            # Without entry price, treat any stop as protection to avoid false negatives.
             has_stop_loss = True
-
-    if has_trailing:
-        has_stop_loss = True
 
     return has_stop_loss, has_take_profit, categorized
 
@@ -15919,6 +15919,19 @@ def run_cycle():
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
         protective_orders = _extract_protection_orders(orders_snapshot)
         has_stop, has_take, categorized = _evaluate_position_protection(payload, protective_orders)
+        # Always log what protection levels we currently see for each open position.
+        mark_price = safe_float(payload.get("markPrice") or (payload.get("raw") or {}).get("markPrice"))
+        last_price = safe_float(payload.get("lastPrice") or (payload.get("raw") or {}).get("lastPrice"))
+        px_val = mark_price if mark_price is not None and math.isfinite(mark_price) else last_price
+        px_text = f"{px_val:.4f}" if px_val is not None and math.isfinite(px_val) else "n/a"
+        stop_vals = [p for p, _amt in (categorized.get("stop") or []) if p is not None]
+        take_vals = [p for p, _amt in (categorized.get("take_profit") or []) if p is not None]
+        stop_text = ",".join(f"{float(p):.2f}" for p in stop_vals[:5]) if stop_vals else "n/a"
+        take_text = ",".join(f"{float(p):.2f}" for p in take_vals[:5]) if take_vals else "n/a"
+        log(
+            f"[PROTECT] {sym_active}: px={px_text} stop={stop_text} take={take_text} has_stop={has_stop} has_take={has_take}",
+            Fore.LIGHTBLACK_EX,
+        )
         needs_protection = False
         if not has_stop:
             needs_protection = True
