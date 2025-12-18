@@ -809,7 +809,8 @@ MIN_NEXT_RUN_MINUTES: float = 15.0
 MAX_NEXT_RUN_FROM_START_MINUTES: float = 30.0
 PSEUDOTRAIL_MAX_TAKE_EXTENDS: int = 2
 PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT: float = 0.5
-PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.01
+PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.03
+PSEUDOTRAIL_POSITION_SIZE_STALE_RATIO: float = 0.6
 PROTECTION_MAX_PRICE_RATIO: float = 10.0
 PROTECTION_MIN_PRICE_RATIO: float = 0.05
 IMMEDIATE_CLOSE_ON_BREACH: bool = False
@@ -6524,6 +6525,16 @@ def _floor_datetime_to_step(value: datetime.datetime, step_minutes: int) -> date
     return datetime.datetime.fromtimestamp(floor_ts, tz=value.tzinfo)
 
 
+def _round_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
+    if step_minutes <= 0:
+        return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    step_seconds = step_minutes * 60
+    ts = value.timestamp()
+    round_ts = round(ts / step_seconds) * step_seconds
+    return datetime.datetime.fromtimestamp(round_ts, tz=value.tzinfo)
+
 
 def _align_next_run_to_step(
     *,
@@ -6545,15 +6556,26 @@ def _align_next_run_to_step(
             return False
         return True
 
+    candidates: list[tuple[str, datetime.datetime, float]] = []
+
+    round_dt = _round_datetime_to_step(target_dt, step_minutes)
+    round_delay = max(0.0, (round_dt - now_utc).total_seconds() / 60.0)
+    if round_dt != target_dt and in_bounds(round_delay):
+        candidates.append(("round", round_dt, round_delay))
+
     ceil_dt = _ceil_datetime_to_step(target_dt, step_minutes)
     ceil_delay = max(0.0, (ceil_dt - now_utc).total_seconds() / 60.0)
     if ceil_dt != target_dt and in_bounds(ceil_delay):
-        return ceil_dt, ceil_delay, "ceil"
+        candidates.append(("ceil", ceil_dt, ceil_delay))
 
     floor_dt = _floor_datetime_to_step(target_dt, step_minutes)
     floor_delay = max(0.0, (floor_dt - now_utc).total_seconds() / 60.0)
     if floor_dt != target_dt and in_bounds(floor_delay):
-        return floor_dt, floor_delay, "floor"
+        candidates.append(("floor", floor_dt, floor_delay))
+
+    if candidates:
+        best = min(candidates, key=lambda item: abs((item[1] - target_dt).total_seconds()))
+        return best
 
     return target_dt, base_delay, None
 
@@ -10632,6 +10654,7 @@ def _trail_state_matches_position(
     *,
     is_long: bool,
     entry_price: float | None,
+    position_qty: float | None,
 ) -> bool:
     if not isinstance(trail_state, dict):
         return False
@@ -10640,6 +10663,19 @@ def _trail_state_matches_position(
         if is_long and recorded_side != "long":
             return False
         if not is_long and recorded_side != "short":
+            return False
+    recorded_qty = safe_float(trail_state.get("position_qty"))
+    if (
+        position_qty is not None
+        and math.isfinite(position_qty)
+        and recorded_qty is not None
+        and math.isfinite(recorded_qty)
+        and recorded_qty > 0
+        and position_qty > 0
+    ):
+        denom = max(abs(recorded_qty), abs(position_qty), 1e-9)
+        ratio = abs(position_qty - recorded_qty) / denom
+        if ratio > float(PSEUDOTRAIL_POSITION_SIZE_STALE_RATIO):
             return False
     if entry_price is not None and math.isfinite(entry_price):
         base_price = safe_float(trail_state.get("base_price"))
@@ -10807,7 +10843,12 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         reference_price = entry_price
 
     trail_state = _TRAIL_PROTECTION.get(symbol) if isinstance(_TRAIL_PROTECTION, dict) else None
-    if trail_state and not _trail_state_matches_position(trail_state, is_long=is_long, entry_price=entry_price):
+    if trail_state and not _trail_state_matches_position(
+        trail_state,
+        is_long=is_long,
+        entry_price=entry_price,
+        position_qty=position_qty,
+    ):
         trail_state = None
         try:
             del _TRAIL_PROTECTION[symbol]
@@ -11019,6 +11060,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             "take_last_extended_cycle": int(take_last_extended_cycle) if take_last_extended_cycle is not None else None,
             "tightening_count": int(tightening_count),
             "position_side": "long" if is_long else "short",
+            "position_qty": float(position_qty) if position_qty is not None and math.isfinite(position_qty) else None,
         }
     elif trail_state:
         activated_cycle = safe_int(trail_state.get("activated_cycle"))
@@ -11053,6 +11095,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             "take_last_extended_cycle": int(take_last_extended_cycle) if take_last_extended_cycle is not None else None,
             "tightening_count": int(tightening_count),
             "position_side": "long" if is_long else "short",
+            "position_qty": float(position_qty) if position_qty is not None and math.isfinite(position_qty) else None,
         }
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
