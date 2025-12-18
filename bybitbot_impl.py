@@ -10140,7 +10140,10 @@ def _categorize_protection_orders(orders) -> dict[str, list[tuple]]:
     return summary
 
 
-def _evaluate_position_protection(position_payload: dict[str, Any] | None, orders) -> tuple[bool, bool]:
+def _evaluate_position_protection(
+    position_payload: dict[str, Any] | None,
+    orders,
+) -> tuple[bool, bool, dict[str, list[tuple[float | None, float | None]]]]:
     """
     Return (has_stop_loss, has_take_profit) for a position given its protective orders.
 
@@ -10191,7 +10194,7 @@ def _evaluate_position_protection(position_payload: dict[str, Any] | None, order
     if has_trailing:
         has_stop_loss = True
 
-    return has_stop_loss, has_take_profit
+    return has_stop_loss, has_take_profit, categorized
 
 
 def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
@@ -11429,7 +11432,10 @@ def _refresh_position_protection_if_possible(
         open_orders,
         config=symbol_meta,
     )
-    has_stop, has_take = _evaluate_position_protection(position, updated_orders or [])
+    has_stop = False
+    has_take = False
+    if updated_orders:
+        has_stop, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
     if not has_take:
         log(f"[WARN] {symbol}: protection refresh left position without take-profit, retrying once", Fore.YELLOW)
         updated_orders = ensure_position_protection(
@@ -11440,7 +11446,7 @@ def _refresh_position_protection_if_possible(
             updated_orders,
             config=symbol_meta,
         )
-        _, has_take = _evaluate_position_protection(position, updated_orders or [])
+        _, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
         if not has_take:
             log(f"[WARN] {symbol}: still no take-profit after retry; monitor manually", Fore.YELLOW)
     return updated_orders, True
@@ -15912,7 +15918,7 @@ def run_cycle():
         if orders_snapshot is None:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
         protective_orders = _extract_protection_orders(orders_snapshot)
-        has_stop, has_take = _evaluate_position_protection(payload, protective_orders)
+        has_stop, has_take, categorized = _evaluate_position_protection(payload, protective_orders)
         needs_protection = False
         if not has_stop:
             needs_protection = True
@@ -15946,7 +15952,15 @@ def run_cycle():
                 price_note = f", px={live_price:.4f}"
             elif mark_price is not None and math.isfinite(mark_price):
                 price_note = f", mark={mark_price:.4f}"
-            warn_msg = f"[WARN] {sym_active}: protection missing ({reason}){price_note}, attempting restore"
+            level_descript: list[str] = []
+            stop_vals = [p for p, _amt in categorized.get("stop", []) if p is not None]
+            take_vals = [p for p, _amt in categorized.get("take_profit", []) if p is not None]
+            if stop_vals:
+                level_descript.append("stop=" + ",".join(f"{p:.6f}" for p in stop_vals))
+            if take_vals:
+                level_descript.append("take=" + ",".join(f"{p:.6f}" for p in take_vals))
+            level_suffix = f" ({'; '.join(level_descript)})" if level_descript else ""
+            warn_msg = f"[WARN] {sym_active}: protection missing ({reason}){price_note}{level_suffix}, attempting restore"
             log(warn_msg, Fore.YELLOW)
             try:
                 send_tg(warn_msg)
@@ -15991,7 +16005,7 @@ def run_cycle():
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
         protective_orders_after = _extract_protection_orders(refreshed_orders)
-        has_stop_after, has_take_after = _evaluate_position_protection(position_payload, protective_orders_after)
+        has_stop_after, has_take_after, _ = _evaluate_position_protection(position_payload, protective_orders_after)
         if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
             categorized_after = _categorize_protection_orders(protective_orders_after)
             stop_prices = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
