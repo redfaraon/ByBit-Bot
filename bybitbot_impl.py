@@ -10750,7 +10750,9 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     has_stop = False
     has_take = False
     has_trailing = False
+    existing_stop_prices: list[float] = []
     existing_stop_best: float | None = None
+    existing_take_prices: list[float] = []
     existing_take_count = 0
     for existing in reduce_orders:
         try:
@@ -10764,21 +10766,14 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price_existing = safe_float(existing.get("stopPrice") or existing.get("triggerPrice") or existing.get("stopLoss"))
         trailing_flag = safe_float(existing.get("trailingStop")) if isinstance(existing.get("trailingStop"), (int, float, str)) else None
         if order_type in ("stop", "stoploss", "stop_limit", "stoplimit") or stop_price_existing is not None:
-            has_stop = True
             if stop_price_existing is not None and math.isfinite(stop_price_existing):
-                if existing_stop_best is None:
-                    existing_stop_best = float(stop_price_existing)
-                else:
-                    if is_long:
-                        existing_stop_best = max(existing_stop_best, float(stop_price_existing))
-                    else:
-                        existing_stop_best = min(existing_stop_best, float(stop_price_existing))
+                existing_stop_prices.append(float(stop_price_existing))
         elif order_type in ("takeprofit", "limit") and existing.get("price") is not None:
-            has_take = True
-            existing_take_count += 1
+            take_px = safe_float(existing.get("price") or existing.get("takeProfit") or existing.get("take_profit"))
+            if take_px is not None and math.isfinite(take_px):
+                existing_take_prices.append(float(take_px))
         elif order_type == "trailingstop" or trailing_flag:
             has_trailing = True
-    already_protected = has_stop and has_take and (trailing_mult <= 0 or has_trailing)
 
     df_calc = df_primary.copy() if isinstance(df_primary, pd.DataFrame) and not df_primary.empty else None
     if df_calc is None:
@@ -10865,8 +10860,39 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     else:
         stop_price = price + sl_mult * atrv
         take_price = price - tp_mult * atrv
-    if existing_stop_best is not None and math.isfinite(existing_stop_best):
-        stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
+
+    market_ref = live_price if (live_price is not None and math.isfinite(live_price)) else raw_mark_price
+    if market_ref is None or not math.isfinite(market_ref):
+        market_ref = price
+
+    # If we saw existing stop triggers, treat only those on the loss side as stop-loss protection
+    # (long: below market; short: above market). Ignore mis-sided triggers so they won't poison stop_price.
+    if existing_stop_prices:
+        tol = max(abs(market_ref) * 1e-4, 1e-3)
+        if is_long:
+            valid = [p for p in existing_stop_prices if p < market_ref - tol]
+            if valid:
+                has_stop = True
+                existing_stop_best = max(valid)
+                stop_price = max(stop_price, existing_stop_best)
+        else:
+            valid = [p for p in existing_stop_prices if p > market_ref + tol]
+            if valid:
+                has_stop = True
+                existing_stop_best = min(valid)
+                stop_price = min(stop_price, existing_stop_best)
+
+    if existing_take_prices:
+        tol = max(abs(market_ref) * 1e-4, 1e-6)
+        if is_long:
+            valid_takes = [p for p in existing_take_prices if p > market_ref + tol]
+        else:
+            valid_takes = [p for p in existing_take_prices if p < market_ref - tol]
+        if valid_takes:
+            has_take = True
+            existing_take_count = len(valid_takes)
+
+    already_protected = has_stop and has_take and (trailing_mult <= 0 or has_trailing)
     # If we have trailing state from the previous cycle, use it as a baseline to avoid losing prior tightening.
     trail_activated_cycle = safe_int((trail_state or {}).get("activated_cycle"))
     trail_active = trail_activated_cycle is not None and trail_activated_cycle >= 0
@@ -10891,14 +10917,27 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if stored_stop is not None and math.isfinite(stored_stop):
         stop_price = stored_stop
     if stored_take is not None and math.isfinite(stored_take):
-        take_price = stored_take
+        # Only reuse stored take if it is on the profitable side of the current market.
+        tol = max(abs(market_ref) * 1e-4, 1e-6)
+        if (is_long and stored_take > market_ref + tol) or ((not is_long) and stored_take < market_ref - tol):
+            take_price = stored_take
     # Ensure stop is on the correct side of the current price.
-    if is_long and stop_price is not None and math.isfinite(stop_price) and price is not None and math.isfinite(price):
-        if stop_price >= price:
-            stop_price = price - sl_mult * atrv
-    elif not is_long and stop_price is not None and math.isfinite(stop_price) and price is not None and math.isfinite(price):
-        if stop_price <= price:
-            stop_price = price + sl_mult * atrv
+    if is_long and stop_price is not None and math.isfinite(stop_price) and market_ref is not None and math.isfinite(market_ref):
+        if stop_price >= market_ref:
+            stop_price = market_ref - sl_mult * atrv
+    elif not is_long and stop_price is not None and math.isfinite(stop_price) and market_ref is not None and math.isfinite(market_ref):
+        if stop_price <= market_ref:
+            stop_price = market_ref + sl_mult * atrv
+
+    # Sanity: take should be on the profitable side (and never behind stop).
+    if take_price is not None and math.isfinite(take_price) and stop_price is not None and math.isfinite(stop_price):
+        tol = max(abs(market_ref) * 1e-4, 1e-6)
+        if is_long:
+            if take_price <= market_ref + tol or take_price <= stop_price + tol:
+                take_price = market_ref + tp_mult * atrv
+        else:
+            if take_price >= market_ref - tol or take_price >= stop_price - tol:
+                take_price = market_ref - tp_mult * atrv
 
     breakeven_note = None
     profit_distance = 0.0
@@ -11287,7 +11326,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         # instead of regenerating ATR-based tiers, to avoid drifting away from the tightened TP.
         if trail_active and stored_take is not None and math.isfinite(stored_take):
             tp_scheme_override = [{"ratio": 1.0, "price": float(stored_take)}]
-        normalized_scheme: list[tuple[float, float]] = []
+        normalized_scheme: list[tuple[float, str, float]] = []
         if isinstance(tp_scheme_override, list):
             for item in tp_scheme_override:
                 ratio_val = None
@@ -11296,28 +11335,44 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                     ratio_val = safe_float(item.get("ratio") or item.get("share") or item.get("size") or item.get("qty"))
                     explicit_price = safe_float(item.get("price"))
                     if explicit_price is not None and math.isfinite(explicit_price):
-                        normalized_scheme.append((float(ratio_val) if ratio_val and math.isfinite(ratio_val) else 0.0, explicit_price))
+                        ratio_clean = float(ratio_val) if ratio_val is not None and math.isfinite(ratio_val) and ratio_val > 0 else 0.0
+                        normalized_scheme.append((ratio_clean, "price", float(explicit_price)))
                         continue
                     multiplier_val = safe_float(item.get("atr") or item.get("atr_mult") or item.get("multiplier") or item.get("distance"))
                 elif isinstance(item, (int, float)):
                     multiplier_val = float(item)
+                    ratio_val = 1.0
                 if ratio_val is None or not math.isfinite(ratio_val) or ratio_val <= 0:
                     ratio_val = 0.0
                 if multiplier_val is not None and math.isfinite(multiplier_val):
-                    normalized_scheme.append((float(ratio_val), float(multiplier_val)))
+                    normalized_scheme.append((float(ratio_val), "atr", float(multiplier_val)))
         if not normalized_scheme:
-            normalized_scheme = list(PARTIAL_TP_SCHEME) if PARTIAL_TP_SCHEME else [(1.0, tp_mult or 1.0)]
-        filtered_scheme: list[tuple[float, float]] = []
-        for ratio_val, mult_val in normalized_scheme:
-            ratio_clean = float(ratio_val) if math.isfinite(ratio_val) else 0.0
+            if PARTIAL_TP_SCHEME:
+                normalized_scheme = [(float(r), "atr", float(m)) for r, m in PARTIAL_TP_SCHEME]
+            else:
+                normalized_scheme = [(1.0, "atr", float(tp_mult or 1.0))]
+
+        filtered_scheme: list[tuple[float, str, float]] = []
+        for ratio_val, kind_val, val in normalized_scheme:
+            ratio_clean = float(ratio_val) if ratio_val is not None and math.isfinite(ratio_val) else 0.0
             if ratio_clean <= 0:
                 continue
-            multiplier_clean = float(mult_val) if math.isfinite(mult_val) else 0.0
-            filtered_scheme.append((ratio_clean, multiplier_clean))
+            if kind_val not in ("atr", "price"):
+                continue
+            clean_val = float(val) if val is not None and math.isfinite(val) else None
+            if clean_val is None:
+                continue
+            if clean_val <= 0:
+                continue
+            filtered_scheme.append((ratio_clean, kind_val, clean_val))
         if not filtered_scheme:
-            filtered_scheme = [(1.0, tp_mult or 1.0)]
-        ratio_total = sum(ratio for ratio, _ in filtered_scheme) or 1.0
-        for idx, (ratio_val, multiplier_val) in enumerate(filtered_scheme):
+            filtered_scheme = [(1.0, "atr", float(tp_mult or 1.0))]
+
+        ratio_total = sum(ratio for ratio, _, _ in filtered_scheme) or 1.0
+        max_take_distance_atr_mult = safe_float(cfg.get("max_take_distance_atr_mult")) or 20.0
+        max_tp_distance = float(max_take_distance_atr_mult) * float(atrv) if atrv is not None and math.isfinite(atrv) and atrv > 0 else None
+
+        for idx, (ratio_val, kind_val, value_val) in enumerate(filtered_scheme):
             share = ratio_val / ratio_total if ratio_total else 0.0
             target_qty = qty * share if idx < len(filtered_scheme) - 1 else remaining_qty
             target_qty = min(target_qty, remaining_qty)
@@ -11332,15 +11387,32 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             if min_amount and target_qty_precise + 1e-12 < min_amount:
                 min_qty_violation = True
                 continue
-            if explicit_take is not None and math.isfinite(explicit_take):
-                if idx == 0:
-                    tp_target_price = explicit_take
-                else:
-                    tp_target_price = explicit_take + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
+            if kind_val == "price":
+                tp_target_price = float(value_val)
             else:
-                tp_target_price = reference_price + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
+                multiplier_val = float(value_val)
+                if explicit_take is not None and math.isfinite(explicit_take):
+                    if idx == 0:
+                        tp_target_price = explicit_take
+                    else:
+                        tp_target_price = explicit_take + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
+                else:
+                    tp_target_price = reference_price + (multiplier_val * atrv if is_long else -multiplier_val * atrv)
             if tp_target_price is None or not math.isfinite(tp_target_price) or tp_target_price <= 0:
                 continue
+            tol = max(abs(market_ref) * 1e-4, 1e-6)
+            if is_long:
+                if tp_target_price <= market_ref + tol or (stop_price is not None and math.isfinite(stop_price) and tp_target_price <= stop_price + tol):
+                    take_limit_errors.append(f"invalid-tp@{tp_target_price:.6f}")
+                    continue
+            else:
+                if tp_target_price >= market_ref - tol or (stop_price is not None and math.isfinite(stop_price) and tp_target_price >= stop_price - tol):
+                    take_limit_errors.append(f"invalid-tp@{tp_target_price:.6f}")
+                    continue
+            if max_tp_distance is not None and math.isfinite(max_tp_distance) and max_tp_distance > 0:
+                if abs(tp_target_price - market_ref) > max_tp_distance:
+                    take_limit_errors.append(f"tp-too-far@{tp_target_price:.6f}")
+                    continue
             layer_notional = target_qty_precise * tp_target_price
             if layer_notional < MIN_NOTIONAL_USDT * 0.5:
                 min_notional_violation = True
