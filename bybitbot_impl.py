@@ -16331,9 +16331,11 @@ def run_cycle():
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
         protective_orders_after = _extract_protection_orders(refreshed_orders)
-        has_stop_after, has_take_after, _ = _evaluate_position_protection(position_payload, protective_orders_after)
+        has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
+            position_payload,
+            protective_orders_after,
+        )
         if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
-            categorized_after = _categorize_protection_orders(protective_orders_after)
             stop_prices = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
             take_prices = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
             stop_hint = f"{stop_prices[-1]:.2f}" if stop_prices else "n/a"
@@ -16345,6 +16347,16 @@ def run_cycle():
             )
             restored = True
             continue
+        else:
+            stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
+            take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
+            log(
+                f"[WARN] {sym_unprotected}: still missing protection after restore "
+                f"(has_stop={has_stop_after}, has_take={has_take_after}, "
+                f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
+                f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) — closing position",
+                Fore.YELLOW,
+            )
 
         position_side_field = str(position_payload.get("side") or "").lower()
         if position_side_field in {"long", "buy"}:
