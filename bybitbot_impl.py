@@ -2642,8 +2642,8 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         '  "style": trading style label (e.g., balanced_intraday, momentum, risk-off) so the follow-up trade prompt can adopt a matching voice,\n'
         '  "trade_horizon": trading horizon label (e.g., scalping, intraday, short-term, midterm),\n'
         '  "max_positions": integer cap for concurrently open symbols (factor in current exposure + liquidity),\n'
-        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or the equivalent offset; preferred),\n'
-        '  "next_run_minutes": float delay fallback if next_run_time is unavailable (if volatility rises, shorten toward a 15-minute floor; if quiet, extend),\n'
+        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or the equivalent offset; preferred) and ensure it lands between 5 and 40 minutes from the cycle start,\n'
+        '  "next_run_minutes": float delay fallback strictly between 5 and 40 minutes (drive toward 5 when volatility/news/aggression is high, stretch toward 40 when markets are calm),\n'
         '  "notes": optional rationale describing how the news/indicators shaped this universe.'
         " Also include optional field 'news_requests' (symbols needing full news text)."
         " All of the returned metadata (timeframes, indicators, aggression, style, horizon, max positions, next run timing) will be applied directly to downstream initial requests and scheduling."
@@ -6575,7 +6575,8 @@ def _align_next_run_to_step(
 
     if candidates:
         best = min(candidates, key=lambda item: abs((item[1] - target_dt).total_seconds()))
-        return best[1], best[2], best[0]
+        label, dt_value, delay_value = best
+        return dt_value, delay_value, label
 
     return target_dt, base_delay, None
 
