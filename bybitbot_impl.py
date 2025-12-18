@@ -10765,6 +10765,24 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
     # If we have trailing state from the previous cycle, use it as a baseline to avoid losing prior tightening.
     trail_state = _TRAIL_PROTECTION.get(symbol) if isinstance(_TRAIL_PROTECTION, dict) else None
+    trail_activated_cycle = safe_int((trail_state or {}).get("activated_cycle"))
+    trail_active = trail_activated_cycle is not None and trail_activated_cycle >= 0
+    cycles_since_activation = None
+    if trail_active:
+        try:
+            cycles_since_activation = max(0, int((_CURRENT_CYCLE_NUMBER or trail_activated_cycle) - trail_activated_cycle))
+        except Exception:
+            cycles_since_activation = 0
+
+    def _trail_status_tag(*, activation_event: bool = False) -> str:
+        if activation_event:
+            return ", trail=activated"
+        if trail_active:
+            if cycles_since_activation is None:
+                return ", trail=active"
+            return f", trail=active({cycles_since_activation}c)"
+        return ", trail=inactive"
+
     stored_stop = safe_float((trail_state or {}).get("stop"))
     stored_take = safe_float((trail_state or {}).get("take"))
     if stored_stop is not None and math.isfinite(stored_stop):
@@ -10809,6 +10827,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         improve_threshold = atrv * PSEUDOTRAIL_MIN_IMPROVE_ATR
         tol = max(improve_threshold * 1e-6, 1e-9)
         if delta_price_equiv + tol >= improve_threshold and improve_threshold > 0:
+            was_active = trail_active
             lock_distance = delta_price_equiv * PSEUDOTRAIL_STOP_LOCK_FACTOR
             if lock_distance > 0:
                 if is_long:
@@ -10855,7 +10874,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             px_text = f", ΔPx≈{delta_price_equiv:.4f}, ATR={atrv:.4f}, triggerPx={improve_threshold:.4f}, qty={position_qty:.6f}"
             keep_tp_note = f", keep_tp={existing_take_count}" if has_take else ""
             log(
-                f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_transition_text}{take_transition_text}",
+                f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_transition_text}{take_transition_text}"
+                f"{_trail_status_tag(activation_event=(not was_active))}",
                 Fore.LIGHTBLUE_EX,
             )
             tightened_applied = True
@@ -10866,7 +10886,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             take_text = _fmt_px(initial_take_price)
             log(
                 f"{pseudo_ctx}: skipped (ΔPnL={delta_unreal:.4f}, ΔPx≈{delta_price_equiv:.4f}, triggerPx={improve_threshold:.4f}, "
-                f"stop={stop_text}, take={take_text})",
+                f"stop={stop_text}, take={take_text}){_trail_status_tag()}",
                 Fore.LIGHTBLACK_EX,
             )
     else:
@@ -10882,7 +10902,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         if not missing_reasons:
             missing_reasons.append("PnL not improved")
         if missing_reasons:
-            log(f"{pseudo_ctx}: not applied ({'; '.join(missing_reasons)})", Fore.LIGHTBLACK_EX)
+            log(f"{pseudo_ctx}: not applied ({'; '.join(missing_reasons)}){_trail_status_tag()}", Fore.LIGHTBLACK_EX)
     # Persist/restore trailing levels across cycles.
     if tightened_applied:
         base_stop = safe_float((trail_state or {}).get("base_stop")) or initial_stop_price
