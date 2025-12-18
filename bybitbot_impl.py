@@ -13908,8 +13908,11 @@ def run_cycle():
     except Exception:
         _PREV_UNREALIZED_PNL = {}
     # Preserve last trailing-protection levels (stop/take) across cycles.
+    # Only load trailing state for symbols that were actually open in the previous cycle,
+    # otherwise a symbol that was flat can incorrectly keep "active" trailing state for many cycles.
     prev_trail_map = cycle_state.get("positions_trailing") if isinstance(cycle_state, dict) else {}
     try:
+        prev_unreal_keys = set((prev_unreal_map or {}).keys()) if isinstance(prev_unreal_map, dict) else set()
         _TRAIL_PROTECTION = {
             str(sym): {
                 "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None else None,
@@ -13919,8 +13922,15 @@ def run_cycle():
                 "base_unreal": float(vals.get("base_unreal")) if isinstance(vals, dict) and vals.get("base_unreal") is not None else None,
                 "base_price": float(vals.get("base_price")) if isinstance(vals, dict) and vals.get("base_price") is not None else None,
                 "activated_cycle": safe_int(vals.get("activated_cycle")) if isinstance(vals, dict) else None,
+                "take_shift_total": float(vals.get("take_shift_total")) if isinstance(vals, dict) and vals.get("take_shift_total") is not None else None,
+                "take_extensions": safe_int(vals.get("take_extensions")) if isinstance(vals, dict) else None,
+                "take_last_extended_cycle": safe_int(vals.get("take_last_extended_cycle")) if isinstance(vals, dict) else None,
+                "tightening_count": safe_int(vals.get("tightening_count")) if isinstance(vals, dict) else None,
+                "position_side": (vals.get("position_side") if isinstance(vals, dict) else None),
+                "position_qty": float(vals.get("position_qty")) if isinstance(vals, dict) and vals.get("position_qty") is not None else None,
             }
             for sym, vals in (prev_trail_map or {}).items()
+            if str(sym) in prev_unreal_keys
         }
     except Exception:
         _TRAIL_PROTECTION = {}
@@ -16726,6 +16736,7 @@ def run_cycle():
         except Exception:
             pass
         try:
+            open_trailing_syms = set(cycle_state.get("positions_unrealized", {}).keys())
             cycle_state["positions_trailing"] = {
                 str(sym): {
                     "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None and math.isfinite(vals.get("stop")) else None,
@@ -16734,9 +16745,16 @@ def run_cycle():
                     "base_take": float(vals.get("base_take")) if isinstance(vals, dict) and vals.get("base_take") is not None and math.isfinite(vals.get("base_take")) else None,
                     "base_unreal": float(vals.get("base_unreal")) if isinstance(vals, dict) and vals.get("base_unreal") is not None and math.isfinite(vals.get("base_unreal")) else None,
                     "base_price": float(vals.get("base_price")) if isinstance(vals, dict) and vals.get("base_price") is not None and math.isfinite(vals.get("base_price")) else None,
+                    "take_shift_total": float(vals.get("take_shift_total")) if isinstance(vals, dict) and vals.get("take_shift_total") is not None and math.isfinite(vals.get("take_shift_total")) else None,
+                    "take_extensions": safe_int(vals.get("take_extensions")) if isinstance(vals, dict) else None,
+                    "take_last_extended_cycle": safe_int(vals.get("take_last_extended_cycle")) if isinstance(vals, dict) else None,
+                    "tightening_count": safe_int(vals.get("tightening_count")) if isinstance(vals, dict) else None,
+                    "position_side": (vals.get("position_side") if isinstance(vals, dict) else None),
+                    "position_qty": float(vals.get("position_qty")) if isinstance(vals, dict) and vals.get("position_qty") is not None else None,
                     "activated_cycle": safe_int(vals.get("activated_cycle")) if isinstance(vals, dict) else None,
                 }
                 for sym, vals in (_TRAIL_PROTECTION or {}).items()
+                if str(sym) in open_trailing_syms
             }
         except Exception:
             pass
