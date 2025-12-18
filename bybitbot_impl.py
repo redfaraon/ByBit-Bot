@@ -6497,6 +6497,61 @@ def _format_local_dt(value: datetime.datetime | None) -> str:
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def _ceil_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
+    if step_minutes <= 0:
+        return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    step_seconds = step_minutes * 60
+    ts = value.timestamp()
+    ceil_ts = math.ceil(ts / step_seconds) * step_seconds
+    return datetime.datetime.fromtimestamp(ceil_ts, tz=value.tzinfo)
+
+
+def _floor_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
+    if step_minutes <= 0:
+        return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    step_seconds = step_minutes * 60
+    ts = value.timestamp()
+    floor_ts = math.floor(ts / step_seconds) * step_seconds
+    return datetime.datetime.fromtimestamp(floor_ts, tz=value.tzinfo)
+
+
+def _align_next_run_to_step(
+    *,
+    target_dt: datetime.datetime,
+    now_utc: datetime.datetime,
+    min_delay_minutes: float,
+    max_delay_minutes: float,
+    step_minutes: int,
+) -> tuple[datetime.datetime, float, Optional[str]]:
+    if target_dt.tzinfo is None:
+        target_dt = target_dt.replace(tzinfo=datetime.timezone.utc)
+    base_delay = max(0.0, (target_dt - now_utc).total_seconds() / 60.0)
+    max_limit = max_delay_minutes if max_delay_minutes > 0 else None
+
+    def in_bounds(delay: float) -> bool:
+        if delay < max(0.0, float(min_delay_minutes)) - 1e-9:
+            return False
+        if max_limit is not None and delay > float(max_limit) + 1e-9:
+            return False
+        return True
+
+    ceil_dt = _ceil_datetime_to_step(target_dt, step_minutes)
+    ceil_delay = max(0.0, (ceil_dt - now_utc).total_seconds() / 60.0)
+    if in_bounds(ceil_delay):
+        return ceil_dt, ceil_delay, "ceil"
+
+    floor_dt = _floor_datetime_to_step(target_dt, step_minutes)
+    floor_delay = max(0.0, (floor_dt - now_utc).total_seconds() / 60.0)
+    if in_bounds(floor_delay):
+        return floor_dt, floor_delay, "floor"
+
+    return target_dt, base_delay, None
+
+
 def _format_schedule_overview() -> str:
     status = _read_runtime_status()
     lines = []
@@ -6637,6 +6692,22 @@ def _consume_schedule_override(default_delay: Optional[float]) -> tuple[float, O
                 delay_minutes = max(0.0, float(default_delay or DEFAULT_NEXT_RUN_MINUTES))
             target_dt = now_utc + datetime.timedelta(minutes=delay_minutes)
         return delay_minutes, target_dt, True
+
+    status = _read_runtime_status()
+    next_utc = status.get("next_run_utc") if isinstance(status, dict) else None
+    if isinstance(next_utc, str) and next_utc.strip():
+        iso_candidate = next_utc.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.datetime.fromisoformat(iso_candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            parsed = parsed.astimezone(datetime.timezone.utc)
+            delay_minutes = max(0.0, (parsed - now_utc).total_seconds() / 60.0)
+            if delay_minutes > 0:
+                return delay_minutes, parsed, False
+        except Exception:
+            pass
+
     base_delay = default_delay if (default_delay is not None and default_delay > 0) else DEFAULT_NEXT_RUN_MINUTES
     target_dt = now_utc + datetime.timedelta(minutes=base_delay)
     return base_delay, target_dt, False
@@ -16163,6 +16234,26 @@ def run_cycle():
         send_tg(fallback_msg)
     elif next_run_dt is None:
         next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
+
+    if next_run_dt is not None:
+        aligned_dt, aligned_delay, aligned_method = _align_next_run_to_step(
+            target_dt=next_run_dt,
+            now_utc=schedule_now_utc,
+            min_delay_minutes=min_delay,
+            max_delay_minutes=max_delay,
+            step_minutes=5,
+        )
+        if aligned_method and aligned_dt != next_run_dt:
+            before_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+            after_local = aligned_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+            log(
+                "Next run aligned to 5m grid: "
+                f"{before_local.strftime('%Y-%m-%d %H:%M:%S %Z')} -> {after_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                f"(delay {next_delay_minutes:.2f} -> {aligned_delay:.2f} min)",
+                Fore.LIGHTBLACK_EX,
+            )
+            next_run_dt = aligned_dt
+            next_delay_minutes = aligned_delay
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
     changelog_state = ensure_changelog_announcement()
