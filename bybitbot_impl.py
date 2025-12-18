@@ -118,6 +118,7 @@ def _configure_state_paths() -> None:
 # Per-cycle storage for pseudo-trailing decisions.
 _PREV_UNREALIZED_PNL: dict[str, float] = {}
 _TRAIL_PROTECTION: dict[str, dict[str, float]] = {}
+_CURRENT_CYCLE_NUMBER: int | None = None
 
 MARKET_MODE_GUIDE: dict[str, Any] = {
     "market_modes": {
@@ -10810,14 +10811,62 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             log(f"{pseudo_ctx}: not applied ({'; '.join(missing_reasons)})", Fore.LIGHTBLACK_EX)
     # Persist/restore trailing levels across cycles.
     if tightened_applied:
+        base_stop = safe_float((trail_state or {}).get("base_stop")) or initial_stop_price
+        base_take = safe_float((trail_state or {}).get("base_take")) or initial_take_price
+        base_unreal = safe_float((trail_state or {}).get("base_unreal")) or prev_unreal
+        base_price = safe_float((trail_state or {}).get("base_price")) or reference_price
+        activated_cycle = safe_int((trail_state or {}).get("activated_cycle")) or (_CURRENT_CYCLE_NUMBER or 0)
+        if (
+            base_stop is not None
+            and math.isfinite(base_stop)
+            and stop_price is not None
+            and math.isfinite(stop_price)
+            and base_unreal is not None
+            and math.isfinite(base_unreal)
+            and current_unreal is not None
+            and math.isfinite(current_unreal)
+        ):
+            total_pnl_delta = current_unreal - base_unreal
+            stop_total_shift = stop_price - base_stop
+            take_total_shift = (take_price - base_take) if (take_price is not None and math.isfinite(take_price) and base_take is not None and math.isfinite(base_take)) else 0.0
+            cycles_ago = (_CURRENT_CYCLE_NUMBER or activated_cycle) - activated_cycle
+            log(
+                f"{pseudo_ctx}: TRAIL state active for {cycles_ago} cycles; "
+                f"ΔPnL_total={total_pnl_delta:.4f}, stop_total={stop_total_shift:+.4f}, take_total={take_total_shift:+.4f}",
+                Fore.LIGHTBLACK_EX,
+            )
         _TRAIL_PROTECTION[symbol] = {
             "stop": float(stop_price) if stop_price is not None and math.isfinite(stop_price) else None,
             "take": float(take_price) if take_price is not None and math.isfinite(take_price) else None,
+            "base_stop": float(base_stop) if base_stop is not None and math.isfinite(base_stop) else None,
+            "base_take": float(base_take) if base_take is not None and math.isfinite(base_take) else None,
+            "base_unreal": float(base_unreal) if base_unreal is not None and math.isfinite(base_unreal) else None,
+            "base_price": float(base_price) if base_price is not None and math.isfinite(base_price) else None,
+            "activated_cycle": int(activated_cycle),
         }
     elif trail_state:
+        activated_cycle = safe_int(trail_state.get("activated_cycle"))
+        base_stop = safe_float(trail_state.get("base_stop"))
+        base_take = safe_float(trail_state.get("base_take"))
+        base_unreal = safe_float(trail_state.get("base_unreal"))
+        if activated_cycle is not None and base_stop is not None and math.isfinite(base_stop):
+            cycles_ago = (_CURRENT_CYCLE_NUMBER or activated_cycle) - activated_cycle
+            total_pnl_delta = (current_unreal - base_unreal) if (current_unreal is not None and math.isfinite(current_unreal) and base_unreal is not None and math.isfinite(base_unreal)) else 0.0
+            stop_total_shift = (stop_price - base_stop) if (stop_price is not None and math.isfinite(stop_price)) else 0.0
+            take_total_shift = (take_price - base_take) if (take_price is not None and math.isfinite(take_price) and base_take is not None and math.isfinite(base_take)) else 0.0
+            log(
+                f"{pseudo_ctx}: TRAIL state still active (skip) for {cycles_ago} cycles; "
+                f"ΔPnL_total={total_pnl_delta:.4f}, stop_total={stop_total_shift:+.4f}, take_total={take_total_shift:+.4f}",
+                Fore.LIGHTBLACK_EX,
+            )
         _TRAIL_PROTECTION[symbol] = {
-            "stop": float(stop_price) if stop_price is not None and math.isfinite(stop_price) else None,
-            "take": float(take_price) if take_price is not None and math.isfinite(take_price) else None,
+            "stop": float(stop_price) if stop_price is not None and math.isfinite(stop_price) else float(trail_state.get("stop")) if trail_state.get("stop") is not None else None,
+            "take": float(take_price) if take_price is not None and math.isfinite(take_price) else float(trail_state.get("take")) if trail_state.get("take") is not None else None,
+            "base_stop": float(base_stop) if base_stop is not None and math.isfinite(base_stop) else None,
+            "base_take": float(base_take) if base_take is not None and math.isfinite(base_take) else None,
+            "base_unreal": float(base_unreal) if base_unreal is not None and math.isfinite(base_unreal) else None,
+            "base_price": float(trail_state.get("base_price")) if trail_state.get("base_price") is not None and math.isfinite(trail_state.get("base_price")) else None,
+            "activated_cycle": int(activated_cycle) if activated_cycle is not None else None,
         }
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
@@ -13391,7 +13440,7 @@ def run_cycle():
     global AUTO_MARGIN_SCALE
     global AUTO_MARGIN_SCALE_RATIO
     global AUTO_MARGIN_CONFIDENCE_MULT
-    global _PREV_UNREALIZED_PNL
+    global _PREV_UNREALIZED_PNL, _TRAIL_PROTECTION, _CURRENT_CYCLE_NUMBER
     cycle_start_utc = datetime.datetime.now(datetime.timezone.utc)
     enable_stdio_logging()
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
@@ -13610,6 +13659,11 @@ def run_cycle():
             str(sym): {
                 "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None else None,
                 "take": float(vals.get("take")) if isinstance(vals, dict) and vals.get("take") is not None else None,
+                "base_stop": float(vals.get("base_stop")) if isinstance(vals, dict) and vals.get("base_stop") is not None else None,
+                "base_take": float(vals.get("base_take")) if isinstance(vals, dict) and vals.get("base_take") is not None else None,
+                "base_unreal": float(vals.get("base_unreal")) if isinstance(vals, dict) and vals.get("base_unreal") is not None else None,
+                "base_price": float(vals.get("base_price")) if isinstance(vals, dict) and vals.get("base_price") is not None else None,
+                "activated_cycle": safe_int(vals.get("activated_cycle")) if isinstance(vals, dict) else None,
             }
             for sym, vals in (prev_trail_map or {}).items()
         }
@@ -13619,6 +13673,7 @@ def run_cycle():
     next_cycle_number = real_cycles_completed + 1
     cycle_counter = str(next_cycle_number)
     os.environ["BYBITBOT_CYCLE_COUNTER"] = cycle_counter
+    _CURRENT_CYCLE_NUMBER = next_cycle_number
 
     session_dt = _current_log_time()
     session_stamp = session_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -16327,6 +16382,11 @@ def run_cycle():
                 str(sym): {
                     "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None and math.isfinite(vals.get("stop")) else None,
                     "take": float(vals.get("take")) if isinstance(vals, dict) and vals.get("take") is not None and math.isfinite(vals.get("take")) else None,
+                    "base_stop": float(vals.get("base_stop")) if isinstance(vals, dict) and vals.get("base_stop") is not None and math.isfinite(vals.get("base_stop")) else None,
+                    "base_take": float(vals.get("base_take")) if isinstance(vals, dict) and vals.get("base_take") is not None and math.isfinite(vals.get("base_take")) else None,
+                    "base_unreal": float(vals.get("base_unreal")) if isinstance(vals, dict) and vals.get("base_unreal") is not None and math.isfinite(vals.get("base_unreal")) else None,
+                    "base_price": float(vals.get("base_price")) if isinstance(vals, dict) and vals.get("base_price") is not None and math.isfinite(vals.get("base_price")) else None,
+                    "activated_cycle": safe_int(vals.get("activated_cycle")) if isinstance(vals, dict) else None,
                 }
                 for sym, vals in (_TRAIL_PROTECTION or {}).items()
             }
