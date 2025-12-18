@@ -805,8 +805,8 @@ TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
-MIN_NEXT_RUN_MINUTES: float = 10.0
-MAX_NEXT_RUN_FROM_START_MINUTES: float = 40.0
+MIN_NEXT_RUN_MINUTES: float = 15.0
+MAX_NEXT_RUN_FROM_START_MINUTES: float = 30.0
 IMMEDIATE_CLOSE_ON_BREACH: bool = False
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
@@ -16245,13 +16245,13 @@ def run_cycle():
             now_utc=schedule_now_utc,
             min_delay_minutes=min_delay,
             max_delay_minutes=max_delay,
-            step_minutes=10,
+            step_minutes=15,
         )
         if aligned_method and aligned_dt != next_run_dt:
             before_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             after_local = aligned_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             log(
-                "Next run aligned to 10m grid: "
+                "Next run aligned to 15m grid: "
                 f"{before_local.strftime('%Y-%m-%d %H:%M:%S %Z')} -> {after_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
                 f"(delay {next_delay_minutes:.2f} -> {aligned_delay:.2f} min)",
                 Fore.LIGHTBLACK_EX,
