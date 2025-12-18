@@ -10631,6 +10631,18 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     # Use live market/mark price when possible; candle close can be stale enough to create invalid triggers
     # (e.g. stop trigger <= current price) and leave positions unprotected.
     atrv = safe_float(last_row.get("atr"))
+    live_price = None
+    try:
+        ticker = exchange.fetch_ticker(exchange_symbol)
+        if isinstance(ticker, dict):
+            live_price = safe_float(
+                ticker.get("last")
+                or ticker.get("close")
+                or (ticker.get("info") or {}).get("lastPrice")
+                or (ticker.get("info") or {}).get("price")
+            )
+    except Exception:
+        live_price = None
     raw_mark_price = safe_float(
         position.get("markPrice")
         or position.get("mark_price")
@@ -10640,7 +10652,8 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         or (position.get("raw") or {}).get("lastPrice")
     )
     close_price = safe_float(last_row.get("close"))
-    price = raw_mark_price if raw_mark_price is not None and math.isfinite(raw_mark_price) else close_price
+    price_candidates = [live_price, raw_mark_price, close_price]
+    price = next((p for p in price_candidates if p is not None and math.isfinite(p)), close_price)
     # If mark price deviates слишком сильно от последней свечи (устаревший снимок), используем close.
     if (
         price is not None
@@ -10683,6 +10696,13 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         stop_price = stored_stop
     if stored_take is not None and math.isfinite(stored_take):
         take_price = stored_take
+    # Ensure stop is on the correct side of the current price.
+    if is_long and stop_price is not None and math.isfinite(stop_price) and price is not None and math.isfinite(price):
+        if stop_price >= price:
+            stop_price = price - sl_mult * atrv
+    elif not is_long and stop_price is not None and math.isfinite(stop_price) and price is not None and math.isfinite(price):
+        if stop_price <= price:
+            stop_price = price + sl_mult * atrv
 
     breakeven_note = None
     profit_distance = 0.0
