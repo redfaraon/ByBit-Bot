@@ -810,6 +810,8 @@ MAX_NEXT_RUN_FROM_START_MINUTES: float = 30.0
 PSEUDOTRAIL_MAX_TAKE_EXTENDS: int = 2
 PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT: float = 0.5
 PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.01
+PROTECTION_MAX_PRICE_RATIO: float = 10.0
+PROTECTION_MIN_PRICE_RATIO: float = 0.05
 IMMEDIATE_CLOSE_ON_BREACH: bool = False
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
@@ -10242,9 +10244,26 @@ def _evaluate_position_protection(
         or (position_payload or {}).get("average")
         or (position_payload or {}).get("avgEntryPrice")
     )
+    mark_price = safe_float(
+        (position_payload or {}).get("markPrice")
+        or (position_payload or {}).get("mark_price")
+        or (position_payload or {}).get("lastPrice")
+    )
+    guard_price = mark_price if mark_price is not None and math.isfinite(mark_price) else entry_price
 
     categorized = _categorize_protection_orders(orders)
-    has_take_profit = bool(categorized["take_profit"])
+    # Filter unreasonable take levels (e.g. 43k for ETH) to avoid false positives.
+    filtered_takes: list[tuple[float | None, float | None]] = []
+    for price_val, amt_val in categorized["take_profit"]:
+        if price_val is None or not math.isfinite(price_val):
+            continue
+        if guard_price is not None and math.isfinite(guard_price):
+            ratio = abs(price_val) / max(abs(guard_price), 1e-9)
+            if ratio > PROTECTION_MAX_PRICE_RATIO or ratio < PROTECTION_MIN_PRICE_RATIO:
+                continue
+        filtered_takes.append((price_val, amt_val))
+    categorized["take_profit"] = filtered_takes
+    has_take_profit = bool(filtered_takes)
     has_trailing = bool(categorized["trailing"])
 
     expected_stop_side = "sell" if is_long else "buy"
@@ -10261,11 +10280,15 @@ def _evaluate_position_protection(
         stop_val = safe_float(order.get("stopPrice") or order.get("triggerPrice") or order.get("stopLoss"))
         if stop_val is None or not math.isfinite(stop_val):
             continue
-        if entry_price is not None and math.isfinite(entry_price):
-            if (is_long and stop_val < entry_price - 1e-9) or (not is_long and stop_val > entry_price + 1e-9):
-                has_stop_loss = True
+        ref_price = guard_price if guard_price is not None and math.isfinite(guard_price) else entry_price
+        tol = max(abs(ref_price or 0.0) * 1e-4, 1e-3)
+        if ref_price is not None and math.isfinite(ref_price):
+            if is_long:
+                if stop_val <= ref_price - tol:
+                    has_stop_loss = True
             else:
-                has_stop_loss = True
+                if stop_val >= ref_price + tol:
+                    has_stop_loss = True
         else:
             has_stop_loss = True
 
@@ -10959,7 +10982,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         base_unreal = safe_float((trail_state or {}).get("base_unreal")) or prev_unreal
         base_price = safe_float((trail_state or {}).get("base_price")) or reference_price
         activated_cycle = safe_int((trail_state or {}).get("activated_cycle")) or (_CURRENT_CYCLE_NUMBER or 0)
-        take_total_shift = 0.0
+        take_total_shift = safe_float((trail_state or {}).get("take_shift_total")) or 0.0
         if (
             base_stop is not None
             and math.isfinite(base_stop)
@@ -11002,7 +11025,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         base_stop = safe_float(trail_state.get("base_stop"))
         base_take = safe_float(trail_state.get("base_take"))
         base_unreal = safe_float(trail_state.get("base_unreal"))
-        take_total_shift = 0.0
+        take_total_shift = safe_float(trail_state.get("take_shift_total")) or 0.0
         if activated_cycle is not None and base_stop is not None and math.isfinite(base_stop):
             cycles_ago = (_CURRENT_CYCLE_NUMBER or activated_cycle) - activated_cycle
             total_pnl_delta = (current_unreal - base_unreal) if (current_unreal is not None and math.isfinite(current_unreal) and base_unreal is not None and math.isfinite(base_unreal)) else 0.0
@@ -16347,6 +16370,14 @@ def run_cycle():
             )
             next_run_dt = aligned_dt
             next_delay_minutes = aligned_delay
+        final_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
+        final_delay_minutes = max(0.0, (next_run_dt - schedule_now_utc).total_seconds() / 60.0)
+        final_msg = (
+            f"ℹ️ Следующая сессия запланирована на {final_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"(~{final_delay_minutes:.1f} мин)"
+        )
+        log(final_msg, Fore.CYAN)
+        send_tg(final_msg)
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
     changelog_state = ensure_changelog_announcement()
