@@ -15907,7 +15907,28 @@ def run_cycle():
             if REQUIRE_TAKE_PROFIT and not has_take:
                 missing_parts.append("take")
             reason = ", ".join(missing_parts) if missing_parts else "unknown"
-            warn_msg = f"[WARN] {sym_active}: protection missing ({reason}), attempting restore"
+            live_price = None
+            try:
+                ticker = ex.fetch_ticker(sym_active)
+                if isinstance(ticker, dict):
+                    live_price = safe_float(
+                        ticker.get("last")
+                        or ticker.get("close")
+                        or (ticker.get("info") or {}).get("lastPrice")
+                        or (ticker.get("info") or {}).get("price")
+                    )
+            except Exception:
+                live_price = None
+            mark_price = safe_float(
+                (payload.get("markPrice") if isinstance(payload, dict) else None)
+                or (payload.get("raw") or {}).get("markPrice") if isinstance(payload, dict) else None
+            )
+            price_note = ""
+            if live_price is not None and math.isfinite(live_price):
+                price_note = f", px={live_price:.4f}"
+            elif mark_price is not None and math.isfinite(mark_price):
+                price_note = f", mark={mark_price:.4f}"
+            warn_msg = f"[WARN] {sym_active}: protection missing ({reason}){price_note}, attempting restore"
             log(warn_msg, Fore.YELLOW)
             try:
                 send_tg(warn_msg)
@@ -15952,9 +15973,16 @@ def run_cycle():
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
         protective_orders_after = _extract_protection_orders(refreshed_orders)
-        has_stop_after, _ = _evaluate_position_protection(position_payload, protective_orders_after)
-        if has_stop_after:
-            log(f"[INFO] {sym_unprotected}: protection restored ({len(protective_orders_after)} orders)", Fore.CYAN)
+        has_stop_after, has_take_after = _evaluate_position_protection(position_payload, protective_orders_after)
+        if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
+            restored_parts = ["stop"] if has_stop_after else []
+            if has_take_after:
+                restored_parts.append("take")
+            parts_text = ",".join(restored_parts) if restored_parts else "n/a"
+            log(
+                f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
+                Fore.CYAN,
+            )
             restored = True
             continue
 
