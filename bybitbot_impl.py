@@ -2642,8 +2642,8 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
         '  "style": trading style label (e.g., balanced_intraday, momentum, risk-off) so the follow-up trade prompt can adopt a matching voice,\n'
         '  "trade_horizon": trading horizon label (e.g., scalping, intraday, short-term, midterm),\n'
         '  "max_positions": integer cap for concurrently open symbols (factor in current exposure + liquidity),\n'
-        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or the equivalent offset; preferred) and ensure it lands between 5 and 40 minutes from the cycle start,\n'
-        '  "next_run_minutes": float delay fallback strictly between 5 and 40 minutes (drive toward 5 when volatility/news/aggression is high, stretch toward 40 when markets are calm),\n'
+        '  "next_run_time": ISO timestamp for the next cycle expressed in UTC+03:00 (include "+03:00" or "Z"); must land between 5 and 40 minutes from the cycle start,\n'
+        '  "next_run_minutes": REQUIRED float fallback delay strictly between 5 and 40 minutes (drive toward 5 when volatility/news/aggression is high, stretch toward 40 when markets are calm). Always return this even if next_run_time is present,\n'
         '  "notes": optional rationale describing how the news/indicators shaped this universe.'
         " Also include optional field 'news_requests' (symbols needing full news text)."
         " All of the returned metadata (timeframes, indicators, aggression, style, horizon, max positions, next run timing) will be applied directly to downstream initial requests and scheduling."
@@ -3093,8 +3093,8 @@ def ai_plan_trades(
         "    }\n"
         "  ],\n"
         '  "needs": [ {"symbol":"PAIR","timeframes":["1h"],"indicators":["ema100"]}, "news" ],\n'
-        '  "next_run_time": "2025-01-01T10:30:00Z",\n'
-        '  "next_run_minutes": float,\n'
+        '  "next_run_time": "2025-01-01T10:30:00+03:00",\n'
+        '  "next_run_minutes": float (REQUIRED, 5..40; drive toward 5 when volatility/news/aggression is high, toward 40 when calm),\n'
         '  "notes": "optional"\n'
         "}\n"
         "For each decision choose the execution market: 'spot' for cash trades, or 'linear'/'inverse'/'derivatives' for perpetuals. "
@@ -16407,6 +16407,7 @@ def run_cycle():
     )
     interval_minutes_model: Optional[float] = None
     interval_minutes_invalid = False
+    derived_interval_from_time: Optional[float] = None
     if selection_next_run is not None:
         try:
             raw_interval = float(selection_next_run)
@@ -16429,6 +16430,12 @@ def run_cycle():
                     local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
                     target_dt = target_dt.replace(tzinfo=local_tz)
                 target_dt = target_dt.astimezone(datetime.timezone.utc)
+                try:
+                    interval_guess = (target_dt - cycle_start_utc).total_seconds() / 60.0
+                    if interval_guess is not None and math.isfinite(interval_guess) and interval_guess > 0:
+                        derived_interval_from_time = float(interval_guess)
+                except Exception:
+                    derived_interval_from_time = None
                 remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
                 if remaining > 0:
                     within_min = remaining >= min_delay - 1e-6
@@ -16442,9 +16449,21 @@ def run_cycle():
                             Fore.YELLOW,
                         )
                         use_interval_due_to_time = True
+                        if interval_minutes_model is None and derived_interval_from_time is not None:
+                            interval_minutes_model = derived_interval_from_time
+                            log(
+                                f"Derived next_run_minutes={interval_minutes_model:.2f} from next_run_time (anchored to cycle start).",
+                                Fore.LIGHTBLACK_EX,
+                            )
                 else:
                     log('next_run_time from model is in the past; will use interval if available.', Fore.YELLOW)
                     use_interval_due_to_time = True
+                    if interval_minutes_model is None and derived_interval_from_time is not None:
+                        interval_minutes_model = derived_interval_from_time
+                        log(
+                            f"Derived next_run_minutes={interval_minutes_model:.2f} from past next_run_time (anchored to cycle start).",
+                            Fore.LIGHTBLACK_EX,
+                        )
             except Exception as exc:
                 log(f"Failed to parse next_run_time '{selection_next_time}': {exc}", Fore.YELLOW)
 
@@ -16474,16 +16493,64 @@ def run_cycle():
         next_delay_minutes = max(0.0, bounded_remaining)
         next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
     elif next_delay_minutes is None and (interval_minutes_invalid or use_interval_due_to_time):
-        log('Invalid next_run_minutes from model.', Fore.YELLOW)
+        if interval_minutes_invalid:
+            log('Invalid next_run_minutes from model.', Fore.YELLOW)
+        elif use_interval_due_to_time:
+            log('Model next_run_time unusable and no next_run_minutes provided; will use fallback interval.', Fore.YELLOW)
 
     if next_delay_minutes is None:
-        target_dt = cycle_start_utc + datetime.timedelta(minutes=float(DEFAULT_NEXT_RUN_MINUTES))
+        # Fallback: use last cycle's interval (if available), nudged by current-cycle volatility hints.
+        fallback_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
+        if fallback_interval_from_start is None or not math.isfinite(fallback_interval_from_start) or fallback_interval_from_start <= 0:
+            fallback_interval_from_start = float(DEFAULT_NEXT_RUN_MINUTES)
+
+        atr_ratios: list[float] = []
+        try:
+            for sym_hint in (selected_symbols or []):
+                hint = SYMBOL_MARKET_MODE_HINTS.get(sym_hint) or {}
+                analysis_balance = hint.get("analysis_balance") if isinstance(hint, dict) else None
+                ratio = safe_float((analysis_balance or {}).get("atr_ratio")) if isinstance(analysis_balance, dict) else None
+                if ratio is not None and math.isfinite(ratio) and ratio > 0:
+                    atr_ratios.append(float(ratio))
+        except Exception:
+            atr_ratios = []
+
+        vol_interval = None
+        if atr_ratios:
+            atr_ratios_sorted = sorted(atr_ratios)
+            atr_ratio_med = atr_ratios_sorted[len(atr_ratios_sorted) // 2]
+            low = float(VOLATILITY_TA_PRIORITY_ATR or 0.012)
+            high = float(VOLATILITY_NEWS_PRIORITY_ATR or 0.02)
+            # Aim for 15–30m when aligning to a 15m grid:
+            # higher ATR/price => shorter interval (closer to 15).
+            if high <= low:
+                vol_interval = 22.5
+            elif atr_ratio_med <= low:
+                vol_interval = 30.0
+            elif atr_ratio_med >= high:
+                vol_interval = 15.0
+            else:
+                t = (atr_ratio_med - low) / (high - low)
+                vol_interval = 30.0 - (15.0 * t)
+
+        fallback_source = "default"
+        if vol_interval is not None and math.isfinite(vol_interval) and vol_interval > 0:
+            fallback_source = "volatility"
+            # Blend previous interval with volatility suggestion for stability.
+            fallback_interval_from_start = 0.6 * float(vol_interval) + 0.4 * float(fallback_interval_from_start)
+
+        fallback_interval_from_start = min(
+            max(float(fallback_interval_from_start), float(MIN_NEXT_RUN_MINUTES)),
+            float(MAX_NEXT_RUN_FROM_START_MINUTES),
+        )
+
+        target_dt = cycle_start_utc + datetime.timedelta(minutes=float(fallback_interval_from_start))
         remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
         clamped = min(max(remaining, min_delay), max_delay if max_delay > 0 else remaining)
         next_delay_minutes = max(0.0, clamped)
         next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
         fallback_msg = (
-            f"Next cycle defaulting to {DEFAULT_NEXT_RUN_MINUTES:.0f} minutes from cycle start "
+            f"Next cycle fallback ({fallback_source}): interval {fallback_interval_from_start:.1f}m from cycle start "
             f"(sleep {next_delay_minutes:.1f} min, bounds {min_delay:.1f}-{max_delay:.1f})."
         )
         log(fallback_msg, Fore.LIGHTBLACK_EX)
@@ -16518,6 +16585,15 @@ def run_cycle():
         )
         log(final_msg, Fore.CYAN)
         send_tg(final_msg)
+        try:
+            if isinstance(cycle_state, dict):
+                cycle_state["last_next_delay_minutes"] = round(float(final_delay_minutes), 2)
+                cycle_state["last_interval_from_start_minutes"] = round(
+                    float((next_run_dt - cycle_start_utc).total_seconds() / 60.0),
+                    2,
+                )
+        except Exception:
+            pass
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
     send_tg("✅ Цикл завершён.")
     changelog_state = ensure_changelog_announcement()
