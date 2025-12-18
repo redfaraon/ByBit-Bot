@@ -805,8 +805,8 @@ TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
-MIN_NEXT_RUN_MINUTES: float = 15.0
-MAX_NEXT_RUN_FROM_START_MINUTES: float = 30.0
+MIN_NEXT_RUN_MINUTES: float = 5.0
+MAX_NEXT_RUN_FROM_START_MINUTES: float = 40.0
 PSEUDOTRAIL_MAX_TAKE_EXTENDS: int = 2
 PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT: float = 0.5
 PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.03
@@ -6575,7 +6575,7 @@ def _align_next_run_to_step(
 
     if candidates:
         best = min(candidates, key=lambda item: abs((item[1] - target_dt).total_seconds()))
-        return best
+        return best[1], best[2], best[0]
 
     return target_dt, base_delay, None
 
@@ -16322,6 +16322,20 @@ def run_cycle():
         0.0,
         (cycle_start_utc + datetime.timedelta(minutes=float(MAX_NEXT_RUN_FROM_START_MINUTES)) - schedule_now_utc).total_seconds() / 60.0,
     )
+    interval_minutes_model: Optional[float] = None
+    interval_minutes_invalid = False
+    if selection_next_run is not None:
+        try:
+            raw_interval = float(selection_next_run)
+        except (TypeError, ValueError):
+            raw_interval = None
+            interval_minutes_invalid = True
+        if raw_interval is not None:
+            if raw_interval > 0:
+                interval_minutes_model = raw_interval
+            else:
+                interval_minutes_invalid = True
+    use_interval_due_to_time = False
     if selection_next_time:
         candidate = selection_next_time.strip() if isinstance(selection_next_time, str) else ""
         if candidate:
@@ -16334,50 +16348,50 @@ def run_cycle():
                 target_dt = target_dt.astimezone(datetime.timezone.utc)
                 remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
                 if remaining > 0:
-                    clamped = min(max(remaining, min_delay), max_delay if max_delay > 0 else remaining)
-                    if clamped != remaining:
+                    within_min = remaining >= min_delay - 1e-6
+                    within_max = max_delay <= 0 or remaining <= max_delay + 1e-6
+                    if within_min and within_max:
+                        next_delay_minutes = remaining
+                        next_run_dt = target_dt
+                    else:
                         log(
-                            f"next_run_time clamped from {remaining:.2f} min to {clamped:.2f} min "
-                            f"(bounds {min_delay:.1f}-{max_delay:.1f})",
+                            f"next_run_time {remaining:.2f} min outside bounds {min_delay:.1f}-{max_delay:.1f}; will use interval if available.",
                             Fore.YELLOW,
                         )
-                    next_delay_minutes = clamped
-                    next_run_dt = schedule_now_utc + datetime.timedelta(minutes=clamped)
-                    next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
-                    msg = f"Next run scheduled for {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
-                    log(msg, Fore.CYAN)
-                    send_tg(msg)
+                        use_interval_due_to_time = True
                 else:
-                    log('next_run_time from model is in the past.', Fore.YELLOW)
+                    log('next_run_time from model is in the past; will use interval if available.', Fore.YELLOW)
+                    use_interval_due_to_time = True
             except Exception as exc:
                 log(f"Failed to parse next_run_time '{selection_next_time}': {exc}", Fore.YELLOW)
 
-    if next_delay_minutes is None and selection_next_run is not None:
-        try:
-            minutes_val = float(selection_next_run)
-        except (TypeError, ValueError):
-            minutes_val = None
-        if minutes_val and minutes_val > 0:
-            target_dt = cycle_start_utc + datetime.timedelta(minutes=float(minutes_val))
-            remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
-            clamped = min(max(remaining, min_delay), max_delay if max_delay > 0 else remaining)
-            if clamped != remaining:
-                log(
-                    f"next_run_minutes clamped from {remaining:.2f} min to {clamped:.2f} min "
-                    f"(bounds {min_delay:.1f}-{max_delay:.1f})",
-                    Fore.YELLOW,
-                )
-            next_delay_minutes = max(0.0, clamped)
-            next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
-            next_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
-            msg = (
-                f"Next cycle target {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
-                f"(interval {minutes_val:.1f} min from cycle start, sleep {next_delay_minutes:.1f} min)"
+    if next_delay_minutes is None and interval_minutes_model is not None:
+        interval_minutes = float(interval_minutes_model)
+        interval_clamped = min(
+            max(interval_minutes, float(MIN_NEXT_RUN_MINUTES)),
+            float(MAX_NEXT_RUN_FROM_START_MINUTES),
+        )
+        if abs(interval_clamped - interval_minutes) > 1e-9:
+            log(
+                f"next_run_minutes clamped from {interval_minutes:.2f} min to {interval_clamped:.2f} min "
+                f"(bounds {MIN_NEXT_RUN_MINUTES:.1f}-{MAX_NEXT_RUN_FROM_START_MINUTES:.1f})",
+                Fore.YELLOW,
             )
-            log(msg, Fore.CYAN)
-            send_tg(msg)
-        else:
-            log('Invalid next_run_minutes from model.', Fore.YELLOW)
+        target_dt = cycle_start_utc + datetime.timedelta(minutes=float(interval_clamped))
+        remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
+        bounded_remaining = min(
+            max(remaining, min_delay),
+            max_delay if max_delay > 0 else remaining,
+        )
+        if bounded_remaining != remaining:
+            log(
+                f"Interval suggestion adjusted to {bounded_remaining:.2f} min (bounds {min_delay:.1f}-{max_delay:.1f}).",
+                Fore.LIGHTBLACK_EX,
+            )
+        next_delay_minutes = max(0.0, bounded_remaining)
+        next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
+    elif next_delay_minutes is None and (interval_minutes_invalid or use_interval_due_to_time):
+        log('Invalid next_run_minutes from model.', Fore.YELLOW)
 
     if next_delay_minutes is None:
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(DEFAULT_NEXT_RUN_MINUTES))
