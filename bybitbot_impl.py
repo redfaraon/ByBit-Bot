@@ -807,6 +807,9 @@ PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 15.0
 MAX_NEXT_RUN_FROM_START_MINUTES: float = 30.0
+PSEUDOTRAIL_MAX_TAKE_EXTENDS: int = 2
+PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT: float = 0.5
+PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.01
 IMMEDIATE_CLOSE_ON_BREACH: bool = False
 TELEGRAM_FORWARD_LOGS: bool = False
 TELEGRAM_LOG_BATCH_SIZE: int = 12
@@ -6497,15 +6500,27 @@ def _format_local_dt(value: datetime.datetime | None) -> str:
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def _round_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
+def _ceil_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
     if step_minutes <= 0:
         return value
     if value.tzinfo is None:
         value = value.replace(tzinfo=datetime.timezone.utc)
     step_seconds = step_minutes * 60
     ts = value.timestamp()
-    round_ts = round(ts / step_seconds) * step_seconds
-    return datetime.datetime.fromtimestamp(round_ts, tz=value.tzinfo)
+    ceil_ts = math.ceil(ts / step_seconds) * step_seconds
+    return datetime.datetime.fromtimestamp(ceil_ts, tz=value.tzinfo)
+
+
+def _floor_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
+    if step_minutes <= 0:
+        return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    step_seconds = step_minutes * 60
+    ts = value.timestamp()
+    floor_ts = math.floor(ts / step_seconds) * step_seconds
+    return datetime.datetime.fromtimestamp(floor_ts, tz=value.tzinfo)
+
 
 
 def _align_next_run_to_step(
@@ -6528,10 +6543,15 @@ def _align_next_run_to_step(
             return False
         return True
 
-    round_dt = _round_datetime_to_step(target_dt, step_minutes)
-    round_delay = max(0.0, (round_dt - now_utc).total_seconds() / 60.0)
-    if in_bounds(round_delay) and round_dt != target_dt:
-        return round_dt, round_delay, "round"
+    ceil_dt = _ceil_datetime_to_step(target_dt, step_minutes)
+    ceil_delay = max(0.0, (ceil_dt - now_utc).total_seconds() / 60.0)
+    if ceil_dt != target_dt and in_bounds(ceil_delay):
+        return ceil_dt, ceil_delay, "ceil"
+
+    floor_dt = _floor_datetime_to_step(target_dt, step_minutes)
+    floor_delay = max(0.0, (floor_dt - now_utc).total_seconds() / 60.0)
+    if floor_dt != target_dt and in_bounds(floor_delay):
+        return floor_dt, floor_delay, "floor"
 
     return target_dt, base_delay, None
 
@@ -10584,6 +10604,30 @@ def _close_position_now(
         log(f"[WARN] Failed to close {symbol} during protection check: {exc}", Fore.YELLOW)
 
 
+def _trail_state_matches_position(
+    trail_state: dict[str, Any] | None,
+    *,
+    is_long: bool,
+    entry_price: float | None,
+) -> bool:
+    if not isinstance(trail_state, dict):
+        return False
+    recorded_side = (trail_state.get("position_side") or "").lower()
+    if recorded_side:
+        if is_long and recorded_side != "long":
+            return False
+        if not is_long and recorded_side != "short":
+            return False
+    if entry_price is not None and math.isfinite(entry_price):
+        base_price = safe_float(trail_state.get("base_price"))
+        if base_price is not None and math.isfinite(base_price):
+            diff = abs(entry_price - base_price)
+            threshold = max(abs(base_price), abs(entry_price), 1.0) * float(PSEUDOTRAIL_POSITION_STALE_PCT)
+            if diff > threshold:
+                return False
+    return True
+
+
 
 def ensure_position_protection(exchange, symbol, position, df_primary, open_orders, config=None):
     global _PREV_UNREALIZED_PNL
@@ -10739,6 +10783,17 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     elif entry_price and math.isfinite(entry_price):
         reference_price = entry_price
 
+    trail_state = _TRAIL_PROTECTION.get(symbol) if isinstance(_TRAIL_PROTECTION, dict) else None
+    if trail_state and not _trail_state_matches_position(trail_state, is_long=is_long, entry_price=entry_price):
+        trail_state = None
+        try:
+            del _TRAIL_PROTECTION[symbol]
+        except KeyError:
+            pass
+    trail_take_extensions = max(0, safe_int((trail_state or {}).get("take_extensions")) or 0)
+    tightening_count = max(0, safe_int((trail_state or {}).get("tightening_count")) or 0)
+    take_last_extended_cycle = safe_int((trail_state or {}).get("take_last_extended_cycle"))
+
     if is_long:
         stop_price = price - sl_mult * atrv
         take_price = price + tp_mult * atrv
@@ -10748,7 +10803,6 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     if existing_stop_best is not None and math.isfinite(existing_stop_best):
         stop_price = max(stop_price, existing_stop_best) if is_long else min(stop_price, existing_stop_best)
     # If we have trailing state from the previous cycle, use it as a baseline to avoid losing prior tightening.
-    trail_state = _TRAIL_PROTECTION.get(symbol) if isinstance(_TRAIL_PROTECTION, dict) else None
     trail_activated_cycle = safe_int((trail_state or {}).get("activated_cycle"))
     trail_active = trail_activated_cycle is not None and trail_activated_cycle >= 0
     cycles_since_activation = None
@@ -10803,6 +10857,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     delta_unreal: float | None = None
     delta_price_equiv: float | None = None
     tightened_applied = False
+    pre_tightening_count = tightening_count
     if current_valid and prev_valid and atrv is not None and math.isfinite(atrv) and atrv > 0 and position_qty and math.isfinite(position_qty) and position_qty > 0:
         delta_unreal = current_unreal - prev_unreal
         # Normalize unrealized PnL delta into an approximate price movement so the trigger is position-size invariant.
@@ -10822,18 +10877,27 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                     candidate_stop = price + lock_distance
                     if math.isfinite(candidate_stop) and candidate_stop < stop_price:
                         stop_price = candidate_stop
-            # Avoid TP churn/duplication: only extend take-price when we are missing take-profit protection.
-            if not has_take and take_price is not None and math.isfinite(take_price):
-                extend = delta_price_equiv * PSEUDOTRAIL_TP_EXTEND_FACTOR
-                if extend > 0:
-                    if is_long:
-                        candidate_take = take_price + extend
-                        if math.isfinite(candidate_take):
-                            take_price = candidate_take
-                    else:
-                        candidate_take = take_price - extend
-                        if math.isfinite(candidate_take):
-                            take_price = candidate_take
+            extend = delta_price_equiv * PSEUDOTRAIL_TP_EXTEND_FACTOR
+            take_extension_delta = extend if extend is not None else 0.0
+            if take_extension_delta and take_extension_delta > 0 and atrv is not None and math.isfinite(atrv):
+                cap = float(PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT) * atrv
+                if math.isfinite(cap) and cap > 0:
+                    take_extension_delta = min(take_extension_delta, cap)
+            should_extend_take = (
+                take_extension_delta > 0
+                and pre_tightening_count >= 1
+                and trail_take_extensions < PSEUDOTRAIL_MAX_TAKE_EXTENDS
+            )
+            if should_extend_take:
+                if is_long:
+                    candidate_take = take_price + take_extension_delta
+                else:
+                    candidate_take = take_price - take_extension_delta
+                if candidate_take is not None and math.isfinite(candidate_take):
+                    take_price = candidate_take
+                    trail_take_extensions += 1
+                    if _CURRENT_CYCLE_NUMBER is not None:
+                        take_last_extended_cycle = _CURRENT_CYCLE_NUMBER
             def _fmt_px(value: float | None) -> str:
                 return f"{value:.4f}" if value is not None and math.isfinite(value) else "n/a"
 
@@ -10862,6 +10926,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                 f"{_trail_status_tag(activation_event=(not was_active))}",
                 Fore.LIGHTBLUE_EX,
             )
+            tightening_count = pre_tightening_count + 1
             tightened_applied = True
         else:
             def _fmt_px(value: float | None) -> str:
@@ -10894,6 +10959,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         base_unreal = safe_float((trail_state or {}).get("base_unreal")) or prev_unreal
         base_price = safe_float((trail_state or {}).get("base_price")) or reference_price
         activated_cycle = safe_int((trail_state or {}).get("activated_cycle")) or (_CURRENT_CYCLE_NUMBER or 0)
+        take_total_shift = 0.0
         if (
             base_stop is not None
             and math.isfinite(base_stop)
@@ -10903,10 +10969,14 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             and math.isfinite(base_unreal)
             and current_unreal is not None
             and math.isfinite(current_unreal)
-        ):
+            ):
             total_pnl_delta = current_unreal - base_unreal
             stop_total_shift = stop_price - base_stop
-            take_total_shift = (take_price - base_take) if (take_price is not None and math.isfinite(take_price) and base_take is not None and math.isfinite(base_take)) else 0.0
+            take_total_shift = (
+                (take_price - base_take)
+                if (take_price is not None and math.isfinite(take_price) and base_take is not None and math.isfinite(base_take))
+                else 0.0
+            )
             cycles_ago = (_CURRENT_CYCLE_NUMBER or activated_cycle) - activated_cycle
             log(
                 f"{pseudo_ctx}: TRAIL state active for {cycles_ago} cycles; "
@@ -10920,18 +10990,28 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             "base_take": float(base_take) if base_take is not None and math.isfinite(base_take) else None,
             "base_unreal": float(base_unreal) if base_unreal is not None and math.isfinite(base_unreal) else None,
             "base_price": float(base_price) if base_price is not None and math.isfinite(base_price) else None,
+            "take_shift_total": float(take_total_shift) if math.isfinite(take_total_shift) else None,
             "activated_cycle": int(activated_cycle),
+            "take_extensions": int(trail_take_extensions),
+            "take_last_extended_cycle": int(take_last_extended_cycle) if take_last_extended_cycle is not None else None,
+            "tightening_count": int(tightening_count),
+            "position_side": "long" if is_long else "short",
         }
     elif trail_state:
         activated_cycle = safe_int(trail_state.get("activated_cycle"))
         base_stop = safe_float(trail_state.get("base_stop"))
         base_take = safe_float(trail_state.get("base_take"))
         base_unreal = safe_float(trail_state.get("base_unreal"))
+        take_total_shift = 0.0
         if activated_cycle is not None and base_stop is not None and math.isfinite(base_stop):
             cycles_ago = (_CURRENT_CYCLE_NUMBER or activated_cycle) - activated_cycle
             total_pnl_delta = (current_unreal - base_unreal) if (current_unreal is not None and math.isfinite(current_unreal) and base_unreal is not None and math.isfinite(base_unreal)) else 0.0
             stop_total_shift = (stop_price - base_stop) if (stop_price is not None and math.isfinite(stop_price)) else 0.0
-            take_total_shift = (take_price - base_take) if (take_price is not None and math.isfinite(take_price) and base_take is not None and math.isfinite(base_take)) else 0.0
+            take_total_shift = (
+                (take_price - base_take)
+                if (take_price is not None and math.isfinite(take_price) and base_take is not None and math.isfinite(base_take))
+                else 0.0
+            )
             log(
                 f"{pseudo_ctx}: TRAIL state still active (skip) for {cycles_ago} cycles; "
                 f"ΔPnL_total={total_pnl_delta:.4f}, stop_total={stop_total_shift:+.4f}, take_total={take_total_shift:+.4f}",
@@ -10944,7 +11024,12 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             "base_take": float(base_take) if base_take is not None and math.isfinite(base_take) else None,
             "base_unreal": float(base_unreal) if base_unreal is not None and math.isfinite(base_unreal) else None,
             "base_price": float(trail_state.get("base_price")) if trail_state.get("base_price") is not None and math.isfinite(trail_state.get("base_price")) else None,
+            "take_shift_total": float(take_total_shift) if math.isfinite(take_total_shift) else None,
             "activated_cycle": int(activated_cycle) if activated_cycle is not None else None,
+            "take_extensions": int(trail_take_extensions),
+            "take_last_extended_cycle": int(take_last_extended_cycle) if take_last_extended_cycle is not None else None,
+            "tightening_count": int(tightening_count),
+            "position_side": "long" if is_long else "short",
         }
     if BREAKEVEN_ENABLED and entry_price and math.isfinite(entry_price):
         breakeven_trigger = atrv * BREAKEVEN_ATR_MULT
@@ -11025,7 +11110,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                     log(f"🔷 {symbol}: tightened trailing offset to {trailing_offset:.4f} (profit distance {profit_distance:.4f})", Fore.LIGHTBLUE_EX)
         if trailing_offset is not None and trailing_offset <= 0:
             trailing_offset = None
-    refresh_takeprofits = not has_take
+    refresh_takeprofits = tightened_applied or not has_take
     refresh_trailing = bool(trailing_requested) and not has_trailing
     should_place_stop = not has_stop
     if (
