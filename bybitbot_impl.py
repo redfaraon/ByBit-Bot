@@ -11131,6 +11131,10 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
 
     if refresh_takeprofits:
         tp_scheme_override = target_spec.get("takeProfitLevels") or target_spec.get("take_profit_levels")
+        # When trailing protection is active and we have a stored take-profit, prefer restoring that exact level
+        # instead of regenerating ATR-based tiers, to avoid drifting away from the tightened TP.
+        if trail_active and stored_take is not None and math.isfinite(stored_take):
+            tp_scheme_override = [{"ratio": 1.0, "price": float(stored_take)}]
         normalized_scheme: list[tuple[float, float]] = []
         if isinstance(tp_scheme_override, list):
             for item in tp_scheme_override:
