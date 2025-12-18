@@ -805,7 +805,7 @@ TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
-MIN_NEXT_RUN_MINUTES: float = 5.0
+MIN_NEXT_RUN_MINUTES: float = 10.0
 MAX_NEXT_RUN_FROM_START_MINUTES: float = 40.0
 IMMEDIATE_CLOSE_ON_BREACH: bool = False
 TELEGRAM_FORWARD_LOGS: bool = False
@@ -6497,26 +6497,15 @@ def _format_local_dt(value: datetime.datetime | None) -> str:
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def _ceil_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
+def _round_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
     if step_minutes <= 0:
         return value
     if value.tzinfo is None:
         value = value.replace(tzinfo=datetime.timezone.utc)
     step_seconds = step_minutes * 60
     ts = value.timestamp()
-    ceil_ts = math.ceil(ts / step_seconds) * step_seconds
-    return datetime.datetime.fromtimestamp(ceil_ts, tz=value.tzinfo)
-
-
-def _floor_datetime_to_step(value: datetime.datetime, step_minutes: int) -> datetime.datetime:
-    if step_minutes <= 0:
-        return value
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=datetime.timezone.utc)
-    step_seconds = step_minutes * 60
-    ts = value.timestamp()
-    floor_ts = math.floor(ts / step_seconds) * step_seconds
-    return datetime.datetime.fromtimestamp(floor_ts, tz=value.tzinfo)
+    round_ts = round(ts / step_seconds) * step_seconds
+    return datetime.datetime.fromtimestamp(round_ts, tz=value.tzinfo)
 
 
 def _align_next_run_to_step(
@@ -6539,15 +6528,10 @@ def _align_next_run_to_step(
             return False
         return True
 
-    ceil_dt = _ceil_datetime_to_step(target_dt, step_minutes)
-    ceil_delay = max(0.0, (ceil_dt - now_utc).total_seconds() / 60.0)
-    if in_bounds(ceil_delay):
-        return ceil_dt, ceil_delay, "ceil"
-
-    floor_dt = _floor_datetime_to_step(target_dt, step_minutes)
-    floor_delay = max(0.0, (floor_dt - now_utc).total_seconds() / 60.0)
-    if in_bounds(floor_delay):
-        return floor_dt, floor_delay, "floor"
+    round_dt = _round_datetime_to_step(target_dt, step_minutes)
+    round_delay = max(0.0, (round_dt - now_utc).total_seconds() / 60.0)
+    if in_bounds(round_delay) and round_dt != target_dt:
+        return round_dt, round_delay, "round"
 
     return target_dt, base_delay, None
 
@@ -16261,13 +16245,13 @@ def run_cycle():
             now_utc=schedule_now_utc,
             min_delay_minutes=min_delay,
             max_delay_minutes=max_delay,
-            step_minutes=5,
+            step_minutes=10,
         )
         if aligned_method and aligned_dt != next_run_dt:
             before_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             after_local = aligned_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             log(
-                "Next run aligned to 5m grid: "
+                "Next run aligned to 10m grid: "
                 f"{before_local.strftime('%Y-%m-%d %H:%M:%S %Z')} -> {after_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
                 f"(delay {next_delay_minutes:.2f} -> {aligned_delay:.2f} min)",
                 Fore.LIGHTBLACK_EX,
