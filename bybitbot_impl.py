@@ -258,6 +258,10 @@ DEEPSEEK_MODEL: str | None = None
 AI_OFFLINE_CANCEL_ENTRIES = True
 _AI_OFFLINE_NOTICE_EMITTED_CYCLE: int | None = None
 _AI_OFFLINE_ACTIVE_CYCLE: int | None = None
+OFFLINE_TRADING_ENABLED = False
+OFFLINE_PAIR_LIMIT = 8
+OFFLINE_MAX_NEW_POSITIONS = 1
+OFFLINE_NEWS_BIAS_ENABLED = True
 
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
@@ -3816,6 +3820,7 @@ def refresh_settings():
     global AI_PROVIDER_PRIMARY, AI_PROVIDER_SECONDARY, AI_PROVIDER_CURRENT
     global DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL
     global AI_OFFLINE_CANCEL_ENTRIES
+    global OFFLINE_TRADING_ENABLED, OFFLINE_PAIR_LIMIT, OFFLINE_MAX_NEW_POSITIONS, OFFLINE_NEWS_BIAS_ENABLED
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
@@ -4183,6 +4188,28 @@ def refresh_settings():
         "yes",
         "on",
     }
+    OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
+    except (TypeError, ValueError):
+        OFFLINE_PAIR_LIMIT = 8
+    OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
+    try:
+        OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
+    except (TypeError, ValueError):
+        OFFLINE_MAX_NEW_POSITIONS = 1
+    OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
     TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
@@ -4660,6 +4687,287 @@ def _emit_ai_offline_notice(reason: str) -> None:
         send_tg(msg)
     except Exception:
         pass
+
+
+def _offline_news_score(news_item: Any) -> float:
+    """
+    Very simple headline-based sentiment score in [-1..+1].
+    Uses only text already fetched by the bot (no external paid signals).
+    """
+    if not news_item:
+        return 0.0
+    texts: list[str] = []
+    if isinstance(news_item, dict):
+        headline = news_item.get("headline") or news_item.get("title") or ""
+        summary = news_item.get("summary") or ""
+        texts.extend([str(headline), str(summary)])
+        items = news_item.get("items") or []
+        if isinstance(items, list):
+            for it in items[:5]:
+                if isinstance(it, dict):
+                    texts.append(str(it.get("title") or it.get("headline") or ""))
+                    texts.append(str(it.get("summary") or ""))
+                elif it:
+                    texts.append(str(it))
+    elif isinstance(news_item, list):
+        for it in news_item[:5]:
+            if isinstance(it, dict):
+                texts.append(str(it.get("title") or it.get("headline") or ""))
+                texts.append(str(it.get("summary") or ""))
+            elif it:
+                texts.append(str(it))
+    else:
+        texts.append(str(news_item))
+
+    blob = " ".join(t for t in texts if t).lower()
+    if not blob.strip():
+        return 0.0
+
+    pos_words = (
+        "surge",
+        "rally",
+        "breakout",
+        "bull",
+        "bullish",
+        "record",
+        "approval",
+        "etf",
+        "adoption",
+        "partnership",
+        "upgrade",
+        "support",
+        "rebound",
+        "beats",
+    )
+    neg_words = (
+        "dump",
+        "crash",
+        "breakdown",
+        "bear",
+        "bearish",
+        "hack",
+        "exploit",
+        "lawsuit",
+        "ban",
+        "regulator",
+        "downgrade",
+        "liquidation",
+        "outflow",
+        "rejection",
+        "halt",
+        "default",
+        "investigation",
+    )
+    pos = sum(1 for w in pos_words if w in blob)
+    neg = sum(1 for w in neg_words if w in blob)
+    if pos == 0 and neg == 0:
+        return 0.0
+    raw = (pos - neg) / max(1, pos + neg)
+    return float(max(-1.0, min(1.0, raw)))
+
+
+def _offline_select_pairs(
+    exchange,
+    candidate_pairs: Sequence[str],
+    *,
+    news_digest: dict[str, Any] | None,
+    required: set[str] | None = None,
+    limit: int = 8,
+) -> list[str]:
+    """
+    Replacement for AI universe selection when AI is unavailable.
+    Scores symbols by a simple mix of 24h move magnitude and news intensity.
+    """
+    required = set(required or set())
+    limit = max(2, min(30, int(limit or 8)))
+    pairs = [p for p in candidate_pairs if p]
+    if not pairs:
+        return sorted(required)[:limit]
+
+    # Limit API load: score only a subset, but always include required symbols.
+    pool: list[str] = []
+    seen: set[str] = set()
+    for sym in list(required) + pairs:
+        if sym in seen:
+            continue
+        seen.add(sym)
+        pool.append(sym)
+        if len(pool) >= max(limit * 4, 20):
+            break
+
+    scored: list[tuple[float, str]] = []
+    for sym in pool:
+        pct_move = 0.0
+        try:
+            t = exchange.fetch_ticker(sym)
+            if isinstance(t, dict):
+                pct_move = abs(safe_float(t.get("percentage")) or 0.0) / 100.0
+        except Exception:
+            pct_move = 0.0
+        news_score = _offline_news_score((news_digest or {}).get(sym))
+        news_strength = abs(news_score) if OFFLINE_NEWS_BIAS_ENABLED else 0.0
+        score = (pct_move * 0.7) + (news_strength * 0.3)
+        scored.append((score, sym))
+
+    scored.sort(reverse=True, key=lambda x: (x[0], x[1]))
+    result: list[str] = []
+    for sym in sorted(required):
+        if sym not in result:
+            result.append(sym)
+    for _score, sym in scored:
+        if sym in result:
+            continue
+        result.append(sym)
+        if len(result) >= limit:
+            break
+    return result[:limit]
+
+
+def _offline_decision_for_symbol(
+    symbol: str,
+    df_primary: pd.DataFrame,
+    *,
+    current_position: dict[str, Any] | None,
+    news_score: float = 0.0,
+    max_new_positions_left: int = 0,
+) -> dict[str, Any]:
+    """
+    Replacement for per-symbol AI initial decision when AI is unavailable.
+
+    Conservative rules:
+    - Never add to positions, only open new ones when OFFLINE_TRADING_ENABLED=1 and capacity allows.
+    - Trend-following when EMAs align, mean-reversion only at RSI extremes.
+    """
+    amt = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
+    has_position = abs(amt) > 0
+    if has_position:
+        side_raw = str((current_position or {}).get("side") or "").lower()
+        side_label = "buy" if side_raw in {"buy", "long"} or amt > 0 else "sell"
+        return {
+            "symbol": symbol,
+            "action": "manage",
+            "side": side_label,
+            "reason": "AI offline: manage existing position (refresh protection / pseudotrail)",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+            "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
+        }
+
+    if not OFFLINE_TRADING_ENABLED or max_new_positions_left <= 0:
+        return {
+            "symbol": symbol,
+            "action": "skip",
+            "reason": "AI offline: entries disabled",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+        }
+
+    if df_primary is None or df_primary.empty:
+        return {
+            "symbol": symbol,
+            "action": "skip",
+            "reason": "AI offline: insufficient market data",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+        }
+
+    df_local = df_primary.copy()
+    try:
+        if "ema20" not in df_local.columns:
+            df_local["ema20"] = ema(df_local["close"], 20)
+        if "ema50" not in df_local.columns:
+            df_local["ema50"] = ema(df_local["close"], 50)
+        if "rsi14" not in df_local.columns:
+            df_local["rsi14"] = rsi(df_local["close"], 14)
+        if "atr14" not in df_local.columns:
+            df_local["atr14"] = atr(df_local, 14)
+    except Exception as exc:
+        return {
+            "symbol": symbol,
+            "action": "skip",
+            "reason": f"AI offline: indicator calc failed ({type(exc).__name__})",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+        }
+
+    last = df_local.iloc[-1]
+    close = safe_float(last.get("close")) or 0.0
+    ema20_val = safe_float(last.get("ema20"))
+    ema50_val = safe_float(last.get("ema50"))
+    rsi_val = safe_float(last.get("rsi14"))
+    atr_val = safe_float(last.get("atr14")) or safe_float(last.get("atr"))
+
+    if not (close and math.isfinite(close) and close > 0 and ema20_val and ema50_val and rsi_val is not None):
+        return {
+            "symbol": symbol,
+            "action": "skip",
+            "reason": "AI offline: missing indicators",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+        }
+
+    # Bias direction based on news (avoid trading against strong negative/positive headlines).
+    allow_long = True
+    allow_short = True
+    if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score):
+        if news_score <= -0.5:
+            allow_long = False
+        elif news_score >= 0.5:
+            allow_short = False
+
+    bull = ema20_val > ema50_val and close > ema50_val
+    bear = ema20_val < ema50_val and close < ema50_val
+
+    # "Range" hint: low EMA separation relative to ATR (avoid trend trades).
+    ema_sep = abs(ema20_val - ema50_val)
+    range_hint = False
+    if atr_val and math.isfinite(atr_val) and atr_val > 0:
+        range_hint = (ema_sep / atr_val) < 0.35
+
+    chosen_side: str | None = None
+    reason_bits: list[str] = []
+
+    if not range_hint:
+        # Trend-following
+        if bull and allow_long and 45 <= rsi_val <= 70:
+            chosen_side = "buy"
+            reason_bits.append("trend bull (ema20>ema50, close>ema50)")
+        elif bear and allow_short and 30 <= rsi_val <= 55:
+            chosen_side = "sell"
+            reason_bits.append("trend bear (ema20<ema50, close<ema50)")
+    else:
+        # Mean reversion only at extremes
+        if allow_long and rsi_val <= 30:
+            chosen_side = "buy"
+            reason_bits.append("range mean-reversion (rsi<=30)")
+        elif allow_short and rsi_val >= 70:
+            chosen_side = "sell"
+            reason_bits.append("range mean-reversion (rsi>=70)")
+
+    if chosen_side is None:
+        return {
+            "symbol": symbol,
+            "action": "skip",
+            "reason": f"AI offline: no signal (rsi={rsi_val:.1f}, range={range_hint})",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+        }
+
+    if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score) and abs(news_score) >= 0.5:
+        reason_bits.append(f"news_bias={news_score:+.2f}")
+    reason_bits.append(f"rsi={rsi_val:.1f}")
+
+    return {
+        "symbol": symbol,
+        "action": "open",
+        "side": chosen_side,
+        "reason": "AI offline rules: " + "; ".join(reason_bits),
+        "ai_unavailable": True,
+        "confidence": 0.55,
+        "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
+        # Let the existing ATR-based entry ladder logic size/execute orders.
+        "notional_pct": CURRENT_RISK_PCT,
+    }
 
 # --- Вспомогательные функции ---
 def _current_log_time():
@@ -14537,6 +14845,25 @@ def run_cycle():
         universe_state = universe_state or {}
         universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_universe_cache(universe_state)
+    elif _AI_OFFLINE_ACTIVE_CYCLE is not None and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER):
+        # AI is unavailable: replace universe selection with a lightweight, deterministic scorer.
+        required_symbols = set(position_symbols) | set(order_symbols) | set(order_symbols_non_reduce)
+        offline_pairs = _offline_select_pairs(
+            ex,
+            sorted(candidate_pairs_set),
+            news_digest=news_headlines,
+            required=required_symbols,
+            limit=OFFLINE_PAIR_LIMIT,
+        )
+        universe_state = dict(universe_state or {})
+        universe_state["pairs"] = offline_pairs
+        universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        universe_state["ai_offline"] = True
+        save_universe_cache(universe_state)
+        log(
+            f"[AI OFFLINE] Universe selection: {', '.join(offline_pairs)} (limit={OFFLINE_PAIR_LIMIT})",
+            Fore.YELLOW,
+        )
     if universe_state.get("pairs"):
         for pair in universe_state.get("pairs", []):
             resolved_pair = normalize_symbol(pair, record_missing=False)
@@ -15284,13 +15611,29 @@ def run_cycle():
                     }
             if dec is None:
                 if ai_offline_mode:
-                    # Universal safe fallback when AI is unavailable: do not open new positions.
-                    fallback = dict(initial_payload) if isinstance(initial_payload, dict) else {}
-                    fallback.setdefault("symbol", sym)
-                    fallback["action"] = "hold" if has_position else "skip"
-                    fallback["reason"] = "AI offline fallback (no new entries)"
-                    fallback["ai_unavailable"] = True
-                    dec = fallback
+                    # Offline algorithmic replacement for per-symbol initial decision.
+                    news_score = _offline_news_score(news_payload_symbol)
+                    try:
+                        max_new_left = max(
+                            0,
+                            min(
+                                OFFLINE_MAX_NEW_POSITIONS,
+                                max(0, (max_positions_limit or 0) - int(open_positions or 0)) if max_positions_limit else OFFLINE_MAX_NEW_POSITIONS,
+                            ),
+                        )
+                    except Exception:
+                        max_new_left = OFFLINE_MAX_NEW_POSITIONS
+                    dec = _offline_decision_for_symbol(
+                        sym,
+                        df,
+                        current_position=current_position,
+                        news_score=news_score,
+                        max_new_positions_left=max_new_left,
+                    )
+                    log(
+                        f"[AI OFFLINE] {sym}: action={dec.get('action')} side={dec.get('side') or 'n/a'} reason={(dec.get('reason') or '')[:140]}",
+                        Fore.YELLOW,
+                    )
                 else:
                     try:
                         dec = ai_decision(
