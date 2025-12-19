@@ -255,6 +255,9 @@ AI_PROVIDER_CURRENT = "openai"
 DEEPSEEK_API_KEY: str | None = None
 DEEPSEEK_API_BASE: str | None = None
 DEEPSEEK_MODEL: str | None = None
+AI_OFFLINE_CANCEL_ENTRIES = True
+_AI_OFFLINE_NOTICE_EMITTED_CYCLE: int | None = None
+_AI_OFFLINE_ACTIVE_CYCLE: int | None = None
 
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
@@ -2611,6 +2614,7 @@ def _load_initial_dataframe(
 def ai_update_universe(exchange, symbols, positions_map, equity, available_margin, universe_cache, news_digest=None):
     client = _create_ai_client(timeout=30, context="universe update")
     if client is None:
+        _emit_ai_offline_notice("client init failed (universe update)")
         return None
     if not news_digest:
         news_digest = _build_news_digest(symbols)
@@ -2708,8 +2712,31 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
             response_format={"type": "json_object"},
             messages=messages,
         )
+    except RateLimitError as exc:
+        # Universe update is not critical for safety; if rate-limited, enter offline mode.
+        if _current_ai_provider() == "openai":
+            _switch_ai_provider_to_fallback("rate limit 429 (universe update)")
+            retry_client = _create_ai_client(timeout=30, context="universe update (retry)")
+            if retry_client is not None:
+                try:
+                    res = retry_client.chat.completions.create(
+                        model=AI_MODEL,
+                        temperature=0,
+                        response_format={"type": "json_object"},
+                        messages=messages,
+                    )
+                except Exception:
+                    _emit_ai_offline_notice("rate limit 429 (universe update)")
+                    return None
+            else:
+                _emit_ai_offline_notice("rate limit 429 (universe update)")
+                return None
+        else:
+            _emit_ai_offline_notice("rate limit 429 (universe update)")
+            return None
     except Exception as exc:
-        log(f"[ERROR] OpenAI universe update: {exc}", Fore.RED)
+        log(f"[ERROR] AI universe update: {exc}", Fore.RED)
+        _emit_ai_offline_notice(f"universe update failed: {type(exc).__name__}")
         _record_ai_exchange(
             context_key,
             label=context_label,
@@ -3084,6 +3111,7 @@ def ai_plan_trades(
     context_key = f"trade_plan_{stage}".strip().lower() if stage else "trade_plan"
     client = _create_ai_client(timeout=40, context=context_label)
     if client is None:
+        _emit_ai_offline_notice(f"client init failed ({context_label})")
         log(f"❌ AI client unavailable for {context_label}", Fore.RED)
         return None
     positions_payload = _compact_positions_snapshot(positions_snapshot)
@@ -3171,6 +3199,29 @@ def ai_plan_trades(
                 response_format={"type": "json_object"},
                 messages=messages,
             )
+        except RateLimitError as exc:
+            last_error = exc
+            if _current_ai_provider() == "openai":
+                _switch_ai_provider_to_fallback("rate limit 429 (trade plan)")
+                retry_client = _create_ai_client(timeout=40, context=f"{context_label} (retry)")
+                if retry_client is not None:
+                    client = retry_client
+                    continue
+            _emit_ai_offline_notice("rate limit 429 (trade plan)")
+            if attempt_count >= max_attempts:
+                break
+            delay = base_backoff * (attempt_count ** 2)
+            time.sleep(delay + random.uniform(0, base_backoff))
+            _record_ai_exchange(
+                context_key,
+                label=context_label,
+                model=AI_MODEL,
+                request=messages,
+                error=f"attempt {attempt_count}: {exc}",
+                token_estimate=token_estimate,
+                extra={"stage": stage, "attempt": attempt_count},
+            )
+            continue
         except Exception as exc:
             last_error = exc
             log(f"[ERROR] OpenAI trade plan attempt {attempt_count}: {exc}", Fore.RED)
@@ -3764,6 +3815,7 @@ def refresh_settings():
     global AI_SECONDARY_BUDGET_START, AI_HARD_STOP_BUDGET
     global AI_PROVIDER_PRIMARY, AI_PROVIDER_SECONDARY, AI_PROVIDER_CURRENT
     global DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL
+    global AI_OFFLINE_CANCEL_ENTRIES
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
@@ -4125,6 +4177,12 @@ def refresh_settings():
         DEEPSEEK_MODEL = deepseek_model_env.strip()
     else:
         DEEPSEEK_MODEL = None
+    AI_OFFLINE_CANCEL_ENTRIES = str(os.getenv("AI_OFFLINE_CANCEL_ENTRIES", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
     TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
@@ -4574,6 +4632,29 @@ def _switch_ai_provider_to_fallback(reason: str) -> None:
     except Exception:
         model_suffix = ""
     msg = f"[AI] Switching provider {old_label} -> {new_label}{model_suffix} due to {reason}"
+    log(msg, Fore.YELLOW)
+    try:
+        send_tg(msg)
+    except Exception:
+        pass
+
+
+def _emit_ai_offline_notice(reason: str) -> None:
+    """Log/notify once per cycle when we enter AI-offline fallback mode."""
+    global _AI_OFFLINE_NOTICE_EMITTED_CYCLE, _AI_OFFLINE_ACTIVE_CYCLE
+    cycle_no = safe_int(globals().get("_CURRENT_CYCLE_NUMBER")) or 0
+    if cycle_no:
+        _AI_OFFLINE_ACTIVE_CYCLE = cycle_no
+    if cycle_no and _AI_OFFLINE_NOTICE_EMITTED_CYCLE == cycle_no:
+        return
+    if cycle_no:
+        _AI_OFFLINE_NOTICE_EMITTED_CYCLE = cycle_no
+    provider = _current_ai_provider().upper()
+    cancel_entries = "on" if AI_OFFLINE_CANCEL_ENTRIES else "off"
+    msg = (
+        f"[AI] OFFLINE fallback active ({provider} unavailable: {reason}). "
+        f"Strategy: no new entries; cancel non-reduce orders={cancel_entries}; manage existing positions with local protection."
+    )
     log(msg, Fore.YELLOW)
     try:
         send_tg(msg)
@@ -12627,6 +12708,7 @@ def ai_decision(
     target_meta = target_meta or {}
     client = _create_ai_client(timeout=30, context=f"{symbol} decision")
     if client is None:
+        _emit_ai_offline_notice(f"client init failed ({symbol} decision)")
         log(f"❌ Не удалось создать AI-клиент для {symbol}", Fore.RED)
         return None
     df_30m["ema20"] = ema(df_30m["close"],20)
@@ -13279,17 +13361,31 @@ def ai_decision(
 
         # --- Первый проход ---
         start_init = time.perf_counter()
-        res = client.chat.completions.create(
-            model=AI_MODEL,
-            temperature=0,
-            response_format={"type":"json_object"},
-            messages=messages_init
-        )
-        duration_init = time.perf_counter() - start_init
-        log(f"ℹ️ OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
-        _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
-        msg = res.choices[0].message.content
-        decision = json.loads(msg)
+        try:
+            res = client.chat.completions.create(
+                model=AI_MODEL,
+                temperature=0,
+                response_format={"type":"json_object"},
+                messages=messages_init
+            )
+            duration_init = time.perf_counter() - start_init
+            log(f"ℹ️ OpenAI initial запрос для {symbol}: {duration_init:.2f} c", Fore.LIGHTBLACK_EX)
+            _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
+            msg = res.choices[0].message.content
+            decision = json.loads(msg)
+        except RateLimitError:
+            raise
+        except Exception as exc:
+            _emit_ai_offline_notice(f"decision initial failed: {type(exc).__name__}")
+            log(f"[WARN] {symbol}: AI initial decision failed: {exc}", Fore.YELLOW)
+            fallback = dict(initial_decision) if isinstance(initial_decision, dict) else {}
+            fallback.setdefault("symbol", symbol)
+            current_amt = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
+            has_pos = abs(current_amt) > 0
+            fallback["action"] = "hold" if has_pos else "skip"
+            fallback["reason"] = f"AI unavailable (initial): {type(exc).__name__}"
+            fallback["ai_unavailable"] = True
+            return ensure_skip_reason(fallback)
         needs = decision.get("needs", [])
         confidence_raw = decision.get("confidence")
         try:
@@ -13674,17 +13770,31 @@ def ai_decision(
             return ensure_skip_reason(decision)
         _log_ai_request(AI_MODEL, tokens_extra, f"{symbol} extra decision")
         start_extra = time.perf_counter()
-        res2 = client.chat.completions.create(
-            model=AI_MODEL,
-            temperature=0,
-            response_format={"type":"json_object"},
-            messages=messages_extra
-        )
-        duration_extra = time.perf_counter() - start_extra
-        log(f"ℹ️ OpenAI extra запрос для {symbol}: {duration_extra:.2f} c", Fore.LIGHTBLACK_EX)
-        _register_ai_usage(AI_MODEL, getattr(res2, "usage", None), f"{symbol} extra decision")
-        msg2 = res2.choices[0].message.content
-        decision = json.loads(msg2)
+        try:
+            res2 = client.chat.completions.create(
+                model=AI_MODEL,
+                temperature=0,
+                response_format={"type":"json_object"},
+                messages=messages_extra
+            )
+            duration_extra = time.perf_counter() - start_extra
+            log(f"ℹ️ OpenAI extra запрос для {symbol}: {duration_extra:.2f} c", Fore.LIGHTBLACK_EX)
+            _register_ai_usage(AI_MODEL, getattr(res2, "usage", None), f"{symbol} extra decision")
+            msg2 = res2.choices[0].message.content
+            decision = json.loads(msg2)
+        except RateLimitError:
+            raise
+        except Exception as exc:
+            _emit_ai_offline_notice(f"decision extra failed: {type(exc).__name__}")
+            log(f"[WARN] {symbol}: AI extra decision failed: {exc}", Fore.YELLOW)
+            fallback = dict(decision) if isinstance(decision, dict) else {}
+            fallback.setdefault("symbol", symbol)
+            current_amt = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
+            has_pos = abs(current_amt) > 0
+            fallback["action"] = "hold" if has_pos else "skip"
+            fallback["reason"] = f"AI unavailable (extra): {type(exc).__name__}"
+            fallback["ai_unavailable"] = True
+            return ensure_skip_reason(fallback)
         needs_followup = decision.get("needs", [])
         if needs_followup:
             log(f"ℹ️ После допконтекста модель все ещё запрашивает {needs_followup} для {symbol}", Fore.LIGHTBLACK_EX)
@@ -15128,6 +15238,32 @@ def run_cycle():
             dec = None
             master_decision_used = False
             rate_limit_error_hit = False
+            ai_offline_mode = (
+                _AI_OFFLINE_ACTIVE_CYCLE is not None
+                and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
+            )
+            if ai_offline_mode and AI_OFFLINE_CANCEL_ENTRIES and open_orders_symbol:
+                cancelled_offline: list[str] = []
+                for order in open_orders_symbol:
+                    if not isinstance(order, dict):
+                        continue
+                    if _is_reduce_only(order):
+                        continue
+                    oid = order.get("id")
+                    if not oid:
+                        continue
+                    order_summary = _summarize_order_spec(order)
+                    summary_suffix = f": {order_summary}" if order_summary else ""
+                    success, err = cancel_order_by_id(ex, sym, str(oid))
+                    if success:
+                        cancelled_offline.append(f"{oid}{summary_suffix}")
+                if cancelled_offline:
+                    msg = f"[AI OFFLINE] {sym}: cancelled non-reduce orders: {', '.join(cancelled_offline[:8])}"
+                    log(msg, Fore.YELLOW)
+                    try:
+                        send_tg(msg)
+                    except Exception:
+                        pass
             if MASTER_DECISIONS_SHARE and not is_master_user:
                 dec = _pull_master_decision(sym)
                 if dec:
@@ -15147,43 +15283,52 @@ def run_cycle():
                         "reason": "master decision unavailable for follower run",
                     }
             if dec is None:
-                try:
-                    dec = ai_decision(
-                        sym,
-                        df,
-                        equity,
-                        available_margin,
-                        ex,
-                        current_position=current_position,
-                        open_orders=open_orders_symbol,
-                        extra_context=extra_serialized,
-                        target_meta=symbol_meta,
-                        news_payload=news_payload_symbol,
-                        initial_decision=initial_payload,
-                        priority_symbol=has_priority_exposure,
-                    )
-                except RateLimitError:
-                    rate_limit_backoff = True
-                    rate_limit_error_hit = True
-                    current_provider = _current_ai_provider()
-                    provider_label = current_provider.upper()
-                    if current_provider == "openai":
-                        _switch_ai_provider_to_fallback("rate limit 429 (decision loop)")
-                        msg = (
-                            "[WARN] OpenAI rate limit 429: switching to DeepSeek, "
-                            "halving symbol cap and deferring next run to 25-55m window."
-                        )
-                    else:
-                        msg = (
-                            f"[WARN] {provider_label} rate limit 429: "
-                            "halving symbol cap and deferring next run to 25-55m window."
-                        )
-                    log(msg, Fore.YELLOW)
+                if ai_offline_mode:
+                    # Universal safe fallback when AI is unavailable: do not open new positions.
+                    fallback = dict(initial_payload) if isinstance(initial_payload, dict) else {}
+                    fallback.setdefault("symbol", sym)
+                    fallback["action"] = "hold" if has_position else "skip"
+                    fallback["reason"] = "AI offline fallback (no new entries)"
+                    fallback["ai_unavailable"] = True
+                    dec = fallback
+                else:
                     try:
-                        send_tg(msg)
-                    except Exception:
-                        pass
-                    break
+                        dec = ai_decision(
+                            sym,
+                            df,
+                            equity,
+                            available_margin,
+                            ex,
+                            current_position=current_position,
+                            open_orders=open_orders_symbol,
+                            extra_context=extra_serialized,
+                            target_meta=symbol_meta,
+                            news_payload=news_payload_symbol,
+                            initial_decision=initial_payload,
+                            priority_symbol=has_priority_exposure,
+                        )
+                    except RateLimitError:
+                        rate_limit_backoff = True
+                        rate_limit_error_hit = True
+                        current_provider = _current_ai_provider()
+                        provider_label = current_provider.upper()
+                        if current_provider == "openai":
+                            _switch_ai_provider_to_fallback("rate limit 429 (decision loop)")
+                            msg = (
+                                "[WARN] OpenAI rate limit 429: switching to DeepSeek, "
+                                "halving symbol cap and deferring next run to 25-55m window."
+                            )
+                        else:
+                            msg = (
+                                f"[WARN] {provider_label} rate limit 429: "
+                                "halving symbol cap and deferring next run to 25-55m window."
+                            )
+                        log(msg, Fore.YELLOW)
+                        try:
+                            send_tg(msg)
+                        except Exception:
+                            pass
+                        break
 
             if not dec:
                 if initial_payload:
