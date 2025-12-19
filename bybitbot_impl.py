@@ -246,6 +246,16 @@ MASTER_DECISION_META: dict[str, Any] = {}
 AI_REQUESTS_FULL_CONTEXT = str(os.getenv("AI_REQUESTS_FULL_CONTEXT", "0")).strip().lower() in {"1", "true", "yes", "on"}
 AI_REQUESTS_MAX_CONTEXT_BARS = max(0, int(os.getenv("AI_REQUESTS_MAX_CONTEXT_BARS", "0")))
 
+# --- AI provider / fallback configuration ---
+# Primary provider is OpenAI; on rate-limit (429) we can switch to a secondary
+# provider (DeepSeek-compatible endpoint) if configured via environment.
+AI_PROVIDER_PRIMARY = "openai"
+AI_PROVIDER_SECONDARY = "deepseek"
+AI_PROVIDER_CURRENT = "openai"
+DEEPSEEK_API_KEY: str | None = None
+DEEPSEEK_API_BASE: str | None = None
+DEEPSEEK_MODEL: str | None = None
+
 
 def _bytes_from_env(env_name: str, default_mb: float) -> int:
     raw_value = os.getenv(env_name)
@@ -2599,10 +2609,9 @@ def _load_initial_dataframe(
 
 
 def ai_update_universe(exchange, symbols, positions_map, equity, available_margin, universe_cache, news_digest=None):
-    if not AI_KEY:
-        log("[AI] OPENAI_API_KEY missing for universe update", Fore.RED)
+    client = _create_ai_client(timeout=30, context="universe update")
+    if client is None:
         return None
-    client = OpenAI(api_key=AI_KEY, timeout=30)
     if not news_digest:
         news_digest = _build_news_digest(symbols)
     _log_news_digest(news_digest)
@@ -3073,10 +3082,10 @@ def ai_plan_trades(
 ):
     context_label = f"trade plan ({stage})"
     context_key = f"trade_plan_{stage}".strip().lower() if stage else "trade_plan"
-    if not AI_KEY:
-        log("❌ OPENAI_API_KEY (stage plan)", Fore.RED)
+    client = _create_ai_client(timeout=40, context=context_label)
+    if client is None:
+        log(f"❌ AI client unavailable for {context_label}", Fore.RED)
         return None
-    client = OpenAI(api_key=AI_KEY, timeout=40)
     positions_payload = _compact_positions_snapshot(positions_snapshot)
     pending_orders_payload = _compact_orders_snapshot(pending_orders)
     payload = {
@@ -3753,6 +3762,8 @@ def refresh_settings():
     global TG_TOKEN, TG_CHAT, TG_TOPIC_ID, TG_GIT_TOPIC_ID, TG_MIN_INTERVAL, TG_DUP_WINDOW, TG_RETRY_ATTEMPTS, TG_RETRY_BACKOFF
     global AI_MODEL, AI_KEY, AI_MODEL_PRIMARY, AI_MODEL_CHEAP, AI_MODEL_THRESHOLD, AI_TOKEN_BUDGET_CYCLE
     global AI_SECONDARY_BUDGET_START, AI_HARD_STOP_BUDGET
+    global AI_PROVIDER_PRIMARY, AI_PROVIDER_SECONDARY, AI_PROVIDER_CURRENT
+    global DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
@@ -4099,6 +4110,21 @@ def refresh_settings():
                 fallback_hard = globals().get("AI_HARD_STOP_BUDGET", 0)
                 AI_HARD_STOP_BUDGET = max(0, fallback_hard if isinstance(fallback_hard, (int, float)) else 0)
     AI_KEY = os.getenv("OPENAI_API_KEY")
+
+    # Configure optional secondary provider (DeepSeek-compatible OpenAI API).
+    # Defaults for provider names are code-level (not trading/risk) and can be
+    # overridden via environment if needed.
+    AI_PROVIDER_PRIMARY = (os.getenv("AI_PROVIDER_PRIMARY") or "openai").strip().lower() or "openai"
+    AI_PROVIDER_SECONDARY = (os.getenv("AI_PROVIDER_SECONDARY") or "deepseek").strip().lower() or "deepseek"
+    # Runtime-active provider; normally primary until we hit a rate limit.
+    AI_PROVIDER_CURRENT = AI_PROVIDER_PRIMARY
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or None
+    DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE") or "https://api.deepseek.com"
+    deepseek_model_env = os.getenv("DEEPSEEK_MODEL")
+    if isinstance(deepseek_model_env, str) and deepseek_model_env.strip():
+        DEEPSEEK_MODEL = deepseek_model_env.strip()
+    else:
+        DEEPSEEK_MODEL = None
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
     TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
@@ -4473,6 +4499,87 @@ def save_universe_cache(payload: dict) -> None:
 AI_MODEL_PRIMARY = ""
 AI_MODEL_CHEAP = ""
 AI_MODEL_THRESHOLD = 5
+
+
+def _current_ai_provider() -> str:
+    """Return the active AI provider label ('openai' / 'deepseek' / other)."""
+    provider = (AI_PROVIDER_CURRENT or AI_PROVIDER_PRIMARY or "openai") if "AI_PROVIDER_CURRENT" in globals() else "openai"
+    return str(provider).strip().lower() or "openai"
+
+
+def _create_ai_client(timeout: float = 30.0, *, context: str = ""):
+    """
+    Construct an OpenAI-compatible client for the current provider.
+
+    For the primary provider ('openai') this uses OPENAI_API_KEY (and optional OPENAI_BASE_URL).
+    For the secondary provider ('deepseek') this uses DEEPSEEK_API_KEY / DEEPSEEK_API_BASE.
+    """
+    provider = _current_ai_provider()
+    api_key: str | None = None
+    base_url: str | None = None
+    if provider == "deepseek":
+        api_key = DEEPSEEK_API_KEY
+        base_url = DEEPSEEK_API_BASE
+        if not api_key:
+            # DeepSeek not configured – fall back to OpenAI without changing the global provider.
+            provider = "openai"
+    if provider == "openai":
+        api_key = AI_KEY
+        base_url = os.getenv("OPENAI_BASE_URL") or None
+    if not api_key:
+        label = provider.upper()
+        ctx = context or "AI request"
+        log(f"[AI] {ctx}: missing API key for provider {label}", Fore.RED)
+        return None
+    kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
+    if base_url:
+        kwargs["base_url"] = base_url
+    try:
+        return OpenAI(**kwargs)
+    except Exception as exc:
+        ctx = context or "AI request"
+        label = provider.upper()
+        log(f"[ERROR] Failed to init AI client for {label} ({ctx}): {exc}", Fore.RED)
+        return None
+
+
+def _switch_ai_provider_to_fallback(reason: str) -> None:
+    """
+    Switch from the primary AI provider to the configured secondary (DeepSeek)
+    after a rate-limit / quota error, if possible.
+    """
+    global AI_PROVIDER_CURRENT, AI_MODEL
+    current = _current_ai_provider()
+    target = (AI_PROVIDER_SECONDARY or "deepseek").strip().lower() or "deepseek"
+    if current == target:
+        return
+    if target == "deepseek" and not DEEPSEEK_API_KEY:
+        log(
+            "[AI] Rate limit hit but DEEPSEEK_API_KEY is not configured; staying on OpenAI.",
+            Fore.YELLOW,
+        )
+        return
+    previous_model = AI_MODEL
+    # Prefer explicit DeepSeek model if provided, otherwise keep current logical model.
+    new_model = DEEPSEEK_MODEL or AI_MODEL
+    AI_PROVIDER_CURRENT = target
+    if new_model and new_model != AI_MODEL:
+        AI_MODEL = new_model
+    old_label = current.upper()
+    new_label = target.upper()
+    model_suffix = ""
+    try:
+        if previous_model != AI_MODEL:
+            model_suffix = f" (model {previous_model} -> {AI_MODEL})"
+    except Exception:
+        model_suffix = ""
+    msg = f"[AI] Switching provider {old_label} -> {new_label}{model_suffix} due to {reason}"
+    log(msg, Fore.YELLOW)
+    try:
+        send_tg(msg)
+    except Exception:
+        pass
+
 # --- Вспомогательные функции ---
 def _current_log_time():
     base = datetime.datetime.now(datetime.timezone.utc)
@@ -12515,14 +12622,13 @@ def ai_decision(
     *,
     priority_symbol: bool = False,
 ):
-    if not AI_KEY:
-        log("❌ Не указан OPENAI_API_KEY", Fore.RED)
-        return None
-
     df_30m = df_primary
     extra_context = extra_context or {}
     target_meta = target_meta or {}
-    client = OpenAI(api_key=AI_KEY, timeout=30)
+    client = _create_ai_client(timeout=30, context=f"{symbol} decision")
+    if client is None:
+        log(f"❌ Не удалось создать AI-клиент для {symbol}", Fore.RED)
+        return None
     df_30m["ema20"] = ema(df_30m["close"],20)
     df_30m["ema50"] = ema(df_30m["close"],50)
     df_30m["rsi"] = rsi(df_30m["close"],14)
@@ -14082,10 +14188,10 @@ def run_cycle():
     if source_label == "HEAD":
         os.environ["BYBITBOT_CYCLE_KIND"] = "normal"
         os.environ["BYBITBOT_CYCLE_MODE"] = "last"
-    rate_limit_backoff = bool((cycle_state or {}).get("rate_limit_backoff"))
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
     cycle_state = _load_cycle_state()
+    rate_limit_backoff = bool((cycle_state or {}).get("rate_limit_backoff"))
     # Preserve previous per-symbol unrealized PnL for pseudo-trailing decisions this cycle.
     prev_unreal_map = cycle_state.get("positions_unrealized") if isinstance(cycle_state, dict) else {}
     try:
@@ -15059,7 +15165,19 @@ def run_cycle():
                 except RateLimitError:
                     rate_limit_backoff = True
                     rate_limit_error_hit = True
-                    msg = "[WARN] OpenAI rate limit 429: halving symbol cap and deferring next run to 25-55m window."
+                    current_provider = _current_ai_provider()
+                    provider_label = current_provider.upper()
+                    if current_provider == "openai":
+                        _switch_ai_provider_to_fallback("rate limit 429 (decision loop)")
+                        msg = (
+                            "[WARN] OpenAI rate limit 429: switching to DeepSeek, "
+                            "halving symbol cap and deferring next run to 25-55m window."
+                        )
+                    else:
+                        msg = (
+                            f"[WARN] {provider_label} rate limit 429: "
+                            "halving symbol cap and deferring next run to 25-55m window."
+                        )
                     log(msg, Fore.YELLOW)
                     try:
                         send_tg(msg)
