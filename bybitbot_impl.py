@@ -14845,25 +14845,6 @@ def run_cycle():
         universe_state = universe_state or {}
         universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_universe_cache(universe_state)
-    elif _AI_OFFLINE_ACTIVE_CYCLE is not None and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER):
-        # AI is unavailable: replace universe selection with a lightweight, deterministic scorer.
-        required_symbols = set(position_symbols) | set(order_symbols) | set(order_symbols_non_reduce)
-        offline_pairs = _offline_select_pairs(
-            ex,
-            sorted(candidate_pairs_set),
-            news_digest=news_headlines,
-            required=required_symbols,
-            limit=OFFLINE_PAIR_LIMIT,
-        )
-        universe_state = dict(universe_state or {})
-        universe_state["pairs"] = offline_pairs
-        universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        universe_state["ai_offline"] = True
-        save_universe_cache(universe_state)
-        log(
-            f"[AI OFFLINE] Universe selection: {', '.join(offline_pairs)} (limit={OFFLINE_PAIR_LIMIT})",
-            Fore.YELLOW,
-        )
     if universe_state.get("pairs"):
         for pair in universe_state.get("pairs", []):
             resolved_pair = normalize_symbol(pair, record_missing=False)
@@ -14998,6 +14979,29 @@ def run_cycle():
         open_orders_prefetch[sym_candidate] = orders_snapshot
         if orders_snapshot:
             order_symbols.add(sym_candidate)
+
+    if (
+        updated_universe is None
+        and _AI_OFFLINE_ACTIVE_CYCLE is not None
+        and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
+    ):
+        required_symbols = set(position_symbols) | set(order_symbols) | set(order_symbols_non_reduce)
+        offline_pairs = _offline_select_pairs(
+            ex,
+            sorted(candidate_pairs_set),
+            news_digest=news_headlines,
+            required=required_symbols,
+            limit=OFFLINE_PAIR_LIMIT,
+        )
+        universe_state = dict(universe_state or {})
+        universe_state["pairs"] = offline_pairs
+        universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        universe_state["ai_offline"] = True
+        save_universe_cache(universe_state)
+        log(
+            f"[AI OFFLINE] Universe selection: {', '.join(offline_pairs)} (limit={OFFLINE_PAIR_LIMIT})",
+            Fore.YELLOW,
+        )
 
     def _append_unique(target_list: list[str], values, seen: set[str]):
         for val in values:
