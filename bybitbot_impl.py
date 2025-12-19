@@ -16593,12 +16593,14 @@ def run_cycle():
         delta = 0.0
         volatility_note = ""
         thresholds_note = ""
+        diff_value: float | None = None
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
             base_tol = max(0.0005, (prev_volatility_ratio or 0.0) * 0.1 if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else 0.0005)
             strong_threshold = max(base_tol * 2.0, 0.001)
-            thresholds_note = f"tol={base_tol:.4f}, strong={strong_threshold:.4f}, src={vol_source}"
+            thresholds_note = f"thr5={base_tol:.4f}, thr10={strong_threshold:.4f}, src={vol_source}"
             if prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
                 diff = atr_ratio_median - prev_volatility_ratio
+                diff_value = diff
                 if diff > base_tol:
                     strong = diff >= strong_threshold
                     delta = -10.0 if strong else -5.0
@@ -16618,9 +16620,10 @@ def run_cycle():
         )
         fallback_interval_from_start = target_interval
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
+        diff_text = f"{diff_value:.4f}" if diff_value is not None and math.isfinite(diff_value) else "n/a"
         timing_debug_parts.append(
             f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
-            f"(vol={vol_text}; {thresholds_note})"
+            f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; {thresholds_note})"
         )
 
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(fallback_interval_from_start))
