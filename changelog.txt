@@ -1,5 +1,9 @@
 - Changelog (newest first)
 
+1.1.12 (2025-12-19, commit pending)
+- Adaptive scheduler now starts from the previous interval, shifts it ±5 minutes when ATR volatility rises/falls, clamps the result to 5–45 minutes, and aligns wake-ups to the nearest 5-minute grid mark.
+- Trailing-stop validation now compares against the live/mark price, so tightened stops above the entry are still recognised as protection (no more forced closes after pseudo-trailing).
+
 1.1.11 (2025-12-17, commit pending)
 - Pseudo-trailing now evaluates even when a symbol already has SL/TP protection, and will tighten the stop without recreating take-profit layers (avoids TP churn while still allowing SL tightening).
 - Pseudo-trailing trigger and adjustments are now computed consistently in price units (ΔPnL normalized by position size), making it usable for small positions and small deposits.

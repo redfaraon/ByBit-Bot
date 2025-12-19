@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.11"
+BOT_VERSION = "1.1.12"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -806,7 +806,7 @@ PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 5.0
-MAX_NEXT_RUN_FROM_START_MINUTES: float = 40.0
+MAX_NEXT_RUN_FROM_START_MINUTES: float = 45.0
 PSEUDOTRAIL_MAX_TAKE_EXTENDS: int = 2
 PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT: float = 0.5
 PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.03
@@ -16440,6 +16440,21 @@ def run_cycle():
     next_delay_minutes = None
     next_run_dt = None
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
+    prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
+    atr_ratio_median: float | None = None
+    try:
+        atr_samples: list[float] = []
+        for sym_hint in (selected_symbols or []):
+            hint = SYMBOL_MARKET_MODE_HINTS.get(sym_hint) or {}
+            analysis_balance = hint.get("analysis_balance") if isinstance(hint, dict) else None
+            ratio = safe_float((analysis_balance or {}).get("atr_ratio")) if isinstance(analysis_balance, dict) else None
+            if ratio is not None and math.isfinite(ratio) and ratio > 0:
+                atr_samples.append(float(ratio))
+        if atr_samples:
+            atr_samples.sort()
+            atr_ratio_median = atr_samples[len(atr_samples) // 2]
+    except Exception:
+        atr_ratio_median = None
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
@@ -16562,51 +16577,41 @@ def run_cycle():
             log('Model next_run_time unusable and no next_run_minutes provided; will use fallback interval.', Fore.YELLOW)
 
     if next_delay_minutes is None:
-        # Fallback: use last cycle's interval (if available), nudged by current-cycle volatility hints.
-        fallback_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
-        if fallback_interval_from_start is None or not math.isfinite(fallback_interval_from_start) or fallback_interval_from_start <= 0:
-            fallback_interval_from_start = float(DEFAULT_NEXT_RUN_MINUTES)
-
-        atr_ratios: list[float] = []
-        try:
-            for sym_hint in (selected_symbols or []):
-                hint = SYMBOL_MARKET_MODE_HINTS.get(sym_hint) or {}
-                analysis_balance = hint.get("analysis_balance") if isinstance(hint, dict) else None
-                ratio = safe_float((analysis_balance or {}).get("atr_ratio")) if isinstance(analysis_balance, dict) else None
-                if ratio is not None and math.isfinite(ratio) and ratio > 0:
-                    atr_ratios.append(float(ratio))
-        except Exception:
-            atr_ratios = []
-
-        vol_interval = None
-        if atr_ratios:
-            atr_ratios_sorted = sorted(atr_ratios)
-            atr_ratio_med = atr_ratios_sorted[len(atr_ratios_sorted) // 2]
-            low = float(VOLATILITY_TA_PRIORITY_ATR or 0.012)
-            high = float(VOLATILITY_NEWS_PRIORITY_ATR or 0.02)
-            # Aim for 15–30m when aligning to a 15m grid:
-            # higher ATR/price => shorter interval (closer to 15).
-            if high <= low:
-                vol_interval = 22.5
-            elif atr_ratio_med <= low:
-                vol_interval = 30.0
-            elif atr_ratio_med >= high:
-                vol_interval = 15.0
-            else:
-                t = (atr_ratio_med - low) / (high - low)
-                vol_interval = 30.0 - (15.0 * t)
-
-        fallback_source = "default"
-        if vol_interval is not None and math.isfinite(vol_interval) and vol_interval > 0:
-            fallback_source = "volatility"
-            # Blend previous interval with volatility suggestion for stability.
-            fallback_interval_from_start = 0.6 * float(vol_interval) + 0.4 * float(fallback_interval_from_start)
-
-        fallback_interval_from_start = min(
-            max(float(fallback_interval_from_start), float(MIN_NEXT_RUN_MINUTES)),
+        # Fallback: start from previous interval and nudge ±5 minutes based on volatility change.
+        prev_interval = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
+        if prev_interval is None or not math.isfinite(prev_interval) or prev_interval <= 0:
+            prev_interval = float(DEFAULT_NEXT_RUN_MINUTES)
+        prev_interval = min(
+            max(float(prev_interval), float(MIN_NEXT_RUN_MINUTES)),
             float(MAX_NEXT_RUN_FROM_START_MINUTES),
         )
-        timing_debug_parts.append(f"fallback={fallback_source}:{fallback_interval_from_start:.2f}m")
+
+        delta = 0.0
+        volatility_note = ""
+        if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
+            tol = max(0.0005, (prev_volatility_ratio or 0.0) * 0.1 if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else 0.0005)
+            if prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
+                if atr_ratio_median > prev_volatility_ratio + tol:
+                    delta = -5.0
+                    volatility_note = "vol↑"
+                elif atr_ratio_median < prev_volatility_ratio - tol:
+                    delta = 5.0
+                    volatility_note = "vol↓"
+            else:
+                volatility_note = "vol=init"
+
+        target_interval = prev_interval + delta
+        target_interval = round(target_interval / 5.0) * 5.0
+        target_interval = min(
+            max(target_interval, float(MIN_NEXT_RUN_MINUTES)),
+            float(MAX_NEXT_RUN_FROM_START_MINUTES),
+        )
+        fallback_interval_from_start = target_interval
+        vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
+        timing_debug_parts.append(
+            f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
+            f"(vol={vol_text})"
+        )
 
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(fallback_interval_from_start))
         remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
@@ -16614,7 +16619,7 @@ def run_cycle():
         next_delay_minutes = max(0.0, clamped)
         next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
         fallback_msg = (
-            f"Next cycle fallback ({fallback_source}): interval {fallback_interval_from_start:.1f}m from cycle start "
+            f"Next cycle fallback (adaptive): interval {fallback_interval_from_start:.1f}m from cycle start "
             f"(sleep {next_delay_minutes:.1f} min, bounds {min_delay:.1f}-{max_delay:.1f})."
         )
         log(fallback_msg, Fore.LIGHTBLACK_EX)
@@ -16628,7 +16633,7 @@ def run_cycle():
             now_utc=schedule_now_utc,
             min_delay_minutes=min_delay,
             max_delay_minutes=max_delay,
-            step_minutes=15,
+            step_minutes=5,
         )
         if aligned_method and aligned_dt != next_run_dt:
             before_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
@@ -16658,6 +16663,8 @@ def run_cycle():
                     float((next_run_dt - cycle_start_utc).total_seconds() / 60.0),
                     2,
                 )
+                if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
+                    cycle_state["last_volatility_ratio"] = float(atr_ratio_median)
         except Exception:
             pass
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
