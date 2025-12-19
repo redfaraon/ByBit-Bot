@@ -10413,7 +10413,7 @@ def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
     return changes
 
 
-def _format_protection_snapshot(orders) -> str:
+def _format_protection_snapshot(orders, position_payload: dict | None = None) -> str:
     stops: list[float] = []
     takes: list[float] = []
     for order in _extract_protection_orders(orders):
@@ -10422,15 +10422,30 @@ def _format_protection_snapshot(orders) -> str:
             or order.get("triggerPrice")
             or order.get("stopLoss")
         )
-        if stop_val is not None and math.isfinite(stop_val):
+        if stop_val is not None and math.isfinite(stop_val) and abs(float(stop_val)) > 1e-12:
             stops.append(float(stop_val))
         take_val = safe_float(
             order.get("takeProfit")
             or order.get("tpPrice")
             or order.get("price")
         )
-        if take_val is not None and math.isfinite(take_val):
+        if take_val is not None and math.isfinite(take_val) and abs(float(take_val)) > 1e-12:
             takes.append(float(take_val))
+    if position_payload and isinstance(position_payload, dict):
+        pos_stop = safe_float(
+            position_payload.get("stopLoss")
+            or (position_payload.get("raw") or {}).get("stopLoss")
+            or (position_payload.get("raw") or {}).get("sl")
+        )
+        if pos_stop is not None and math.isfinite(pos_stop) and abs(float(pos_stop)) > 1e-12:
+            stops.append(float(pos_stop))
+        pos_take = safe_float(
+            position_payload.get("takeProfit")
+            or (position_payload.get("raw") or {}).get("takeProfit")
+            or (position_payload.get("raw") or {}).get("tp")
+        )
+        if pos_take is not None and math.isfinite(pos_take) and abs(float(pos_take)) > 1e-12:
+            takes.append(float(pos_take))
     stops.sort()
     takes.sort()
     def _format_list(values: list[float]) -> str:
@@ -16016,8 +16031,8 @@ def run_cycle():
             amount_diff = abs(final_position_amount - initial_position_amount)
             amount_tolerance = max(abs(initial_position_amount), abs(final_position_amount)) * 1e-6 + 1e-8
             position_changed = amount_diff > amount_tolerance
-            initial_orders_snapshot = _format_protection_snapshot(initial_protection_orders)
-            final_orders_snapshot = _format_protection_snapshot(final_protection_orders)
+            initial_orders_snapshot = _format_protection_snapshot(initial_protection_orders, current_position)
+            final_orders_snapshot = _format_protection_snapshot(final_protection_orders, final_position_payload)
             size_change_label = _describe_size_change(
                 initial_position_amount, final_position_amount, amount_tolerance
             )
@@ -16088,10 +16103,11 @@ def run_cycle():
                         if orders_activity
                         else f"orders unchanged ({final_orders_snapshot})"
                     )
+                    pos_label = _format_position_snapshot(final_position_amount)
                     if initial_position_amount == 0.0 and final_position_amount == 0.0:
                         detail_entry = f"[{sym}] - manage with no open position ({orders_desc})"
                     else:
-                        parts: list[str] = [orders_desc]
+                        parts: list[str] = [pos_label, orders_desc]
                         if size_change_label:
                             parts.append(size_change_label)
                         detail_entry = f"[{sym}] - managing position ({', '.join(parts)})"
