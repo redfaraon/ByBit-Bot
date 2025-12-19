@@ -16264,12 +16264,16 @@ def run_cycle():
         orders_snapshot = global_open_orders.get(sym_active) if 'global_open_orders' in locals() else None
         if orders_snapshot is None:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
-        protective_orders = _extract_protection_orders(orders_snapshot)
-        has_stop, has_take, categorized = _evaluate_position_protection(payload, protective_orders, price_hint=px_val)
-        # Always log what protection levels we currently see for each open position.
         mark_price = safe_float(payload.get("markPrice") or (payload.get("raw") or {}).get("markPrice"))
         last_price = safe_float(payload.get("lastPrice") or (payload.get("raw") or {}).get("lastPrice"))
         px_val = mark_price if mark_price is not None and math.isfinite(mark_price) else last_price
+        protective_orders = _extract_protection_orders(orders_snapshot)
+        has_stop, has_take, categorized = _evaluate_position_protection(
+            payload,
+            protective_orders,
+            price_hint=px_val,
+        )
+        # Always log what protection levels we currently see for each open position.
         px_text = f"{px_val:.4f}" if px_val is not None and math.isfinite(px_val) else "n/a"
         stop_vals = [p for p, _amt in (categorized.get("stop") or []) if p is not None]
         take_vals = [p for p, _amt in (categorized.get("take_profit") or []) if p is not None]
