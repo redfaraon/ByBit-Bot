@@ -14704,6 +14704,10 @@ def run_cycle():
     if selection_missing_symbols:
         missing_from_ai = ", ".join(sorted(set(selection_missing_symbols)))
         log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
+    if selection_next_time or selection_next_run is not None:
+        time_hint = selection_next_time if selection_next_time else "n/a"
+        run_hint = f"{selection_next_run:.2f}" if (selection_next_run is not None and math.isfinite(selection_next_run)) else "n/a"
+        log(f"[SCHED] model scheduling hints: next_run_time={time_hint}, next_run_minutes={run_hint}", Fore.LIGHTBLACK_EX)
         send_tg(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}")
 
     symbols_sequence: list[str] = []
@@ -16464,6 +16468,10 @@ def run_cycle():
                     if interval_guess is not None and math.isfinite(interval_guess) and interval_guess > 0:
                         derived_interval_from_time = float(interval_guess)
                         timing_debug_parts.append(f"time->interval≈{derived_interval_from_time:.2f}m")
+                        log(
+                            f"[SCHED] derived interval_from_time≈{derived_interval_from_time:.2f}m (cycle start anchor)",
+                            Fore.LIGHTBLACK_EX,
+                        )
                 except Exception:
                     derived_interval_from_time = None
                 remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
@@ -16502,12 +16510,20 @@ def run_cycle():
         # If time was unusable and the derived interval hits the hard floor, prefer fallback logic instead of looping at min.
         if use_interval_due_to_time and interval_minutes_model <= min_delay + 1e-6:
             timing_debug_parts.append("interval_from_time<=min → fallback")
+            log(
+                f"[SCHED] model interval {interval_minutes_model:.2f}m hits min bound -> fallback",
+                Fore.LIGHTBLACK_EX,
+            )
             interval_minutes_model = None
         else:
             interval_minutes = float(interval_minutes_model)
             interval_clamped = min(
                 max(interval_minutes, float(MIN_NEXT_RUN_MINUTES)),
                 float(MAX_NEXT_RUN_FROM_START_MINUTES),
+            )
+            log(
+                f"[SCHED] using model interval {interval_minutes:.2f}m (clamped {interval_clamped:.2f}m)",
+                Fore.LIGHTBLACK_EX,
             )
             if abs(interval_clamped - interval_minutes) > 1e-9:
                 log(
