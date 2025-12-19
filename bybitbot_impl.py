@@ -10288,7 +10288,16 @@ def _evaluate_position_protection(
         or (position_payload or {}).get("mark_price")
         or (position_payload or {}).get("lastPrice")
     )
+    live_price = safe_float(
+        (position_payload or {}).get("last_price")
+        or (position_payload or {}).get("price")
+        or ((position_payload or {}).get("raw") or {}).get("lastPrice")
+    )
     guard_price = mark_price if mark_price is not None and math.isfinite(mark_price) else entry_price
+    if guard_price is None or not math.isfinite(guard_price):
+        guard_price = live_price
+    if guard_price is None or not math.isfinite(guard_price):
+        guard_price = entry_price
 
     categorized = _categorize_protection_orders(orders)
     # Filter unreasonable take levels (e.g. 43k for ETH) to avoid false positives.
