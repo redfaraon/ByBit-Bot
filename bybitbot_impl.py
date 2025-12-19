@@ -30,7 +30,7 @@ import ccxt
 import requests
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from colorama import Fore, Style, init
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from dotenv import dotenv_values
 import db_logger
 try:
@@ -14082,6 +14082,7 @@ def run_cycle():
     if source_label == "HEAD":
         os.environ["BYBITBOT_CYCLE_KIND"] = "normal"
         os.environ["BYBITBOT_CYCLE_MODE"] = "last"
+    rate_limit_backoff = bool((cycle_state or {}).get("rate_limit_backoff"))
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
     cycle_state = _load_cycle_state()
@@ -14523,6 +14524,9 @@ def run_cycle():
         len(position_symbols) + len(new_universe_candidates),
         len(position_symbols) + len(order_symbols_non_reduce),
     )
+    if rate_limit_backoff:
+        rate_cap = max(1, MAX_SYMBOLS_PER_CYCLE // 2)
+        symbol_processing_limit = min(symbol_processing_limit, rate_cap)
     if missing_symbols:
         missing_desc = ', '.join(sorted(missing_symbols))
         log(f"[WARN] Removed pairs not listed on Bybit: {missing_desc}", Fore.YELLOW)
@@ -15017,6 +15021,7 @@ def run_cycle():
 
             dec = None
             master_decision_used = False
+            rate_limit_error_hit = False
             if MASTER_DECISIONS_SHARE and not is_master_user:
                 dec = _pull_master_decision(sym)
                 if dec:
@@ -15036,20 +15041,31 @@ def run_cycle():
                         "reason": "master decision unavailable for follower run",
                     }
             if dec is None:
-                dec = ai_decision(
-                    sym,
-                    df,
-                    equity,
-                    available_margin,
-                    ex,
-                    current_position=current_position,
-                    open_orders=open_orders_symbol,
-                    extra_context=extra_serialized,
-                    target_meta=symbol_meta,
-                    news_payload=news_payload_symbol,
-                    initial_decision=initial_payload,
-                    priority_symbol=has_priority_exposure,
-                )
+                try:
+                    dec = ai_decision(
+                        sym,
+                        df,
+                        equity,
+                        available_margin,
+                        ex,
+                        current_position=current_position,
+                        open_orders=open_orders_symbol,
+                        extra_context=extra_serialized,
+                        target_meta=symbol_meta,
+                        news_payload=news_payload_symbol,
+                        initial_decision=initial_payload,
+                        priority_symbol=has_priority_exposure,
+                    )
+                except RateLimitError:
+                    rate_limit_backoff = True
+                    rate_limit_error_hit = True
+                    msg = "[WARN] OpenAI rate limit 429: halving symbol cap and deferring next run to 25-55m window."
+                    log(msg, Fore.YELLOW)
+                    try:
+                        send_tg(msg)
+                    except Exception:
+                        pass
+                    break
 
             if not dec:
                 if initial_payload:
@@ -16577,10 +16593,17 @@ def run_cycle():
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
-    min_delay = max(0.0, float(MIN_NEXT_RUN_MINUTES))
+    if rate_limit_backoff:
+        min_delay_override = 25.0
+        max_delay_override = 55.0
+        log(f"[SCHED] rate-limit backoff active: bounds {min_delay_override}-{max_delay_override}m", Fore.LIGHTBLACK_EX)
+    else:
+        min_delay_override = float(MIN_NEXT_RUN_MINUTES)
+        max_delay_override = float(MAX_NEXT_RUN_FROM_START_MINUTES)
+    min_delay = max(0.0, min_delay_override)
     max_delay = max(
         0.0,
-        (cycle_start_utc + datetime.timedelta(minutes=float(MAX_NEXT_RUN_FROM_START_MINUTES)) - schedule_now_utc).total_seconds() / 60.0,
+        (cycle_start_utc + datetime.timedelta(minutes=float(max_delay_override)) - schedule_now_utc).total_seconds() / 60.0,
     )
     timing_debug_parts: list[str] = []
     if next_delay_minutes is None:
@@ -16681,6 +16704,7 @@ def run_cycle():
                 )
                 if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
                     cycle_state["last_volatility_ratio"] = float(atr_ratio_median)
+                cycle_state["rate_limit_backoff"] = bool(rate_limit_backoff)
         except Exception:
             pass
     _write_runtime_status(next_delay_minutes, next_run_dt, "sleeping")
