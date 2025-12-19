@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.2.0"
+BOT_VERSION = "1.2.1"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -4840,18 +4840,6 @@ def _offline_decision_for_symbol(
     """
     amt = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
     has_position = abs(amt) > 0
-    if has_position:
-        side_raw = str((current_position or {}).get("side") or "").lower()
-        side_label = "buy" if side_raw in {"buy", "long"} or amt > 0 else "sell"
-        return {
-            "symbol": symbol,
-            "action": "manage",
-            "side": side_label,
-            "reason": "AI offline: manage existing position (refresh protection / pseudotrail)",
-            "ai_unavailable": True,
-            "confidence": 0.0,
-            "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
-        }
 
     if not OFFLINE_TRADING_ENABLED or max_new_positions_left <= 0:
         return {
@@ -4923,6 +4911,49 @@ def _offline_decision_for_symbol(
     range_hint = False
     if atr_val and math.isfinite(atr_val) and atr_val > 0:
         range_hint = (ema_sep / atr_val) < 0.35
+
+    if has_position:
+        side_raw = str((current_position or {}).get("side") or "").lower()
+        pos_side = "buy" if side_raw in {"buy", "long"} or amt > 0 else "sell"
+        close_side = "sell" if pos_side == "buy" else "buy"
+
+        # Conservative exit rules (do not overtrade):
+        # - Exit if trend clearly flipped against the position AND RSI confirms weakness/strength.
+        # - Exit if strong opposite news bias (|news_score|>=0.7) and RSI is already unfavorable.
+        flipped_against = (pos_side == "buy" and bear) or (pos_side == "sell" and bull)
+        rsi_unfavorable = (pos_side == "buy" and rsi_val <= 40) or (pos_side == "sell" and rsi_val >= 60)
+        strong_news_against = False
+        if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score):
+            if pos_side == "buy" and news_score <= -0.7:
+                strong_news_against = True
+            if pos_side == "sell" and news_score >= 0.7:
+                strong_news_against = True
+
+        if (flipped_against and rsi_unfavorable) or (strong_news_against and rsi_unfavorable):
+            reason_bits = []
+            if flipped_against:
+                reason_bits.append("trend_flip")
+            if strong_news_against:
+                reason_bits.append(f"news_against={news_score:+.2f}")
+            reason_bits.append(f"rsi={rsi_val:.1f}")
+            return {
+                "symbol": symbol,
+                "action": "close",
+                "side": close_side,
+                "reason": "AI offline rules: exit (" + ", ".join(reason_bits) + ")",
+                "ai_unavailable": True,
+                "confidence": 0.0,
+            }
+
+        return {
+            "symbol": symbol,
+            "action": "manage",
+            "side": pos_side,
+            "reason": f"AI offline: manage existing position (rsi={rsi_val:.1f}, range={range_hint})",
+            "ai_unavailable": True,
+            "confidence": 0.0,
+            "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
+        }
 
     chosen_side: str | None = None
     reason_bits: list[str] = []
