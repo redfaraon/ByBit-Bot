@@ -10342,6 +10342,9 @@ def _evaluate_position_protection(
                     has_stop_loss = True
         else:
             has_stop_loss = True
+    if not has_stop_loss and categorized.get("stop"):
+        # If stops were detected but didn't pass strict directional/threshold checks, treat as protective to avoid false "missing protection" closes.
+        has_stop_loss = True
 
     return has_stop_loss, has_take_profit, categorized
 
