@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.12"
+BOT_VERSION = "1.1.13"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -10259,6 +10259,7 @@ def _categorize_protection_orders(orders) -> dict[str, list[tuple]]:
 def _evaluate_position_protection(
     position_payload: dict[str, Any] | None,
     orders,
+    price_hint: float | None = None,
 ) -> tuple[bool, bool, dict[str, list[tuple[float | None, float | None]]]]:
     """
     Return (has_stop_loss, has_take_profit) for a position given its protective orders.
@@ -10293,7 +10294,9 @@ def _evaluate_position_protection(
         or (position_payload or {}).get("price")
         or ((position_payload or {}).get("raw") or {}).get("lastPrice")
     )
-    guard_price = mark_price if mark_price is not None and math.isfinite(mark_price) else entry_price
+    guard_price = price_hint if price_hint is not None and math.isfinite(price_hint) else None
+    if guard_price is None or not math.isfinite(guard_price):
+        guard_price = mark_price
     if guard_price is None or not math.isfinite(guard_price):
         guard_price = live_price
     if guard_price is None or not math.isfinite(guard_price):
@@ -16262,7 +16265,7 @@ def run_cycle():
         if orders_snapshot is None:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
         protective_orders = _extract_protection_orders(orders_snapshot)
-        has_stop, has_take, categorized = _evaluate_position_protection(payload, protective_orders)
+        has_stop, has_take, categorized = _evaluate_position_protection(payload, protective_orders, price_hint=px_val)
         # Always log what protection levels we currently see for each open position.
         mark_price = safe_float(payload.get("markPrice") or (payload.get("raw") or {}).get("markPrice"))
         last_price = safe_float(payload.get("lastPrice") or (payload.get("raw") or {}).get("lastPrice"))
@@ -16365,6 +16368,7 @@ def run_cycle():
         has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
             position_payload,
             protective_orders_after,
+            price_hint=px_val,
         )
         if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
             stop_prices = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]

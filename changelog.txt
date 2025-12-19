@@ -1,5 +1,8 @@
 - Changelog (newest first)
 
+1.1.13 (2025-12-19, commit pending)
+- Stop/take validation now reuses the latest market/mark price so trailing stops tightened above the entry (DOGE/XRP case) are still accepted, preventing unnecessary “missing protection” closures.
+
 1.1.12 (2025-12-19, commit pending)
 - Adaptive scheduler now starts from the previous interval, shifts it ±5 minutes when ATR volatility rises/falls, clamps the result to 5–45 minutes, and aligns wake-ups to the nearest 5-minute grid mark.
 - Trailing-stop validation now compares against the live/mark price, so tightened stops above the entry are still recognised as protection (no more forced closes after pseudo-trailing).
