@@ -16536,6 +16536,7 @@ def run_cycle():
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
     atr_ratio_median: float | None = None
+    vol_source = "hints"
     try:
         atr_samples: list[float] = []
         for sym_hint in (selected_symbols or []):
@@ -16549,6 +16550,11 @@ def run_cycle():
             atr_ratio_median = atr_samples[len(atr_samples) // 2]
     except Exception:
         atr_ratio_median = None
+    if (atr_ratio_median is None or not math.isfinite(atr_ratio_median)) and prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
+        # If we couldn't compute a fresh volatility ratio this cycle, carry forward the last known value
+        # so scheduling remains stable and deltas can still be applied once hints resume.
+        atr_ratio_median = float(prev_volatility_ratio)
+        vol_source = "carry"
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
@@ -16570,9 +16576,11 @@ def run_cycle():
 
         delta = 0.0
         volatility_note = ""
+        thresholds_note = ""
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
             base_tol = max(0.0005, (prev_volatility_ratio or 0.0) * 0.1 if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else 0.0005)
             strong_threshold = max(base_tol * 2.0, 0.001)
+            thresholds_note = f"tol={base_tol:.4f}, strong={strong_threshold:.4f}, src={vol_source}"
             if prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
                 diff = atr_ratio_median - prev_volatility_ratio
                 if diff > base_tol:
@@ -16596,7 +16604,7 @@ def run_cycle():
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
         timing_debug_parts.append(
             f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
-            f"(vol={vol_text})"
+            f"(vol={vol_text}; {thresholds_note})"
         )
 
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(fallback_interval_from_start))
