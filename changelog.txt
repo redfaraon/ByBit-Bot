@@ -1,4 +1,8 @@
-- Changelog (newest first)
+Changelog (newest first)
+
+1.2.0 (2025-12-19, commit pending)
+- Detecting a fresh commit while running a fallback now resets the cycle kind/mode to normal before restarting so the bot leaves backup mode as soon as HEAD is pulled.
+- Position summaries log richer state: opened/closed positions mention direction, entry/exit price, size and the active protections; managing entries show both previous and current protection snapshots (or the current snapshot when unchanged) plus any size changes, and holding actions report precise before/after sizes instead of generic “increased/reduced”.
 
 1.1.13 (2025-12-19, commit pending)
 - Stop/take validation now reuses the latest market/mark price so trailing stops tightened above the entry (DOGE/XRP case) are still accepted, preventing unnecessary “missing protection” closures.

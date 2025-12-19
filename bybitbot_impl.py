@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.1.13"
+BOT_VERSION = "1.2.0"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -10413,6 +10413,68 @@ def _describe_protection_changes(initial_orders, final_orders) -> list[str]:
     return changes
 
 
+def _format_protection_snapshot(orders) -> str:
+    stops: list[float] = []
+    takes: list[float] = []
+    for order in _extract_protection_orders(orders):
+        stop_val = safe_float(
+            order.get("stopPrice")
+            or order.get("triggerPrice")
+            or order.get("stopLoss")
+        )
+        if stop_val is not None and math.isfinite(stop_val):
+            stops.append(float(stop_val))
+        take_val = safe_float(
+            order.get("takeProfit")
+            or order.get("tpPrice")
+            or order.get("price")
+        )
+        if take_val is not None and math.isfinite(take_val):
+            takes.append(float(take_val))
+    stops.sort()
+    takes.sort()
+    def _format_list(values: list[float]) -> str:
+        if not values:
+            return "n/a"
+        return ",".join(f"{value:.4f}" for value in values[:5])
+
+    return f"stop={_format_list(stops)}; take={_format_list(takes)}"
+
+
+def _format_position_snapshot(amount: float | None) -> str:
+    if amount is None or not math.isfinite(amount) or abs(amount) < 1e-12:
+        return "flat"
+    direction = "LONG" if amount > 0 else "SHORT"
+    return f"{direction} {abs(amount):.4f}"
+
+
+def _describe_size_change(initial_amount: float, final_amount: float, tolerance: float) -> str | None:
+    if tolerance is None:
+        return None
+    if abs(initial_amount - final_amount) <= tolerance:
+        return None
+    before = _format_position_snapshot(initial_amount)
+    after = _format_position_snapshot(final_amount)
+    return f"size {before} -> {after}"
+
+
+def _get_position_reference_price(payload: dict | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates = [
+        payload.get("entryPrice"),
+        payload.get("avgEntryPrice"),
+        payload.get("avgPrice"),
+        payload.get("markPrice"),
+        payload.get("lastPrice"),
+    ]
+    for candidate in candidates:
+        value = safe_float(candidate)
+        if value is not None and math.isfinite(value):
+            return float(value)
+    return None
+
+
 def _protection_orders_signature(orders) -> tuple:
     snapshot: list[tuple[Any, ...]] = []
     for order in _extract_protection_orders(orders):
@@ -13998,6 +14060,10 @@ def run_cycle():
                 pass
     except Exception:
         pass
+    source_label = (os.getenv("BYBITBOT_SOURCE_LABEL") or "").strip()
+    if source_label == "HEAD":
+        os.environ["BYBITBOT_CYCLE_KIND"] = "normal"
+        os.environ["BYBITBOT_CYCLE_MODE"] = "last"
     cycle_kind = (os.getenv("BYBITBOT_CYCLE_KIND") or "").strip()
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
     cycle_state = _load_cycle_state()
@@ -15950,6 +16016,11 @@ def run_cycle():
             amount_diff = abs(final_position_amount - initial_position_amount)
             amount_tolerance = max(abs(initial_position_amount), abs(final_position_amount)) * 1e-6 + 1e-8
             position_changed = amount_diff > amount_tolerance
+            initial_orders_snapshot = _format_protection_snapshot(initial_protection_orders)
+            final_orders_snapshot = _format_protection_snapshot(final_protection_orders)
+            size_change_label = _describe_size_change(
+                initial_position_amount, final_position_amount, amount_tolerance
+            )
             if protection_changed:
                 orders_activity = True
 
@@ -15966,7 +16037,12 @@ def run_cycle():
                         detail_entry = f"[{sym}] - failed to open position (error: {open_error})"
                     elif open_success:
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
-                        detail_entry = f"[{sym}] - opened {direction or 'position'} (lev x{symbol_leverage})"
+                        entry_price = _get_position_reference_price(final_position_payload)
+                        entry_text = f" @ {entry_price:.4f}" if entry_price is not None else ""
+                        detail_entry = (
+                            f"[{sym}] - opened {direction or 'position'} {abs(final_position_amount):.4f}{entry_text} "
+                            f"(lev x{symbol_leverage}); orders {final_orders_snapshot}"
+                        )
                     elif open_pending:
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                         pending_parts = ["waiting fill"]
@@ -16000,19 +16076,29 @@ def run_cycle():
                             detail_entry = f"[{sym}] - open request skipped"
                 elif action == "close":
                     direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
-                    detail_entry = f"[{sym}] - closed {direction or 'position'} (lev x{symbol_leverage})"
+                    close_price = _get_position_reference_price(current_position) or _get_position_reference_price(final_position_payload)
+                    close_text = f" @ {close_price:.4f}" if close_price is not None else ""
+                    detail_entry = (
+                        f"[{sym}] - closed {direction or 'position'} {abs(initial_position_amount):.4f}{close_text} "
+                        f"(lev x{symbol_leverage})"
+                    )
                 elif action == "manage":
+                    orders_desc = (
+                        f"orders updated (was {initial_orders_snapshot}; now {final_orders_snapshot})"
+                        if orders_activity
+                        else f"orders unchanged ({final_orders_snapshot})"
+                    )
                     if initial_position_amount == 0.0 and final_position_amount == 0.0:
-                        detail_entry = f"[{sym}] - manage with no open position ({'orders updated' if orders_activity else 'orders unchanged'})"
+                        detail_entry = f"[{sym}] - manage with no open position ({orders_desc})"
                     else:
-                        detail_entry = f"[{sym}] - managing position ({'orders updated' if orders_activity else 'orders unchanged'})"
+                        parts: list[str] = [orders_desc]
+                        if size_change_label:
+                            parts.append(size_change_label)
+                        detail_entry = f"[{sym}] - managing position ({', '.join(parts)})"
                 elif action in ("hold", "none"):
                     change_parts: list[str] = []
-                    if position_changed:
-                        if final_position_amount > initial_position_amount:
-                            change_parts.append("size increased")
-                        elif final_position_amount < initial_position_amount:
-                            change_parts.append("size reduced")
+                    if size_change_label:
+                        change_parts.append(size_change_label)
                     protection_changes = _describe_protection_changes(
                         initial_protection_orders,
                         final_protection_orders,
@@ -16022,9 +16108,9 @@ def run_cycle():
                         change_parts.append("no changes")
                     detail_entry = f"[{sym}] - holding position ({', '.join(change_parts)})"
                 elif action == "skip":
-                    detail_entry = f"[{sym}] - skip" + (f" — {reason}" if reason else "")
+                    detail_entry = f"[{sym}] - skip" + (f" - {reason}" if reason else "")
                 else:
-                    detail_entry = f"[{sym}] - skip" + (f" — {reason}" if reason else "")
+                    detail_entry = f"[{sym}] - skip" + (f" - {reason}" if reason else "")
             if detail_entry and sym_confidence_text:
                 tag_suffix = f" {sym_confidence_tag}" if sym_confidence_tag else ""
                 detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
