@@ -2,6 +2,7 @@
 
 1.1.13 (2025-12-19, commit pending)
 - Stop/take validation now reuses the latest market/mark price so trailing stops tightened above the entry (DOGE/XRP case) are still accepted, preventing unnecessary “missing protection” closures.
+- Scheduler now sticks to the previous run interval, tweaks it by ±5/±10 minutes based on ATR volatility changes, clamps the result to 5–45 minutes, and aligns wake-ups to the nearest 5-minute grid while still reporting the model’s hints in the logs.
 
 1.1.12 (2025-12-19, commit pending)
 - Adaptive scheduler now starts from the previous interval, shifts it ±5 minutes when ATR volatility rises/falls, clamps the result to 5–45 minutes, and aligns wake-ups to the nearest 5-minute grid mark.

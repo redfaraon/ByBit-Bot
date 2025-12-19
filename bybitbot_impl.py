@@ -16467,121 +16467,9 @@ def run_cycle():
         0.0,
         (cycle_start_utc + datetime.timedelta(minutes=float(MAX_NEXT_RUN_FROM_START_MINUTES)) - schedule_now_utc).total_seconds() / 60.0,
     )
-    interval_minutes_model: Optional[float] = None
-    interval_minutes_invalid = False
-    derived_interval_from_time: Optional[float] = None
     timing_debug_parts: list[str] = []
-    if selection_next_run is not None:
-        try:
-            raw_interval = float(selection_next_run)
-        except (TypeError, ValueError):
-            raw_interval = None
-            interval_minutes_invalid = True
-        if raw_interval is not None:
-            if raw_interval > 0:
-                interval_minutes_model = raw_interval
-            else:
-                interval_minutes_invalid = True
-    use_interval_due_to_time = False
-    if selection_next_time:
-        candidate = selection_next_time.strip() if isinstance(selection_next_time, str) else ""
-        if candidate:
-            iso_candidate = candidate.replace("Z", "+00:00")
-            try:
-                target_dt = datetime.datetime.fromisoformat(iso_candidate)
-                if target_dt.tzinfo is None:
-                    local_tz = _current_local_tz() or datetime.datetime.now().astimezone().tzinfo
-                    target_dt = target_dt.replace(tzinfo=local_tz)
-                target_dt = target_dt.astimezone(datetime.timezone.utc)
-                try:
-                    interval_guess = (target_dt - cycle_start_utc).total_seconds() / 60.0
-                    if interval_guess is not None and math.isfinite(interval_guess) and interval_guess > 0:
-                        derived_interval_from_time = float(interval_guess)
-                        timing_debug_parts.append(f"time->interval≈{derived_interval_from_time:.2f}m")
-                        log(
-                            f"[SCHED] derived interval_from_time≈{derived_interval_from_time:.2f}m (cycle start anchor)",
-                            Fore.LIGHTBLACK_EX,
-                        )
-                except Exception:
-                    derived_interval_from_time = None
-                remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
-                if remaining > 0:
-                    within_min = remaining >= min_delay - 1e-6
-                    within_max = max_delay <= 0 or remaining <= max_delay + 1e-6
-                    if within_min and within_max:
-                        next_delay_minutes = remaining
-                        next_run_dt = target_dt
-                        timing_debug_parts.append(f"time_ok={remaining:.2f}m")
-                    else:
-                        log(
-                            f"next_run_time {remaining:.2f} min outside bounds {min_delay:.1f}-{max_delay:.1f}; will use interval if available.",
-                            Fore.YELLOW,
-                        )
-                        use_interval_due_to_time = True
-                        if interval_minutes_model is None and derived_interval_from_time is not None:
-                            interval_minutes_model = derived_interval_from_time
-                            log(
-                                f"Derived next_run_minutes={interval_minutes_model:.2f} from next_run_time (anchored to cycle start).",
-                                Fore.LIGHTBLACK_EX,
-                            )
-                else:
-                    log('next_run_time from model is in the past; will use interval if available.', Fore.YELLOW)
-                    use_interval_due_to_time = True
-                    if interval_minutes_model is None and derived_interval_from_time is not None:
-                        interval_minutes_model = derived_interval_from_time
-                        log(
-                            f"Derived next_run_minutes={interval_minutes_model:.2f} from past next_run_time (anchored to cycle start).",
-                            Fore.LIGHTBLACK_EX,
-                        )
-            except Exception as exc:
-                log(f"Failed to parse next_run_time '{selection_next_time}': {exc}", Fore.YELLOW)
-
-    if next_delay_minutes is None and interval_minutes_model is not None:
-        # If time was unusable and the derived interval hits the hard floor, prefer fallback logic instead of looping at min.
-        if use_interval_due_to_time and interval_minutes_model <= min_delay + 1e-6:
-            timing_debug_parts.append("interval_from_time<=min → fallback")
-            log(
-                f"[SCHED] model interval {interval_minutes_model:.2f}m hits min bound -> fallback",
-                Fore.LIGHTBLACK_EX,
-            )
-            interval_minutes_model = None
-        else:
-            interval_minutes = float(interval_minutes_model)
-            interval_clamped = min(
-                max(interval_minutes, float(MIN_NEXT_RUN_MINUTES)),
-                float(MAX_NEXT_RUN_FROM_START_MINUTES),
-            )
-            log(
-                f"[SCHED] using model interval {interval_minutes:.2f}m (clamped {interval_clamped:.2f}m)",
-                Fore.LIGHTBLACK_EX,
-            )
-            if abs(interval_clamped - interval_minutes) > 1e-9:
-                log(
-                    f"next_run_minutes clamped from {interval_minutes:.2f} min to {interval_clamped:.2f} min "
-                    f"(bounds {MIN_NEXT_RUN_MINUTES:.1f}-{MAX_NEXT_RUN_FROM_START_MINUTES:.1f})",
-                    Fore.YELLOW,
-                )
-            target_dt = cycle_start_utc + datetime.timedelta(minutes=float(interval_clamped))
-            remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
-            bounded_remaining = min(
-                max(remaining, min_delay),
-                max_delay if max_delay > 0 else remaining,
-            )
-            if bounded_remaining != remaining:
-                log(
-                    f"Interval suggestion adjusted to {bounded_remaining:.2f} min (bounds {min_delay:.1f}-{max_delay:.1f}).",
-                    Fore.LIGHTBLACK_EX,
-                )
-            next_delay_minutes = max(0.0, bounded_remaining)
-            next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
-    elif next_delay_minutes is None and (interval_minutes_invalid or use_interval_due_to_time):
-        if interval_minutes_invalid:
-            log('Invalid next_run_minutes from model.', Fore.YELLOW)
-        elif use_interval_due_to_time:
-            log('Model next_run_time unusable and no next_run_minutes provided; will use fallback interval.', Fore.YELLOW)
-
     if next_delay_minutes is None:
-        # Fallback: start from previous interval and nudge ±5 minutes based on volatility change.
+        # Fallback: start from previous interval and nudge ±5/±10 minutes based on volatility change.
         prev_interval = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
         if prev_interval is None or not math.isfinite(prev_interval) or prev_interval <= 0:
             prev_interval = float(DEFAULT_NEXT_RUN_MINUTES)
@@ -16593,14 +16481,18 @@ def run_cycle():
         delta = 0.0
         volatility_note = ""
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
-            tol = max(0.0005, (prev_volatility_ratio or 0.0) * 0.1 if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else 0.0005)
+            base_tol = max(0.0005, (prev_volatility_ratio or 0.0) * 0.1 if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else 0.0005)
+            strong_threshold = max(base_tol * 2.0, 0.001)
             if prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
-                if atr_ratio_median > prev_volatility_ratio + tol:
-                    delta = -5.0
-                    volatility_note = "vol↑"
-                elif atr_ratio_median < prev_volatility_ratio - tol:
-                    delta = 5.0
-                    volatility_note = "vol↓"
+                diff = atr_ratio_median - prev_volatility_ratio
+                if diff > base_tol:
+                    strong = diff >= strong_threshold
+                    delta = -10.0 if strong else -5.0
+                    volatility_note = "vol↑↑" if strong else "vol↑"
+                elif diff < -base_tol:
+                    strong = diff <= -strong_threshold
+                    delta = 10.0 if strong else 5.0
+                    volatility_note = "vol↓↓" if strong else "vol↓"
             else:
                 volatility_note = "vol=init"
 
@@ -16643,7 +16535,7 @@ def run_cycle():
             before_local = next_run_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             after_local = aligned_dt.astimezone(_current_local_tz() or datetime.datetime.now().astimezone().tzinfo)
             log(
-                "Next run aligned to 15m grid: "
+                "Next run aligned to 5m grid: "
                 f"{before_local.strftime('%Y-%m-%d %H:%M:%S %Z')} -> {after_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
                 f"(delay {next_delay_minutes:.2f} -> {aligned_delay:.2f} min)",
                 Fore.LIGHTBLACK_EX,
