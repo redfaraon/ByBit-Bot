@@ -14701,6 +14701,7 @@ def run_cycle():
     for sym_key in decisions_map.keys():
         if sym_key not in selected_symbols:
             selected_symbols.append(sym_key)
+    missing_from_ai: str | None = None
     if selection_missing_symbols:
         missing_from_ai = ", ".join(sorted(set(selection_missing_symbols)))
         log(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}", Fore.YELLOW)
@@ -14708,7 +14709,8 @@ def run_cycle():
         time_hint = selection_next_time if selection_next_time else "n/a"
         run_hint = f"{selection_next_run:.2f}" if (selection_next_run is not None and math.isfinite(selection_next_run)) else "n/a"
         log(f"[SCHED] model scheduling hints: next_run_time={time_hint}, next_run_minutes={run_hint}", Fore.LIGHTBLACK_EX)
-        send_tg(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}")
+        if missing_from_ai:
+            send_tg(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}")
 
     symbols_sequence: list[str] = []
     seen_symbols: set[str] = set()
