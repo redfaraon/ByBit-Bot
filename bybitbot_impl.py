@@ -2311,6 +2311,21 @@ def _build_news_digest(symbols):
     return digest
 
 
+def _log_news_digest(digest: dict[str, Any] | None) -> None:
+    if not isinstance(digest, dict) or not digest:
+        log("[NEWS] No headlines fetched for this cycle.", Fore.LIGHTBLACK_EX)
+        return
+    parts = []
+    for sym, payload in digest.items():
+        items = payload.get("items") if isinstance(payload, dict) else None
+        title = None
+        if items and isinstance(items, list) and items:
+            title = (items[0] or {}).get("title")
+        parts.append(f"{sym}: {len(items or [])} items" + (f" — {title}" if title else ""))
+    if parts:
+        log("[NEWS] Headlines used in prompts: " + " | ".join(parts[:12]), Fore.LIGHTBLACK_EX)
+
+
 def _parse_indicator_name(name: str) -> Tuple[str, Optional[int]]:
     base = "".join(ch for ch in name if ch.isalpha()).lower()
     digits = "".join(ch for ch in name if ch.isdigit())
@@ -2590,6 +2605,7 @@ def ai_update_universe(exchange, symbols, positions_map, equity, available_margi
     client = OpenAI(api_key=AI_KEY, timeout=30)
     if not news_digest:
         news_digest = _build_news_digest(symbols)
+    _log_news_digest(news_digest)
     positions_compact: list[dict[str, Any]] = []
     symbol_set = set(symbols) | set(positions_map.keys())
     for sym in sorted(symbol_set):
@@ -16420,6 +16436,7 @@ def run_cycle():
     interval_minutes_model: Optional[float] = None
     interval_minutes_invalid = False
     derived_interval_from_time: Optional[float] = None
+    timing_debug_parts: list[str] = []
     if selection_next_run is not None:
         try:
             raw_interval = float(selection_next_run)
@@ -16446,6 +16463,7 @@ def run_cycle():
                     interval_guess = (target_dt - cycle_start_utc).total_seconds() / 60.0
                     if interval_guess is not None and math.isfinite(interval_guess) and interval_guess > 0:
                         derived_interval_from_time = float(interval_guess)
+                        timing_debug_parts.append(f"time->interval≈{derived_interval_from_time:.2f}m")
                 except Exception:
                     derived_interval_from_time = None
                 remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
@@ -16455,6 +16473,7 @@ def run_cycle():
                     if within_min and within_max:
                         next_delay_minutes = remaining
                         next_run_dt = target_dt
+                        timing_debug_parts.append(f"time_ok={remaining:.2f}m")
                     else:
                         log(
                             f"next_run_time {remaining:.2f} min outside bounds {min_delay:.1f}-{max_delay:.1f}; will use interval if available.",
@@ -16480,30 +16499,35 @@ def run_cycle():
                 log(f"Failed to parse next_run_time '{selection_next_time}': {exc}", Fore.YELLOW)
 
     if next_delay_minutes is None and interval_minutes_model is not None:
-        interval_minutes = float(interval_minutes_model)
-        interval_clamped = min(
-            max(interval_minutes, float(MIN_NEXT_RUN_MINUTES)),
-            float(MAX_NEXT_RUN_FROM_START_MINUTES),
-        )
-        if abs(interval_clamped - interval_minutes) > 1e-9:
-            log(
-                f"next_run_minutes clamped from {interval_minutes:.2f} min to {interval_clamped:.2f} min "
-                f"(bounds {MIN_NEXT_RUN_MINUTES:.1f}-{MAX_NEXT_RUN_FROM_START_MINUTES:.1f})",
-                Fore.YELLOW,
+        # If time was unusable and the derived interval hits the hard floor, prefer fallback logic instead of looping at min.
+        if use_interval_due_to_time and interval_minutes_model <= min_delay + 1e-6:
+            timing_debug_parts.append("interval_from_time<=min → fallback")
+            interval_minutes_model = None
+        else:
+            interval_minutes = float(interval_minutes_model)
+            interval_clamped = min(
+                max(interval_minutes, float(MIN_NEXT_RUN_MINUTES)),
+                float(MAX_NEXT_RUN_FROM_START_MINUTES),
             )
-        target_dt = cycle_start_utc + datetime.timedelta(minutes=float(interval_clamped))
-        remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
-        bounded_remaining = min(
-            max(remaining, min_delay),
-            max_delay if max_delay > 0 else remaining,
-        )
-        if bounded_remaining != remaining:
-            log(
-                f"Interval suggestion adjusted to {bounded_remaining:.2f} min (bounds {min_delay:.1f}-{max_delay:.1f}).",
-                Fore.LIGHTBLACK_EX,
+            if abs(interval_clamped - interval_minutes) > 1e-9:
+                log(
+                    f"next_run_minutes clamped from {interval_minutes:.2f} min to {interval_clamped:.2f} min "
+                    f"(bounds {MIN_NEXT_RUN_MINUTES:.1f}-{MAX_NEXT_RUN_FROM_START_MINUTES:.1f})",
+                    Fore.YELLOW,
+                )
+            target_dt = cycle_start_utc + datetime.timedelta(minutes=float(interval_clamped))
+            remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
+            bounded_remaining = min(
+                max(remaining, min_delay),
+                max_delay if max_delay > 0 else remaining,
             )
-        next_delay_minutes = max(0.0, bounded_remaining)
-        next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
+            if bounded_remaining != remaining:
+                log(
+                    f"Interval suggestion adjusted to {bounded_remaining:.2f} min (bounds {min_delay:.1f}-{max_delay:.1f}).",
+                    Fore.LIGHTBLACK_EX,
+                )
+            next_delay_minutes = max(0.0, bounded_remaining)
+            next_run_dt = schedule_now_utc + datetime.timedelta(minutes=next_delay_minutes)
     elif next_delay_minutes is None and (interval_minutes_invalid or use_interval_due_to_time):
         if interval_minutes_invalid:
             log('Invalid next_run_minutes from model.', Fore.YELLOW)
@@ -16555,6 +16579,7 @@ def run_cycle():
             max(float(fallback_interval_from_start), float(MIN_NEXT_RUN_MINUTES)),
             float(MAX_NEXT_RUN_FROM_START_MINUTES),
         )
+        timing_debug_parts.append(f"fallback={fallback_source}:{fallback_interval_from_start:.2f}m")
 
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(fallback_interval_from_start))
         remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
@@ -16597,6 +16622,8 @@ def run_cycle():
         )
         log(final_msg, Fore.CYAN)
         send_tg(final_msg)
+        if timing_debug_parts:
+            log("[SCHED] timing debug: " + "; ".join(timing_debug_parts), Fore.LIGHTBLACK_EX)
         try:
             if isinstance(cycle_state, dict):
                 cycle_state["last_next_delay_minutes"] = round(float(final_delay_minutes), 2)
