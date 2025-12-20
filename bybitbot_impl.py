@@ -12984,6 +12984,7 @@ def execute_extra_orders(
                         Fore.YELLOW,
                     )
                     continue
+        pending_reduce_cancels: list[dict[str, Any]] = []
         if is_reduce_only:
             if abs(position_amount) == 0:
                 log(f"[INFO] Skipping reduce-only order for {symbol}: no active position", Fore.LIGHTBLACK_EX)
@@ -12991,38 +12992,7 @@ def execute_extra_orders(
                 continue
             existing_list = reduce_only_map.get(side)
             if existing_list:
-                for existing_order in existing_list:
-                    oid = existing_order.get("id")
-                    if not oid:
-                        continue
-                    order_summary = _summarize_order_spec(existing_order)
-                    summary_suffix = f": {order_summary}" if order_summary else ""
-                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
-                    if success:
-                        cancelled_entry = f"{oid}{summary_suffix}"
-                        cancelled_success.append(cancelled_entry)
-                        trigger_val = safe_float(
-                            (existing_order or {}).get("stopPrice")
-                            or (existing_order or {}).get("triggerPrice")
-                            or (existing_order or {}).get("stopLoss")
-                        )
-                        price_val = safe_float((existing_order or {}).get("price"))
-                        tp_val = safe_float((existing_order or {}).get("takeProfit") or (existing_order or {}).get("tp"))
-                        level_bits: list[str] = []
-                        if trigger_val is not None and math.isfinite(trigger_val):
-                            level_bits.append(f"trigger={trigger_val:.6f}")
-                        if tp_val is not None and math.isfinite(tp_val):
-                            level_bits.append(f"tp={tp_val:.6f}")
-                        if price_val is not None and math.isfinite(price_val):
-                            level_bits.append(f"price={price_val:.6f}")
-                        level_suffix = f" ({', '.join(level_bits)})" if level_bits else ""
-                        log(
-                            f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}{summary_suffix}{level_suffix}",
-                            Fore.LIGHTBLUE_EX,
-                        )
-                    else:
-                        cancel_errors.append((oid, err))
-                        log(f"[WARN] Failed to cancel reduce-only order {oid} for {symbol}{summary_suffix}: {err}", Fore.YELLOW)
+                pending_reduce_cancels = list(existing_list)
                 reduce_only_map[side] = []
         position_idx = order.get("positionIdx")
         if position_idx is None:
@@ -13219,8 +13189,10 @@ def execute_extra_orders(
                     Fore.YELLOW,
                 )
                 continue
+        order_created = False
         try:
             order_id = exchange.create_order(exchange_symbol, ccxt_type, side, amount, price, params)
+            order_created = True
             if order_type_key in {"stop_loss", "stop"}:
                 display_type = "STOP-MARKET"
             elif order_type_key == "stop_limit":
@@ -13252,6 +13224,40 @@ def execute_extra_orders(
             else:
                 order_errors.append(err_text)
                 log(f"[ERROR] Extra order #{idx} for {symbol} failed: {err_text}", Fore.RED)
+        else:
+            if order_created and pending_reduce_cancels:
+                for existing_order in pending_reduce_cancels:
+                    oid = existing_order.get("id")
+                    if not oid:
+                        continue
+                    order_summary = _summarize_order_spec(existing_order)
+                    summary_suffix = f": {order_summary}" if order_summary else ""
+                    success, err = cancel_order_by_id(exchange, symbol, str(oid))
+                    if success:
+                        cancelled_entry = f"{oid}{summary_suffix}"
+                        cancelled_success.append(cancelled_entry)
+                        trigger_val = safe_float(
+                            (existing_order or {}).get("stopPrice")
+                            or (existing_order or {}).get("triggerPrice")
+                            or (existing_order or {}).get("stopLoss")
+                        )
+                        price_val = safe_float((existing_order or {}).get("price"))
+                        tp_val = safe_float((existing_order or {}).get("takeProfit") or (existing_order or {}).get("tp"))
+                        level_bits: list[str] = []
+                        if trigger_val is not None and math.isfinite(trigger_val):
+                            level_bits.append(f"trigger={trigger_val:.6f}")
+                        if tp_val is not None and math.isfinite(tp_val):
+                            level_bits.append(f"tp={tp_val:.6f}")
+                        if price_val is not None and math.isfinite(price_val):
+                            level_bits.append(f"price={price_val:.6f}")
+                        level_suffix = f" ({', '.join(level_bits)})" if level_bits else ""
+                        log(
+                            f"[INFO] Cancelled existing reduce-only order {oid} for {symbol}{summary_suffix}{level_suffix}",
+                            Fore.LIGHTBLUE_EX,
+                        )
+                    else:
+                        cancel_errors.append((oid, err))
+                        log(f"[WARN] Failed to cancel reduce-only order {oid} for {symbol}{summary_suffix}: {err}", Fore.YELLOW)
     if cancelled_success:
         send_tg(f"[INFO] {symbol}: cancelled reduce-only orders {', '.join(cancelled_success)}")
     if cancel_errors:
@@ -17494,39 +17500,52 @@ def run_cycle():
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
     atr_ratio_median: float | None = None
     vol_source = "hints"
+    source_tags: list[str] = []
     try:
         atr_samples: list[float] = []
-        # 1) Попытаться взять оценки волатильности из hint'ов модели.
+        hint_samples: list[float] = []
         for sym_hint in (selected_symbols or []):
             hint = SYMBOL_MARKET_MODE_HINTS.get(sym_hint) or {}
             analysis_balance = hint.get("analysis_balance") if isinstance(hint, dict) else None
             ratio = safe_float((analysis_balance or {}).get("atr_ratio")) if isinstance(analysis_balance, dict) else None
             if ratio is not None and math.isfinite(ratio) and ratio > 0:
-                atr_samples.append(float(ratio))
-        # 2) Если hint'ов нет, посчитать ATR/price напрямую по последним барам.
-        if not atr_samples:
-            symbols_for_vol = set(selected_symbols or [])
-            symbols_for_vol.update(final_positions_map.keys() if isinstance(final_positions_map, dict) else [])
-            for sym_vol in symbols_for_vol:
-                try:
-                    df_vol = fetch_df(ex, sym_vol, TIMEFRAME)
-                    if df_vol is None or df_vol.empty:
-                        continue
-                    last_row = df_vol.iloc[-1]
-                    atr_val = safe_float(last_row.get("atr") or last_row.get("atr14"))
-                    close_val = safe_float(last_row.get("close") or last_row.get("c"))
-                    if atr_val is None or close_val is None or not math.isfinite(atr_val) or not math.isfinite(close_val) or close_val <= 0:
-                        continue
-                    ratio = float(atr_val) / float(close_val)
-                    if ratio > 0:
-                        atr_samples.append(ratio)
-                except Exception:
-                    continue
-            if atr_samples:
-                vol_source = "bars"
+                hint_samples.append(float(ratio))
+        if hint_samples:
+            atr_samples.extend(hint_samples)
+            source_tags.append("hints")
+        symbols_for_vol = set(selected_symbols or [])
+        if isinstance(final_positions_map, dict):
+            symbols_for_vol.update(final_positions_map.keys())
+        bar_samples: list[float] = []
+        for sym_vol in symbols_for_vol:
+            try:
+                df_vol = fetch_df(ex, sym_vol, TIMEFRAME)
+            except Exception:
+                df_vol = None
+            if df_vol is None or df_vol.empty:
+                continue
+            last_row = df_vol.iloc[-1]
+            atr_val = safe_float(last_row.get("atr") or last_row.get("atr14"))
+            close_val = safe_float(last_row.get("close") or last_row.get("c"))
+            if (
+                atr_val is None
+                or close_val is None
+                or not math.isfinite(atr_val)
+                or not math.isfinite(close_val)
+                or close_val <= 0
+            ):
+                continue
+            ratio = float(atr_val) / float(close_val)
+            if ratio > 0:
+                bar_samples.append(ratio)
+        if bar_samples:
+            atr_samples.extend(bar_samples)
+            source_tags.append("bars")
         if atr_samples:
             atr_samples.sort()
             atr_ratio_median = atr_samples[len(atr_samples) // 2]
+            if source_tags:
+                vol_source = "+".join(source_tags)
     except Exception:
         atr_ratio_median = None
     if (atr_ratio_median is None or not math.isfinite(atr_ratio_median)) and prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
