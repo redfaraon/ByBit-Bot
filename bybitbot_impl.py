@@ -3480,6 +3480,9 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
         f"ta={_fmt_weight(analysis_balance.get('technical_weight'))})"
     )
     reason_text = reason or "entry signal"
+    regime = decision.get("regime")
+    if regime:
+        reason_text = f"[{regime}] {reason_text}"
     config_block = decision.get("config") or {}
     sl_atr_conf = safe_float(config_block.get("sl_atr") or SL_ATR)
     tp_atr_conf = safe_float(config_block.get("tp_atr") or TP_ATR)
@@ -3512,10 +3515,10 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
                 needs_text = ", ".join(str(item) for item in needs_payload if item)
             else:
                 needs_text = str(needs_payload) if needs_payload else "none"
-            log(
-                f"[SKIP] {sym}: {reason_text}; balance={balance_summary}; needs={needs_text}",
-                Fore.LIGHTYELLOW_EX,
-            )
+        log(
+            f"[SKIP] {sym}: {reason_text}; balance={balance_summary}; needs={needs_text}",
+            Fore.LIGHTYELLOW_EX,
+        )
     if notional_pct is not None:
         log(f"{sym}: notional_pct={_format_notional_pct(notional_pct)}", Fore.LIGHTBLACK_EX)
     open_orders_symbol = open_orders_cache.get(sym)
@@ -4987,6 +4990,7 @@ def _offline_decision_for_symbol(
             "action": "manage",
             "side": pos_side,
             "reason": f"AI offline: manage existing position (rsi={rsi_val:.1f}, range={range_hint})",
+            "regime": "trend" if bull or bear else "counter",
             "ai_unavailable": True,
             "confidence": 0.0,
             "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
@@ -5059,6 +5063,7 @@ def _offline_decision_for_symbol(
             "symbol": symbol,
             "action": "skip",
             "reason": f"AI offline: no signal (rsi={rsi_val:.1f}, range={range_hint})",
+            "regime": regime,
             "ai_unavailable": True,
             "confidence": 0.0,
         }
@@ -5091,6 +5096,7 @@ def _offline_decision_for_symbol(
         "action": "open",
         "side": chosen_side,
         "reason": "AI offline rules: " + "; ".join(reason_bits),
+        "regime": regime,
         "ai_unavailable": True,
         "confidence": 0.82,
         "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
