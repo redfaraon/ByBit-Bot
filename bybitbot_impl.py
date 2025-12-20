@@ -17501,6 +17501,7 @@ def run_cycle():
     atr_ratio_median: float | None = None
     vol_source = "hints"
     source_tags: list[str] = []
+    bar_deltas: list[float] = []
     try:
         atr_samples: list[float] = []
         hint_samples: list[float] = []
@@ -17538,6 +17539,20 @@ def run_cycle():
             ratio = float(atr_val) / float(close_val)
             if ratio > 0:
                 bar_samples.append(ratio)
+                if len(df_vol) >= 2:
+                    prev_row = df_vol.iloc[-2]
+                    atr_prev = safe_float(prev_row.get("atr") or prev_row.get("atr14"))
+                    close_prev = safe_float(prev_row.get("close") or prev_row.get("c"))
+                    if (
+                        atr_prev is not None
+                        and close_prev is not None
+                        and math.isfinite(atr_prev)
+                        and math.isfinite(close_prev)
+                        and close_prev > 0
+                    ):
+                        prev_ratio = float(atr_prev) / float(close_prev)
+                        if math.isfinite(prev_ratio):
+                            bar_deltas.append(ratio - prev_ratio)
         if bar_samples:
             atr_samples.extend(bar_samples)
             source_tags.append("bars")
@@ -17584,11 +17599,23 @@ def run_cycle():
         thresholds_note = ""
         diff_value: float | None = None
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
-            base_tol = max(0.0005, (prev_volatility_ratio or 0.0) * 0.1 if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else 0.0005)
+            base_tol = max(
+                0.0005,
+                (prev_volatility_ratio or 0.0) * 0.1
+                if prev_volatility_ratio and math.isfinite(prev_volatility_ratio)
+                else 0.0005,
+            )
             strong_threshold = max(base_tol * 2.0, 0.001)
             thresholds_note = f"thr5={base_tol:.4f}, thr10={strong_threshold:.4f}, src={vol_source}"
-            if prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
-                diff = atr_ratio_median - prev_volatility_ratio
+            diff_candidate = None
+            if bar_deltas:
+                bar_deltas.sort()
+                diff_candidate = bar_deltas[len(bar_deltas) // 2]
+                thresholds_note += "+intrabar"
+            elif prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
+                diff_candidate = atr_ratio_median - prev_volatility_ratio
+            if diff_candidate is not None and math.isfinite(diff_candidate):
+                diff = diff_candidate
                 diff_value = diff
                 if diff > base_tol:
                     strong = diff >= strong_threshold
