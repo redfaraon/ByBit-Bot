@@ -16991,14 +16991,27 @@ def run_cycle():
                         if orders_activity
                         else f"orders unchanged ({final_orders_snapshot})"
                     )
-                    pos_label = _format_position_snapshot(final_position_amount)
+                    pos_label_before = _format_position_snapshot(initial_position_amount)
+                    pos_label_after = _format_position_snapshot(final_position_amount)
+                    # Classify manage into higher-level categories for readability.
+                    manage_label = "change_orders"
+                    if abs(initial_position_amount) <= amount_tolerance and abs(final_position_amount) > amount_tolerance:
+                        manage_label = "open"
+                    elif abs(initial_position_amount) > amount_tolerance and abs(final_position_amount) <= amount_tolerance:
+                        manage_label = "close"
+                    elif initial_position_amount * final_position_amount < -amount_tolerance:
+                        manage_label = "flip"
+                    elif abs(final_position_amount) > abs(initial_position_amount) + amount_tolerance:
+                        manage_label = "increase"
+                    elif abs(final_position_amount) < abs(initial_position_amount) - amount_tolerance:
+                        manage_label = "reduce"
                     if initial_position_amount == 0.0 and final_position_amount == 0.0:
-                        detail_entry = f"[{sym}] - manage with no open position ({orders_desc})"
+                        detail_entry = f"[{sym}] - {manage_label} with no open position ({orders_desc})"
                     else:
-                        parts: list[str] = [pos_label, orders_desc]
+                        parts: list[str] = [f"{manage_label}: {pos_label_before} -> {pos_label_after}", orders_desc]
                         if size_change_label:
                             parts.append(size_change_label)
-                        detail_entry = f"[{sym}] - managing position ({', '.join(parts)})"
+                        detail_entry = f"[{sym}] - {', '.join(parts)}"
                 elif action in ("hold", "none"):
                     change_parts: list[str] = []
                     if size_change_label:
@@ -17364,11 +17377,14 @@ def run_cycle():
             protective_orders_after,
             price_hint=px_val,
         )
+        stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
+        take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
+        has_any_level = bool(stop_vals_dbg or take_vals_dbg)
+
         if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
-            stop_prices = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
-            take_prices = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
-            stop_hint = f"{stop_prices[-1]:.2f}" if stop_prices else "n/a"
-            take_hint = f"{take_prices[0]:.2f}" if take_prices else "n/a"
+            # Полная защита восстановлена.
+            stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
+            take_hint = f"{take_vals_dbg[0]:.2f}" if take_vals_dbg else "n/a"
             parts_text = f"stop={stop_hint},take={take_hint}"
             log(
                 f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
@@ -17376,17 +17392,31 @@ def run_cycle():
             )
             restored = True
             continue
-        else:
-            stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
-            take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
+
+        if has_stop_after and REQUIRE_TAKE_PROFIT and not has_take_after:
+            # Есть стоп, но нет тейка – считаем позицию защищённой стопом и не закрываем её.
+            stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
             log(
-                f"[WARN] {sym_unprotected}: still missing protection after restore "
-                f"(has_stop={has_stop_after}, has_take={has_take_after}, "
-                f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
-                f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) — closing position",
+                f"[WARN] {sym_unprotected}: take-profit still missing after restore "
+                f"(stop={stop_hint}, takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – keeping position with stop-only",
                 Fore.YELLOW,
             )
+            restored = True
+            continue
 
+        if has_any_level:
+            # Есть какие‑то защитные уровни, но классификация считает их невалидными — не закрываем автоматически.
+            log(
+                f"[WARN] {sym_unprotected}: ambiguous protection after restore "
+                f"(has_stop={has_stop_after}, has_take={has_take_after}, "
+                f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
+                f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – skipping auto-close",
+                Fore.YELLOW,
+            )
+            unresolved_unprotected.append(sym_unprotected)
+            continue
+
+        # Действительно нет ни стопа, ни тейка – закрываем позицию как раньше.
         position_side_field = str(position_payload.get("side") or "").lower()
         if position_side_field in {"long", "buy"}:
             close_side = "sell"
@@ -17443,12 +17473,34 @@ def run_cycle():
     vol_source = "hints"
     try:
         atr_samples: list[float] = []
+        # 1) Попытаться взять оценки волатильности из hint'ов модели.
         for sym_hint in (selected_symbols or []):
             hint = SYMBOL_MARKET_MODE_HINTS.get(sym_hint) or {}
             analysis_balance = hint.get("analysis_balance") if isinstance(hint, dict) else None
             ratio = safe_float((analysis_balance or {}).get("atr_ratio")) if isinstance(analysis_balance, dict) else None
             if ratio is not None and math.isfinite(ratio) and ratio > 0:
                 atr_samples.append(float(ratio))
+        # 2) Если hint'ов нет, посчитать ATR/price напрямую по последним барам.
+        if not atr_samples:
+            symbols_for_vol = set(selected_symbols or [])
+            symbols_for_vol.update(final_positions_map.keys() if isinstance(final_positions_map, dict) else [])
+            for sym_vol in symbols_for_vol:
+                try:
+                    df_vol = fetch_df(ex, sym_vol, TIMEFRAME)
+                    if df_vol is None or df_vol.empty:
+                        continue
+                    last_row = df_vol.iloc[-1]
+                    atr_val = safe_float(last_row.get("atr") or last_row.get("atr14"))
+                    close_val = safe_float(last_row.get("close") or last_row.get("c"))
+                    if atr_val is None or close_val is None or not math.isfinite(atr_val) or not math.isfinite(close_val) or close_val <= 0:
+                        continue
+                    ratio = float(atr_val) / float(close_val)
+                    if ratio > 0:
+                        atr_samples.append(ratio)
+                except Exception:
+                    continue
+            if atr_samples:
+                vol_source = "bars"
         if atr_samples:
             atr_samples.sort()
             atr_ratio_median = atr_samples[len(atr_samples) // 2]
