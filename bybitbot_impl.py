@@ -17502,6 +17502,7 @@ def run_cycle():
     vol_source = "hints"
     source_tags: list[str] = []
     bar_deltas: list[float] = []
+    volatility_sample_note = ""
     try:
         atr_samples: list[float] = []
         hint_samples: list[float] = []
@@ -17517,30 +17518,56 @@ def run_cycle():
         symbols_for_vol = set(selected_symbols or [])
         if isinstance(final_positions_map, dict):
             symbols_for_vol.update(final_positions_map.keys())
+        if not symbols_for_vol:
+            fallback_symbols: list[str] = []
+            for raw_pair in PAIR_LIST:
+                normalized = normalize_symbol(raw_pair, record_missing=False) or raw_pair
+                if normalized and normalized not in fallback_symbols:
+                    fallback_symbols.append(normalized)
+                if len(fallback_symbols) >= 6:
+                    break
+            symbols_for_vol.update(fallback_symbols)
+        timeframes_for_vol: list[str] = []
+        tf_candidates = {str(TIMEFRAME or "").strip().lower(), "15m", "30m"}
+        for tf_candidate in tf_candidates:
+            tf_value = (tf_candidate or "").strip()
+            if not tf_value:
+                continue
+            if tf_value not in timeframes_for_vol:
+                timeframes_for_vol.append(tf_value)
         bar_samples: list[float] = []
+        bar_delta_sources: list[str] = []
         for sym_vol in symbols_for_vol:
-            try:
-                df_vol = fetch_df(ex, sym_vol, TIMEFRAME)
-            except Exception:
-                df_vol = None
-            if df_vol is None or df_vol.empty:
-                continue
-            last_row = df_vol.iloc[-1]
-            atr_val = safe_float(last_row.get("atr") or last_row.get("atr14"))
-            close_val = safe_float(last_row.get("close") or last_row.get("c"))
-            if (
-                atr_val is None
-                or close_val is None
-                or not math.isfinite(atr_val)
-                or not math.isfinite(close_val)
-                or close_val <= 0
-            ):
-                continue
-            ratio = float(atr_val) / float(close_val)
-            if ratio > 0:
+            for tf_vol in timeframes_for_vol:
+                try:
+                    df_vol = fetch_df(ex, sym_vol, tf_vol)
+                except Exception:
+                    df_vol = None
+                if df_vol is None or df_vol.empty:
+                    continue
+                df_vol_local = df_vol.copy()
+                if "atr" not in df_vol_local.columns:
+                    try:
+                        df_vol_local["atr"] = atr(df_vol_local, 14)
+                    except Exception:
+                        continue
+                last_row = df_vol_local.iloc[-1]
+                atr_val = safe_float(last_row.get("atr") or last_row.get("atr14"))
+                close_val = safe_float(last_row.get("close") or last_row.get("c"))
+                if (
+                    atr_val is None
+                    or close_val is None
+                    or not math.isfinite(atr_val)
+                    or not math.isfinite(close_val)
+                    or close_val <= 0
+                ):
+                    continue
+                ratio = float(atr_val) / float(close_val)
+                if ratio <= 0:
+                    continue
                 bar_samples.append(ratio)
-                if len(df_vol) >= 2:
-                    prev_row = df_vol.iloc[-2]
+                if len(df_vol_local) >= 2:
+                    prev_row = df_vol_local.iloc[-2]
                     atr_prev = safe_float(prev_row.get("atr") or prev_row.get("atr14"))
                     close_prev = safe_float(prev_row.get("close") or prev_row.get("c"))
                     if (
@@ -17552,10 +17579,19 @@ def run_cycle():
                     ):
                         prev_ratio = float(atr_prev) / float(close_prev)
                         if math.isfinite(prev_ratio):
-                            bar_deltas.append(ratio - prev_ratio)
+                            delta_val = ratio - prev_ratio
+                            bar_deltas.append(delta_val)
+                            bar_delta_sources.append(f"{sym_vol}@{tf_vol}:{delta_val:+.4f}")
         if bar_samples:
             atr_samples.extend(bar_samples)
             source_tags.append("bars")
+        if bar_delta_sources:
+            preview = ", ".join(bar_delta_sources[:3])
+            if len(bar_delta_sources) > 3:
+                preview = f"{preview}, +{len(bar_delta_sources) - 3} more"
+            volatility_sample_note = f"deltas[{len(bar_delta_sources)}]: {preview}"
+        elif bar_samples:
+            volatility_sample_note = f"bars[{len(bar_samples)}]"
         if atr_samples:
             atr_samples.sort()
             atr_ratio_median = atr_samples[len(atr_samples) // 2]
@@ -17599,12 +17635,8 @@ def run_cycle():
         thresholds_note = ""
         diff_value: float | None = None
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
-            base_tol = max(
-                0.0005,
-                (prev_volatility_ratio or 0.0) * 0.1
-                if prev_volatility_ratio and math.isfinite(prev_volatility_ratio)
-                else 0.0005,
-            )
+            base_ref = prev_volatility_ratio if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else atr_ratio_median
+            base_tol = max(0.0001, base_ref * 0.03 if base_ref and math.isfinite(base_ref) else 0.0001)
             strong_threshold = max(base_tol * 2.0, 0.001)
             thresholds_note = f"thr5={base_tol:.4f}, thr10={strong_threshold:.4f}, src={vol_source}"
             diff_candidate = None
@@ -17641,6 +17673,8 @@ def run_cycle():
             f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
             f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; {thresholds_note})"
         )
+        if volatility_sample_note:
+            timing_debug_parts.append(f"[samples] {volatility_sample_note}")
 
         target_dt = cycle_start_utc + datetime.timedelta(minutes=float(fallback_interval_from_start))
         remaining = (target_dt - schedule_now_utc).total_seconds() / 60.0
