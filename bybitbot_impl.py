@@ -17498,6 +17498,11 @@ def run_cycle():
     next_run_dt = None
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
+    prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
+    current_cycle_no = safe_int(globals().get("_CURRENT_CYCLE_NUMBER"))
+    ai_offline_active = (
+        _AI_OFFLINE_ACTIVE_CYCLE is not None and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == current_cycle_no
+    )
     atr_ratio_median: float | None = None
     vol_source = "hints"
     source_tags: list[str] = []
@@ -17515,6 +17520,53 @@ def run_cycle():
         if hint_samples:
             atr_samples.extend(hint_samples)
             source_tags.append("hints")
+        def _timeframe_minutes(tf_value: str | None) -> float | None:
+            if not tf_value:
+                return None
+            tf_clean = str(tf_value).strip().lower()
+            if not tf_clean:
+                return None
+            unit = tf_clean[-1]
+            try:
+                value = float(tf_clean[:-1])
+            except Exception:
+                return None
+            if unit == "m":
+                return value
+            if unit == "h":
+                return value * 60.0
+            if unit == "d":
+                return value * 1440.0
+            return None
+
+        def _tf_candidates_from_interval(interval_minutes: float | None) -> list[str]:
+            standards: list[tuple[float, str]] = [
+                (5.0, "5m"),
+                (15.0, "15m"),
+                (30.0, "30m"),
+                (60.0, "1h"),
+                (120.0, "2h"),
+                (240.0, "4h"),
+            ]
+            if interval_minutes is None or not math.isfinite(interval_minutes) or interval_minutes <= 0:
+                interval_minutes = float(DEFAULT_NEXT_RUN_MINUTES)
+            interval_minutes = max(5.0, min(interval_minutes, 240.0))
+            primary: str | None = None
+            secondary: str | None = None
+            for minutes, label in standards:
+                if minutes <= interval_minutes + 1e-9:
+                    if primary is None or minutes >= (_timeframe_minutes(primary) or 0):
+                        secondary = primary if primary != label else secondary
+                        primary = label
+            if primary is None:
+                primary = "5m"
+            tf_list = [primary]
+            if secondary and secondary not in tf_list:
+                tf_list.append(secondary)
+            if "5m" not in tf_list:
+                tf_list.append("5m")
+            return tf_list
+
         symbols_for_vol = set(selected_symbols or [])
         if isinstance(final_positions_map, dict):
             symbols_for_vol.update(final_positions_map.keys())
@@ -17528,7 +17580,13 @@ def run_cycle():
                     break
             symbols_for_vol.update(fallback_symbols)
         timeframes_for_vol: list[str] = []
-        tf_candidates = {str(TIMEFRAME or "").strip().lower(), "15m", "30m"}
+        tf_candidates = set(_tf_candidates_from_interval(prev_interval_from_start))
+        tf_env = str(TIMEFRAME or "").strip()
+        if tf_env:
+            tf_env_norm = tf_env.lower()
+            minutes_env = _timeframe_minutes(tf_env_norm)
+            if minutes_env is None or minutes_env <= (prev_interval_from_start or minutes_env or 0):
+                tf_candidates.add(tf_env_norm)
         for tf_candidate in tf_candidates:
             tf_value = (tf_candidate or "").strip()
             if not tf_value:
@@ -17611,6 +17669,13 @@ def run_cycle():
         min_delay_override = 25.0
         max_delay_override = 55.0
         log(f"[SCHED] rate-limit backoff active: bounds {min_delay_override}-{max_delay_override}m", Fore.LIGHTBLACK_EX)
+    elif ai_offline_active:
+        min_delay_override = 5.0
+        max_delay_override = 40.0
+        log(
+            f"[SCHED] AI offline bounds applied: {min_delay_override}-{max_delay_override}m window while offline mode active",
+            Fore.LIGHTBLACK_EX,
+        )
     else:
         min_delay_override = float(MIN_NEXT_RUN_MINUTES)
         max_delay_override = float(MAX_NEXT_RUN_FROM_START_MINUTES)
@@ -17622,7 +17687,7 @@ def run_cycle():
     timing_debug_parts: list[str] = []
     if next_delay_minutes is None:
         # Fallback: start from previous interval and nudge ±5/±10 minutes based on volatility change.
-        prev_interval = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
+        prev_interval = prev_interval_from_start
         if prev_interval is None or not math.isfinite(prev_interval) or prev_interval <= 0:
             prev_interval = float(DEFAULT_NEXT_RUN_MINUTES)
         prev_interval = min(
