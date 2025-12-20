@@ -5013,6 +5013,8 @@ def _offline_decision_for_symbol(
         quiet_news = not (OFFLINE_NEWS_BIAS_ENABLED and abs(news_score) >= 0.4)
         mild_trend_long = allow_long and bull and macd_bull and 40 <= rsi_val <= 62
         mild_trend_short = allow_short and bear and macd_bear and 38 <= rsi_val <= 60
+        drift_long = allow_long and macd_bull and 42 <= rsi_val <= 65
+        drift_short = allow_short and macd_bear and 35 <= rsi_val <= 58
 
         if strong_news and allow_long and bull and macd_bull and 40 <= rsi_val <= 65:
             chosen_side = "buy"
@@ -5026,6 +5028,12 @@ def _offline_decision_for_symbol(
         elif mild_trend_short:
             chosen_side = "sell"
             reason_bits.append("range trend short (ema20<ema50, macd<=0, rsi 38-60)")
+        elif drift_long:
+            chosen_side = "buy"
+            reason_bits.append("range drift long (macd>=0, rsi 42-65)")
+        elif drift_short:
+            chosen_side = "sell"
+            reason_bits.append("range drift short (macd<=0, rsi 35-58)")
         elif quiet_news and allow_long and rsi_val <= 35 and macd_bull:
             chosen_side = "buy"
             reason_bits.append("range mean-reversion (rsi<=35)")
