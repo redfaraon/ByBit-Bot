@@ -4865,10 +4865,20 @@ def _offline_decision_for_symbol(
             df_local["ema20"] = ema(df_local["close"], 20)
         if "ema50" not in df_local.columns:
             df_local["ema50"] = ema(df_local["close"], 50)
+        if "ema100" not in df_local.columns:
+            df_local["ema100"] = ema(df_local["close"], 100)
         if "rsi14" not in df_local.columns:
             df_local["rsi14"] = rsi(df_local["close"], 14)
         if "atr14" not in df_local.columns:
             df_local["atr14"] = atr(df_local, 14)
+        if not {"macd_line", "macd_signal", "macd_hist"} <= set(df_local.columns):
+            fast = df_local["close"].ewm(span=12, adjust=False).mean()
+            slow = df_local["close"].ewm(span=26, adjust=False).mean()
+            macd_line = fast - slow
+            signal_line = macd_line.ewm(span=9, adjust=False).mean()
+            df_local["macd_line"] = macd_line
+            df_local["macd_signal"] = signal_line
+            df_local["macd_hist"] = macd_line - signal_line
     except Exception as exc:
         return {
             "symbol": symbol,
@@ -4882,8 +4892,12 @@ def _offline_decision_for_symbol(
     close = safe_float(last.get("close")) or 0.0
     ema20_val = safe_float(last.get("ema20"))
     ema50_val = safe_float(last.get("ema50"))
+    ema100_val = safe_float(last.get("ema100"))
     rsi_val = safe_float(last.get("rsi14"))
     atr_val = safe_float(last.get("atr14")) or safe_float(last.get("atr"))
+    macd_line_val = safe_float(last.get("macd_line"))
+    macd_signal_val = safe_float(last.get("macd_signal"))
+    macd_hist_val = safe_float(last.get("macd_hist") or last.get("macd"))
 
     if not (close and math.isfinite(close) and close > 0 and ema20_val and ema50_val and rsi_val is not None):
         return {
@@ -4905,12 +4919,17 @@ def _offline_decision_for_symbol(
 
     bull = ema20_val > ema50_val and close > ema50_val
     bear = ema20_val < ema50_val and close < ema50_val
+    long_trend_allowed = bull and (ema100_val is None or close >= ema100_val)
+    short_trend_allowed = bear and (ema100_val is None or close <= ema100_val)
+    macd_bull = macd_hist_val is None or macd_hist_val >= 0
+    macd_bear = macd_hist_val is None or macd_hist_val <= 0
 
     # "Range" hint: low EMA separation relative to ATR (avoid trend trades).
     ema_sep = abs(ema20_val - ema50_val)
+    atr_ratio = (atr_val / close) if close > 0 and atr_val else 0.0
     range_hint = False
     if atr_val and math.isfinite(atr_val) and atr_val > 0:
-        range_hint = (ema_sep / atr_val) < 0.35
+        range_hint = (ema_sep / atr_val) < 0.35 or atr_ratio <= 0.008
 
     if has_position:
         side_raw = str((current_position or {}).get("side") or "").lower()
@@ -4922,6 +4941,11 @@ def _offline_decision_for_symbol(
         # - Exit if strong opposite news bias (|news_score|>=0.7) and RSI is already unfavorable.
         flipped_against = (pos_side == "buy" and bear) or (pos_side == "sell" and bull)
         rsi_unfavorable = (pos_side == "buy" and rsi_val <= 40) or (pos_side == "sell" and rsi_val >= 60)
+        macd_flip = False
+        if macd_hist_val is not None and macd_signal_val is not None:
+            macd_flip = (pos_side == "buy" and macd_hist_val < 0 and macd_line_val is not None and macd_line_val < macd_signal_val) or (
+                pos_side == "sell" and macd_hist_val > 0 and macd_line_val is not None and macd_line_val > macd_signal_val
+            )
         strong_news_against = False
         if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score):
             if pos_side == "buy" and news_score <= -0.7:
@@ -4929,10 +4953,12 @@ def _offline_decision_for_symbol(
             if pos_side == "sell" and news_score >= 0.7:
                 strong_news_against = True
 
-        if (flipped_against and rsi_unfavorable) or (strong_news_against and rsi_unfavorable):
+        if (flipped_against and rsi_unfavorable) or (macd_flip and rsi_unfavorable) or (strong_news_against and rsi_unfavorable):
             reason_bits = []
             if flipped_against:
                 reason_bits.append("trend_flip")
+            if macd_flip:
+                reason_bits.append("macd_flip")
             if strong_news_against:
                 reason_bits.append(f"news_against={news_score:+.2f}")
             reason_bits.append(f"rsi={rsi_val:.1f}")
@@ -4959,19 +4985,25 @@ def _offline_decision_for_symbol(
     reason_bits: list[str] = []
 
     if not range_hint:
-        # Trend-following
-        if bull and allow_long and 45 <= rsi_val <= 70:
+        # Trend-following longs
+        if long_trend_allowed and allow_long and 45 <= rsi_val <= 70 and macd_bull:
             chosen_side = "buy"
-            reason_bits.append("trend bull (ema20>ema50, close>ema50)")
-        elif bear and allow_short and 30 <= rsi_val <= 55:
+            reason_bits.append("trend bull (ema20>ema50>ema100)")
+            if macd_hist_val is not None:
+                reason_bits.append(f"macd_hist={macd_hist_val:+.3f}")
+        # Trend-following shorts
+        elif short_trend_allowed and allow_short and 30 <= rsi_val <= 55 and macd_bear:
             chosen_side = "sell"
-            reason_bits.append("trend bear (ema20<ema50, close<ema50)")
+            reason_bits.append("trend bear (ema20<ema50<ema100)")
+            if macd_hist_val is not None:
+                reason_bits.append(f"macd_hist={macd_hist_val:+.3f}")
     else:
         # Mean reversion only at extremes
-        if allow_long and rsi_val <= 30:
+        quiet_news = not (OFFLINE_NEWS_BIAS_ENABLED and abs(news_score) >= 0.4)
+        if quiet_news and allow_long and rsi_val <= 30 and macd_bull:
             chosen_side = "buy"
             reason_bits.append("range mean-reversion (rsi<=30)")
-        elif allow_short and rsi_val >= 70:
+        elif quiet_news and allow_short and rsi_val >= 70 and macd_bear:
             chosen_side = "sell"
             reason_bits.append("range mean-reversion (rsi>=70)")
 
@@ -4984,9 +5016,28 @@ def _offline_decision_for_symbol(
             "confidence": 0.0,
         }
 
-    if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score) and abs(news_score) >= 0.5:
+    if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score):
         reason_bits.append(f"news_bias={news_score:+.2f}")
     reason_bits.append(f"rsi={rsi_val:.1f}")
+
+    # Adjust position size based on news and volatility regime.
+    base_notional = CURRENT_RISK_PCT or RISK_PCT or 0.01
+    notional = float(base_notional)
+    if chosen_side == "buy" and news_score >= 0.8:
+        notional *= 1.3
+    elif chosen_side == "sell" and news_score <= -0.8:
+        notional *= 1.3
+    elif OFFLINE_NEWS_BIAS_ENABLED and ((chosen_side == "buy" and news_score <= -0.4) or (chosen_side == "sell" and news_score >= 0.4)):
+        notional *= 0.6
+    if range_hint:
+        notional *= 0.6
+    if atr_ratio and atr_ratio > 0.025:
+        notional *= 0.8
+    if MAX_DYNAMIC_RISK_PCT:
+        notional = min(notional, float(MAX_DYNAMIC_RISK_PCT))
+    if MIN_DYNAMIC_RISK_PCT:
+        notional = max(notional, float(MIN_DYNAMIC_RISK_PCT))
+    notional = max(0.0005, notional)
 
     return {
         "symbol": symbol,
@@ -4994,10 +5045,9 @@ def _offline_decision_for_symbol(
         "side": chosen_side,
         "reason": "AI offline rules: " + "; ".join(reason_bits),
         "ai_unavailable": True,
-        "confidence": 0.55,
+        "confidence": 0.82,
         "config": {"sl_atr": SL_ATR, "tp_atr": TP_ATR},
-        # Let the existing ATR-based entry ladder logic size/execute orders.
-        "notional_pct": CURRENT_RISK_PCT,
+        "notional_pct": notional,
     }
 
 # --- Вспомогательные функции ---
@@ -15820,7 +15870,8 @@ def run_cycle():
             preallocated_base_asset: str | None = None
             open_executed = False
             entry_errors: list[str] = []
-            if action == "open" and not has_position:
+            skip_conf_gate = bool(dec.get("ai_unavailable"))
+            if action == "open" and not has_position and not skip_conf_gate:
                 base_asset_key = _extract_base_asset(sym)
                 exposure_cap = MAX_POSITIONS_PER_BASE
                 if base_asset_key and exposure_cap > 0:
