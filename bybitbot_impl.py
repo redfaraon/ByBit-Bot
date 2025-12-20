@@ -806,6 +806,8 @@ AUTO_DIRECTION_MIN_CONFIDENCE: float = max(
 )
 DEFAULT_OPEN_MIN_CONFIDENCE: float = 0.7
 OPEN_MIN_CONFIDENCE: float = DEFAULT_OPEN_MIN_CONFIDENCE
+
+TELEGRAM_DECISIONS_VERBOSE = False
 _LAST_COMMIT_HASH: Optional[str] = None
 SYMBOL_RULES_CACHE: dict[str, dict[str, float | None]] = {}
 DYNAMIC_SYMBOL_ALIASES: dict[str, str] = {}
@@ -3837,6 +3839,7 @@ def refresh_settings():
     global AUTO_MIN_NOTIONAL, AUTO_MARGIN_SCALE, AUTO_MARGIN_SCALE_RATIO
     global VOL_GUARD_ENABLED, ATR_GUARD_MAX_RATIO, ATR_GUARD_MIN_RATIO, ATR_GUARD_LOW_BOOST
     global TELEGRAM_FORWARD_LOGS, TELEGRAM_LOG_BATCH_SIZE, TELEGRAM_LOG_FLUSH_INTERVAL, TELEGRAM_LOG_RATE_LIMIT_WINDOW, TELEGRAM_LOG_MAX_MESSAGES_PER_WINDOW, TELEGRAM_LOG_THREAD_ID
+    global TELEGRAM_DECISIONS_VERBOSE
     global TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_HOST, TELEGRAM_WEBHOOK_PORT, TELEGRAM_WEBHOOK_PATH, TELEGRAM_WEBHOOK_SECRET
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
@@ -4111,6 +4114,12 @@ def refresh_settings():
     except (TypeError, ValueError):
         TG_RETRY_BACKOFF = 1.5
     TG_RETRY_BACKOFF = max(0.5, TG_RETRY_BACKOFF)
+    TELEGRAM_DECISIONS_VERBOSE = str(os.getenv("TELEGRAM_DECISIONS_VERBOSE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     primary_env = (os.getenv("OPENAI_MODEL_PRIMARY") or os.getenv("OPENAI_MODEL"))
     AI_MODEL_PRIMARY = primary_env.strip() if isinstance(primary_env, str) and primary_env.strip() else "gpt-4.1-mini"
     cheap_env = (os.getenv("OPENAI_MODEL_CHEAP") or os.getenv("OPENAI_MODEL_BACKUP"))
@@ -5510,6 +5519,12 @@ def send_tg(msg: str | Sequence[str], **extra):
         if should_flush:
             _flush_tg_log_buffer()
     return last_message_id
+
+
+def send_tg_decision(msg: str | Sequence[str], **extra) -> None:
+    """Gate verbose Telegram messages behind TELEGRAM_DECISIONS_VERBOSE."""
+    if TELEGRAM_DECISIONS_VERBOSE:
+        send_tg(msg, **extra)
 
 
 def send_tg_photo(
@@ -13810,7 +13825,7 @@ def ai_decision(
                 display = confidence_display or "n/a"
                 msg_low = f"ℹ️ Low confidence ({display}) for {symbol}: requesting {', '.join(additional_needs)}"
                 log(msg_low, Fore.LIGHTBLACK_EX)
-                send_tg(msg_low)
+                send_tg_decision(msg_low)
 
         response_action = (decision.get("action") or "").lower() or "skip"
         response_reason = (decision.get("reason") or "").replace("\n", " ")[:200]
@@ -13920,7 +13935,7 @@ def ai_decision(
                 f"and indicators [{ind_text}]"
             )
             log(msg_auto, Fore.LIGHTBLACK_EX)
-            send_tg(msg_auto)
+            send_tg_decision(msg_auto)
 
     # --- Если запрошен контекст ---
     if needs:
@@ -13928,15 +13943,15 @@ def ai_decision(
             display = confidence_display or "n/a"
             msg_auto_low = f"ℹ️ Low-confidence auto context ({display}) for {symbol}: {needs}"
             log(msg_auto_low, Fore.CYAN)
-            send_tg(msg_auto_low)
+            send_tg_decision(msg_auto_low)
         elif auto_needs_triggered:
             msg_auto_needs = f"ℹ️ Auto-requested context after skip reason for {symbol}: {needs}"
             log(msg_auto_needs, Fore.CYAN)
-            send_tg(msg_auto_needs)
+            send_tg_decision(msg_auto_needs)
         else:
             msg_manual = f"ℹ️ Model requested extra context for {symbol}: {needs}"
             log(msg_manual, Fore.CYAN)
-            send_tg(msg_manual)
+            send_tg_decision(msg_manual)
         extra = {}
         needs_followup = []
         indicator_extra = None
@@ -15804,7 +15819,7 @@ def run_cycle():
                 tag_display = f" ({sym_confidence_tag})" if sym_confidence_tag else ""
                 confidence_msg = f"[AI] {sym} confidence: {sym_confidence_text}{tag_display}"
                 log(confidence_msg, Fore.LIGHTBLACK_EX)
-                send_tg(confidence_msg)
+                send_tg_decision(confidence_msg)
             else:
                 sym_confidence_tag = None
             dec["confidence_value"] = sym_confidence_value or 0.0
@@ -16109,8 +16124,8 @@ def run_cycle():
             open_conf_threshold = OPEN_MIN_CONFIDENCE
             if isinstance(mode_threshold, (int, float)) and mode_threshold > open_conf_threshold:
                 open_conf_threshold = mode_threshold
-            # Downgrade low-confidence opens to skip before handling branches
-            if action == "open" and not has_position:
+            # Downgrade low-confidence opens to skip before handling branches (skip for offline/manual decisions)
+            if action == "open" and not has_position and not dec.get("ai_unavailable"):
                 try:
                     conf_val = float(sym_confidence_value) if sym_confidence_value is not None else 0.0
                 except Exception:
@@ -16121,7 +16136,7 @@ def run_cycle():
                         f"ℹ️ Пропуск {sym}: confidence {conf_val:.3f} ниже порога {open_conf_threshold:.3f}{extra_note}",
                         Fore.WHITE,
                     )
-                    send_tg(
+                    send_tg_decision(
                         f"ℹ️ {sym}: сигнал OPEN пропущен — confidence {conf_val:.3f} ниже порога {open_conf_threshold:.3f}{extra_note}"
                     )
                     action = "skip"
@@ -16129,11 +16144,11 @@ def run_cycle():
 
             if action == "skip":
                 log(f"ℹ️ Пропуск {sym} ({reason})", Fore.WHITE)
-                send_tg(f"ℹ️ Пропуск {sym} — {reason or 'причина не указана'}")
+                send_tg_decision(f"ℹ️ Пропуск {sym} — {reason or 'причина не указана'}")
             elif action == "close":
                 if not current_position or abs(float(current_position.get("amount") or 0)) == 0:
                     log(f"⚠️ Позиция по {sym} отсутствует, нечего закрывать ({reason})", Fore.YELLOW)
-                    send_tg(f"ℹ️ {sym}: закрытие пропущено — нет открытой позиции")
+                    send_tg_decision(f"ℹ️ {sym}: закрытие пропущено — нет открытой позиции")
                 else:
                     close_side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
                     qty = abs(float(current_position.get("amount") or 0))
@@ -16162,7 +16177,7 @@ def run_cycle():
                             send_tg(f"ℹ️ Ошибка закрытия для {sym}: {err_text}")
             elif action == "hold":
                 log(f"🔷 Удерживаем {sym} ({reason})", Fore.BLUE)
-                send_tg(f"ℹ️ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
+                send_tg_decision(f"ℹ️ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
                     updated_orders, refreshed = _refresh_position_protection_if_possible(
                         ex,
@@ -16180,7 +16195,7 @@ def run_cycle():
                         open_orders_cache[sym] = updated_orders
             elif action == "manage":
                 log(f"🔧 Управляем {sym} ({reason})", Fore.BLUE)
-                send_tg(f"ℹ️ {sym}: управление позицией — {reason or 'причина не указана'}")
+                send_tg_decision(f"ℹ️ {sym}: управление позицией — {reason or 'причина не указана'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
                     updated_orders, refreshed = _refresh_position_protection_if_possible(
                         ex,
@@ -16215,7 +16230,7 @@ def run_cycle():
             elif action == "open":
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
-                    send_tg(f"ℹ️ {sym}: позиция уже открыта, сигнал open пропущен")
+                    send_tg_decision(f"ℹ️ {sym}: позиция уже открыта, сигнал open пропущен")
                     updated_orders, refreshed = _refresh_position_protection_if_possible(
                         ex,
                         sym,
