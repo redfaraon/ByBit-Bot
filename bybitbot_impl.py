@@ -55,7 +55,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.2.1"
+BOT_VERSION = "1.2.2"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -5072,15 +5072,38 @@ def _offline_decision_for_symbol(
         reason_bits.append(f"news_bias={news_score:+.2f}")
     reason_bits.append(f"rsi={rsi_val:.1f}")
 
-    # Adjust position size based on news and volatility regime.
+    # Adjust position size based on news, regime and volatility.
     base_notional = CURRENT_RISK_PCT or RISK_PCT or 0.01
     notional = float(base_notional)
-    if chosen_side == "buy" and news_score >= 0.8:
-        notional *= 1.3
-    elif chosen_side == "sell" and news_score <= -0.8:
-        notional *= 1.3
-    elif OFFLINE_NEWS_BIAS_ENABLED and ((chosen_side == "buy" and news_score <= -0.4) or (chosen_side == "sell" and news_score >= 0.4)):
-        notional *= 0.6
+
+    # 1) News bias: side-aware, плавный шкалирующий коэффициент.
+    if OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score):
+        try:
+            news_val = float(news_score)
+        except (TypeError, ValueError):
+            news_val = 0.0
+        news_val = max(-1.0, min(1.0, news_val))
+        max_boost = 0.3  # до ±30 % по одной только новостной компоненте
+        if chosen_side == "buy":
+            news_factor = 1.0 + max_boost * news_val
+        else:  # sell / short
+            news_factor = 1.0 - max_boost * news_val
+        news_factor = max(0.5, min(1.5, news_factor))
+        notional *= news_factor
+
+    # 2) Режим: тренд / контртренд. Для флета основной даунскейл идёт через range_hint ниже.
+    regime_factor = 1.0
+    if not range_hint:
+        if regime == "trend":
+            regime_factor = 1.15  # немного агрессивнее по тренду
+        elif regime == "counter":
+            regime_factor = 0.75  # аккуратнее в контртренде
+    else:
+        # Флет/рейндж: сохраняем отдельный коэффициент ниже через range_hint.
+        regime_factor = 1.0
+    notional *= regime_factor
+
+    # 3) Рейндж: общая шкала риска в боковике.
     if range_hint:
         notional *= 0.6 if not strong_news else 0.75
     if atr_ratio and atr_ratio > 0.025:
