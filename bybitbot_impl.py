@@ -4993,6 +4993,8 @@ def _offline_decision_for_symbol(
     chosen_side: str | None = None
     reason_bits: list[str] = []
 
+    strong_news = OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score) and abs(news_score) >= 0.6
+
     if not range_hint:
         # Trend-following longs
         if long_trend_allowed and allow_long and 45 <= rsi_val <= 70 and macd_bull:
@@ -5007,14 +5009,29 @@ def _offline_decision_for_symbol(
             if macd_hist_val is not None:
                 reason_bits.append(f"macd_hist={macd_hist_val:+.3f}")
     else:
-        # Mean reversion only at extremes
+        # Range / low-vol regime
         quiet_news = not (OFFLINE_NEWS_BIAS_ENABLED and abs(news_score) >= 0.4)
-        if quiet_news and allow_long and rsi_val <= 30 and macd_bull:
+        mild_trend_long = allow_long and bull and macd_bull and 40 <= rsi_val <= 62
+        mild_trend_short = allow_short and bear and macd_bear and 38 <= rsi_val <= 60
+
+        if strong_news and allow_long and bull and macd_bull and 40 <= rsi_val <= 65:
             chosen_side = "buy"
-            reason_bits.append("range mean-reversion (rsi<=30)")
-        elif quiet_news and allow_short and rsi_val >= 70 and macd_bear:
+            reason_bits.append("range+news long (ema20>ema50, macd>=0)")
+        elif strong_news and allow_short and bear and macd_bear and 35 <= rsi_val <= 60:
             chosen_side = "sell"
-            reason_bits.append("range mean-reversion (rsi>=70)")
+            reason_bits.append("range+news short (ema20<ema50, macd<=0)")
+        elif mild_trend_long:
+            chosen_side = "buy"
+            reason_bits.append("range trend long (ema20>ema50, macd>=0, rsi 40-62)")
+        elif mild_trend_short:
+            chosen_side = "sell"
+            reason_bits.append("range trend short (ema20<ema50, macd<=0, rsi 38-60)")
+        elif quiet_news and allow_long and rsi_val <= 35 and macd_bull:
+            chosen_side = "buy"
+            reason_bits.append("range mean-reversion (rsi<=35)")
+        elif quiet_news and allow_short and rsi_val >= 65 and macd_bear:
+            chosen_side = "sell"
+            reason_bits.append("range mean-reversion (rsi>=65)")
 
     if chosen_side is None:
         return {
@@ -5039,7 +5056,7 @@ def _offline_decision_for_symbol(
     elif OFFLINE_NEWS_BIAS_ENABLED and ((chosen_side == "buy" and news_score <= -0.4) or (chosen_side == "sell" and news_score >= 0.4)):
         notional *= 0.6
     if range_hint:
-        notional *= 0.6
+        notional *= 0.6 if not strong_news else 0.75
     if atr_ratio and atr_ratio > 0.025:
         notional *= 0.8
     if MAX_DYNAMIC_RISK_PCT:
