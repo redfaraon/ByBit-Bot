@@ -13880,6 +13880,12 @@ def ai_decision(
         if isinstance(initial_decision, dict)
         else initial_decision
     )
+    # Tag regime for logging (trend/flat/counter) based on AI hints.
+    ai_regime = None
+    try:
+        ai_regime = (decision.get("regime") if isinstance(decision, dict) else None) or None
+    except Exception:
+        ai_regime = None
     confidence_value = None
     confidence_raw = None
     confidence_display = None
@@ -13923,6 +13929,10 @@ def ai_decision(
             _register_ai_usage(AI_MODEL, getattr(res, "usage", None), f"{symbol} initial decision")
             msg = res.choices[0].message.content
             decision = json.loads(msg)
+            if isinstance(decision, dict) and decision.get("regime"):
+                ai_regime = ai_regime or decision.get("regime")
+            if isinstance(decision, dict) and decision.get("regime"):
+                ai_regime = ai_regime or decision.get("regime")
         except RateLimitError:
             raise
         except Exception as exc:
@@ -13975,7 +13985,9 @@ def ai_decision(
 
         response_action = (decision.get("action") or "").lower() or "skip"
         response_reason = (decision.get("reason") or "").replace("\n", " ")[:200]
-        log(f"[AI RESPONSE] initial {symbol}: action={response_action} reason={response_reason}", Fore.LIGHTBLACK_EX)
+        response_regime = decision.get("regime") or ai_regime or ""
+        regime_tag_init = f"[{response_regime}] " if response_regime else ""
+        log(f"[AI RESPONSE] initial {symbol}: {regime_tag_init}action={response_action} reason={response_reason}", Fore.LIGHTBLACK_EX)
 
         context_payload = None
         if AI_REQUESTS_FULL_CONTEXT:
@@ -14332,6 +14344,8 @@ def ai_decision(
             _register_ai_usage(AI_MODEL, getattr(res2, "usage", None), f"{symbol} extra decision")
             msg2 = res2.choices[0].message.content
             decision = json.loads(msg2)
+            if isinstance(decision, dict) and decision.get("regime"):
+                ai_regime = ai_regime or decision.get("regime")
         except RateLimitError:
             raise
         except Exception as exc:
@@ -14352,7 +14366,9 @@ def ai_decision(
             decision.pop("needs", None)
         response_action_extra = (decision.get("action") or "").lower() or "skip"
         response_reason_extra = (decision.get("reason") or "").replace("\n", " ")[:200]
-        log(f"[AI RESPONSE] extra {symbol}: action={response_action_extra} reason={response_reason_extra} needs_followup={needs_followup}", Fore.LIGHTBLACK_EX)
+        response_regime_extra = decision.get("regime") or ai_regime or ""
+        regime_tag = f"[{response_regime_extra}] " if response_regime_extra else ""
+        log(f"[AI RESPONSE] extra {symbol}: {regime_tag}action={response_action_extra} reason={response_reason_extra} needs_followup={needs_followup}", Fore.LIGHTBLACK_EX)
         context_payload_extra = None
         if AI_REQUESTS_FULL_CONTEXT:
             context_payload_extra = current_context
