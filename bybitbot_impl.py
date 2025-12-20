@@ -853,6 +853,7 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("positions", "Открытые позиции"),
     ("risk", "Текущий риск-профиль"),
     ("logs", "Последние события"),
+    ("logmode", "Переключить режим Telegram-логов"),
     ("schedule", "Запланировать следующую сессию"),
     ("tokens", "Лимиты OpenAI токенов"),
     ("bybitkey", "Установить BYBIT_API_KEY/BYBIT_API_SECRET"),
@@ -868,9 +869,10 @@ COMMANDS_HELP_SECTIONS = [
         "title": "Основные команды",
         "lines": [
             "/status — текущий статус цикла, equity и расписания",
-            "/positions — активные позиции и защитные ордера",
-            "/risk — действующие параметры риска и плеча",
-            "/logs [N|symbol minutes] — последние логи или фильтр по тикеру (пример: /logs BTC 60)",
+            "/positions - активные позиции и защитные ордера",
+            "/risk - действующие параметры риска и плеча",
+            "/logs [N|symbol minutes] - последние логи или фильтр по тикеру (пример: /logs BTC 60)",
+            "/logmode [brief|verbose|toggle] - управлять режимом Telegram-логов",
         ],
     },
     {
@@ -7122,6 +7124,106 @@ def _handle_logs_command(args: list[str]) -> str:
     return _render_log_block(filtered, header)
 
 
+def _shorten_text(value: str | None, limit: int = 60) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _format_summary_list(label: str, entries: list[dict[str, Any]] | None, limit: int = 3) -> str | None:
+    if not entries:
+        return None
+    normalized = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        item = entry.get("item")
+        count = entry.get("count")
+        if not item or count is None:
+            continue
+        normalized.append(f"{item} ({count})")
+        if len(normalized) >= limit:
+            break
+    if not normalized:
+        return None
+    return f"{label}: " + ", ".join(normalized)
+
+
+def _format_last_cycle_summary() -> str | None:
+    summary_path = _resolve_log_path("ai_decision_summary.json")
+    if summary_path is None or not summary_path.exists():
+        return None
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    lines: list[str] = []
+    entries = payload.get("entries")
+    window = payload.get("window_hours")
+    if entries is not None or window is not None:
+        window_text = f"{window:.1f}" if isinstance(window, (int, float)) else "n/a"
+        entries_text = str(entries) if entries is not None else "n/a"
+        lines.append(f"Решений: {entries_text} (окно {window_text} ч)")
+    for label, key in (
+        ("Действия", "actions"),
+        ("Символы", "symbols"),
+        ("Skip", "skip_reasons"),
+        ("Стороны", "sides"),
+    ):
+        formatted = _format_summary_list(label, payload.get(key), limit=4)
+        if formatted:
+            lines.append(formatted)
+    recent = payload.get("recent") or []
+    if recent:
+        lines.append("Последние решения:")
+        for entry in recent[:3]:
+            symbol = entry.get("symbol") or "n/a"
+            action = (entry.get("action") or "n/a").upper()
+            reason = _shorten_text(entry.get("reason"), limit=50)
+            confidence = entry.get("confidence")
+            suffix = ""
+            if reason:
+                suffix += f" ({reason})"
+            if isinstance(confidence, (int, float)):
+                suffix += f" conf={confidence:.3f}"
+            lines.append(f"- {symbol}: {action}{suffix}")
+    return "\n".join(lines) if lines else None
+
+
+def _handle_logmode_command(args: list[str]) -> str:
+    global TELEGRAM_DECISIONS_VERBOSE
+
+    def _summary_response(base: str) -> str:
+        summary = _format_last_cycle_summary()
+        if summary:
+            return f"{base}\nПоследний цикл:\n{summary}"
+        return f"{base}\nПока нет данных о последнем цикле."
+
+    if not args:
+        mode = "подробный" if TELEGRAM_DECISIONS_VERBOSE else "сводный"
+        return f"Текущий режим логов: {mode}. Используйте /logmode [brief|verbose|toggle]."
+    option = args[0].lower()
+    if option in {"verbose", "detail", "full", "on", "1", "true"}:
+        if TELEGRAM_DECISIONS_VERBOSE:
+            return _summary_response("Подробные логи уже включены.")
+        TELEGRAM_DECISIONS_VERBOSE = True
+        return _summary_response("Подробные логи включены.")
+    if option in {"brief", "summary", "off", "short", "0", "false"}:
+        if not TELEGRAM_DECISIONS_VERBOSE:
+            return "Сводный режим уже активен."
+        TELEGRAM_DECISIONS_VERBOSE = False
+        return "Сводный режим логов включён."
+    if option in {"toggle", "switch"}:
+        TELEGRAM_DECISIONS_VERBOSE = not TELEGRAM_DECISIONS_VERBOSE
+        if TELEGRAM_DECISIONS_VERBOSE:
+            return _summary_response("Режим логов переключён на подробный.")
+        return "Режим логов переключён на сводный."
+    return "Использование: /logmode [brief|verbose|toggle]"
+
+
 def _read_runtime_status() -> dict[str, Any]:
     try:
         raw = RUNTIME_STATUS_FILE.read_text(encoding="utf-8")
@@ -7523,6 +7625,8 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _format_risk_message()
     elif command in {"logs", "logtail", "log"}:
         reply = _handle_logs_command(args)
+    elif command == "logmode":
+        reply = _handle_logmode_command(args)
     elif command in {"schedule", "next"}:
         reply = _handle_schedule_command(args)
     elif command in {"tokens", "token"}:
