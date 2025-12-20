@@ -4995,21 +4995,32 @@ def _offline_decision_for_symbol(
 
     strong_news = OFFLINE_NEWS_BIAS_ENABLED and math.isfinite(news_score) and abs(news_score) >= 0.6
 
+    regime = "flat" if range_hint else ("trend" if bull or bear else "counter")
+    reason_bits.append(f"regime={regime}")
+
     if not range_hint:
-        # Trend-following longs
+        # Trend-following (trend)
         if long_trend_allowed and allow_long and 45 <= rsi_val <= 70 and macd_bull:
             chosen_side = "buy"
             reason_bits.append("trend bull (ema20>ema50>ema100)")
             if macd_hist_val is not None:
                 reason_bits.append(f"macd_hist={macd_hist_val:+.3f}")
-        # Trend-following shorts
         elif short_trend_allowed and allow_short and 30 <= rsi_val <= 55 and macd_bear:
             chosen_side = "sell"
             reason_bits.append("trend bear (ema20<ema50<ema100)")
             if macd_hist_val is not None:
                 reason_bits.append(f"macd_hist={macd_hist_val:+.3f}")
+
+        # Counter-trend fallback (outside range)
+        if chosen_side is None:
+            if allow_long and rsi_val <= 32:
+                chosen_side = "buy"
+                reason_bits.append("countertrend long (rsi<=32)")
+            elif allow_short and rsi_val >= 68:
+                chosen_side = "sell"
+                reason_bits.append("countertrend short (rsi>=68)")
     else:
-        # Range / low-vol regime
+        # Flat / range regime
         quiet_news = not (OFFLINE_NEWS_BIAS_ENABLED and abs(news_score) >= 0.4)
         mild_trend_long = allow_long and bull and macd_bull and 40 <= rsi_val <= 62
         mild_trend_short = allow_short and bear and macd_bear and 38 <= rsi_val <= 60
