@@ -12455,7 +12455,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
                     created_log_parts.append(f"forced takeProfit {force_qty_precise:.4f} @ {force_price:.2f}")
                     forced_actions.append(f"limit {force_qty_precise:.4f}@{force_price:.2f}")
                     take_orders_success = True
-        if not take_orders_success and force_qty_target > 0:
+        if not take_orders_success and force_qty_target > 0 and not has_stop:
             try:
                 force_qty_precise = float(exchange.amount_to_precision(exchange_symbol, force_qty_target))
             except Exception:
@@ -17499,9 +17499,11 @@ def run_cycle():
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
     prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
-    current_cycle_no = safe_int(globals().get("_CURRENT_CYCLE_NUMBER"))
+    current_cycle_no = safe_int(_CURRENT_CYCLE_NUMBER)
     ai_offline_active = (
-        _AI_OFFLINE_ACTIVE_CYCLE is not None and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == current_cycle_no
+        current_cycle_no is not None
+        and _AI_OFFLINE_ACTIVE_CYCLE is not None
+        and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == current_cycle_no
     )
     atr_ratio_median: float | None = None
     vol_source = "hints"
@@ -17665,20 +17667,28 @@ def run_cycle():
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
+    interval_floor = float(MIN_NEXT_RUN_MINUTES)
+    interval_cap = float(MAX_NEXT_RUN_FROM_START_MINUTES)
     if rate_limit_backoff:
         min_delay_override = 25.0
         max_delay_override = 55.0
         log(f"[SCHED] rate-limit backoff active: bounds {min_delay_override}-{max_delay_override}m", Fore.LIGHTBLACK_EX)
+        interval_floor = max(interval_floor, min_delay_override)
+        interval_cap = min(interval_cap, max_delay_override)
     elif ai_offline_active:
-        min_delay_override = 5.0
-        max_delay_override = 40.0
+        min_delay_override = 10.0
+        max_delay_override = 35.0
         log(
             f"[SCHED] AI offline bounds applied: {min_delay_override}-{max_delay_override}m window while offline mode active",
             Fore.LIGHTBLACK_EX,
         )
+        interval_floor = max(interval_floor, min_delay_override)
+        interval_cap = min(interval_cap, max_delay_override)
     else:
         min_delay_override = float(MIN_NEXT_RUN_MINUTES)
         max_delay_override = float(MAX_NEXT_RUN_FROM_START_MINUTES)
+    if interval_cap < interval_floor:
+        interval_cap = interval_floor
     min_delay = max(0.0, min_delay_override)
     max_delay = max(
         0.0,
@@ -17690,27 +17700,32 @@ def run_cycle():
         prev_interval = prev_interval_from_start
         if prev_interval is None or not math.isfinite(prev_interval) or prev_interval <= 0:
             prev_interval = float(DEFAULT_NEXT_RUN_MINUTES)
-        prev_interval = min(
-            max(float(prev_interval), float(MIN_NEXT_RUN_MINUTES)),
-            float(MAX_NEXT_RUN_FROM_START_MINUTES),
-        )
+        prev_interval = min(max(float(prev_interval), interval_floor), interval_cap)
 
         delta = 0.0
         volatility_note = ""
         thresholds_note = ""
         diff_value: float | None = None
+        diff_cycle: float | None = None
+        diff_intrabar: float | None = None
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
             base_ref = prev_volatility_ratio if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else atr_ratio_median
             base_tol = max(0.0001, base_ref * 0.03 if base_ref and math.isfinite(base_ref) else 0.0001)
             strong_threshold = max(base_tol * 2.0, 0.001)
             thresholds_note = f"thr5={base_tol:.4f}, thr10={strong_threshold:.4f}, src={vol_source}"
             diff_candidate = None
+            if prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
+                diff_cycle = atr_ratio_median - prev_volatility_ratio
             if bar_deltas:
                 bar_deltas.sort()
-                diff_candidate = bar_deltas[len(bar_deltas) // 2]
+                diff_intrabar = bar_deltas[len(bar_deltas) // 2]
                 thresholds_note += "+intrabar"
-            elif prev_volatility_ratio is not None and math.isfinite(prev_volatility_ratio):
-                diff_candidate = atr_ratio_median - prev_volatility_ratio
+            if diff_cycle is not None and math.isfinite(diff_cycle) and diff_intrabar is not None and math.isfinite(diff_intrabar):
+                diff_candidate = diff_cycle if abs(diff_cycle) >= abs(diff_intrabar) else diff_intrabar
+            elif diff_cycle is not None and math.isfinite(diff_cycle):
+                diff_candidate = diff_cycle
+            elif diff_intrabar is not None and math.isfinite(diff_intrabar):
+                diff_candidate = diff_intrabar
             if diff_candidate is not None and math.isfinite(diff_candidate):
                 diff = diff_candidate
                 diff_value = diff
@@ -17727,16 +17742,16 @@ def run_cycle():
 
         target_interval = prev_interval + delta
         target_interval = round(target_interval / 5.0) * 5.0
-        target_interval = min(
-            max(target_interval, float(MIN_NEXT_RUN_MINUTES)),
-            float(MAX_NEXT_RUN_FROM_START_MINUTES),
-        )
+        target_interval = min(max(target_interval, interval_floor), interval_cap)
         fallback_interval_from_start = target_interval
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
         diff_text = f"{diff_value:.4f}" if diff_value is not None and math.isfinite(diff_value) else "n/a"
+        cycle_diff_text = f"{diff_cycle:.4f}" if diff_cycle is not None and math.isfinite(diff_cycle) else "n/a"
+        intrabar_diff_text = f"{diff_intrabar:.4f}" if diff_intrabar is not None and math.isfinite(diff_intrabar) else "n/a"
         timing_debug_parts.append(
             f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
-            f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; {thresholds_note})"
+            f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; "
+            f"diff_cycle={cycle_diff_text}, diff_intrabar={intrabar_diff_text}; {thresholds_note})"
         )
         if volatility_sample_note:
             timing_debug_parts.append(f"[samples] {volatility_sample_note}")
