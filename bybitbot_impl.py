@@ -826,6 +826,10 @@ PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 5.0
 MAX_NEXT_RUN_FROM_START_MINUTES: float = 45.0
+ONLINE_MIN_NEXT_RUN_MINUTES: float | None = None
+ONLINE_MAX_NEXT_RUN_MINUTES: float | None = None
+OFFLINE_MIN_NEXT_RUN_MINUTES: float | None = None
+OFFLINE_MAX_NEXT_RUN_MINUTES: float | None = None
 PSEUDOTRAIL_MAX_TAKE_EXTENDS: int = 2
 PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT: float = 0.5
 PSEUDOTRAIL_POSITION_STALE_PCT: float = 0.03
@@ -3950,6 +3954,32 @@ def refresh_settings():
     PSEUDOTRAIL_MIN_IMPROVE_ATR = max(0.0, PSEUDOTRAIL_MIN_IMPROVE_ATR)
     PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
     PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
+    # Scheduling bounds (online/offline) from .env
+    global MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES
+    global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
+    global OFFLINE_MIN_NEXT_RUN_MINUTES, OFFLINE_MAX_NEXT_RUN_MINUTES
+    try:
+        MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(MIN_NEXT_RUN_MINUTES)))
+    except (TypeError, ValueError):
+        MIN_NEXT_RUN_MINUTES = 5.0
+    try:
+        MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(MAX_NEXT_RUN_FROM_START_MINUTES)))
+    except (TypeError, ValueError):
+        MAX_NEXT_RUN_FROM_START_MINUTES = 45.0
+    MIN_NEXT_RUN_MINUTES = max(1.0, MIN_NEXT_RUN_MINUTES)
+    MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES)
+    def _env_float(name: str) -> float | None:
+        raw = os.getenv(name)
+        if raw is None or str(raw).strip() == "":
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+    ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or 10.0
+    ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or 45.0
+    OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or 5.0
+    OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or 35.0
     IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
     if not isinstance(_TRAIL_PROTECTION, dict):
         _TRAIL_PROTECTION = {}
@@ -17710,17 +17740,21 @@ def run_cycle():
         interval_floor = max(interval_floor, min_delay_override)
         interval_cap = min(interval_cap, max_delay_override)
     elif ai_offline_active:
-        min_delay_override = 10.0
-        max_delay_override = 35.0
+        # Offline mode: use OFFLINE_* bounds from .env (defaults 5-35m)
+        min_delay_override = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
+        max_delay_override = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
         log(
-            f"[SCHED] AI offline bounds applied: {min_delay_override}-{max_delay_override}m window while offline mode active",
+            f"[SCHED] AI offline bounds applied: {min_delay_override:.1f}-{max_delay_override:.1f}m window while offline mode active",
             Fore.LIGHTBLACK_EX,
         )
         interval_floor = max(interval_floor, min_delay_override)
         interval_cap = min(interval_cap, max_delay_override)
     else:
-        min_delay_override = float(MIN_NEXT_RUN_MINUTES)
-        max_delay_override = float(MAX_NEXT_RUN_FROM_START_MINUTES)
+        # Online mode: use ONLINE_* bounds from .env (defaults 10-45m)
+        online_min = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
+        online_max = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
+        min_delay_override = online_min
+        max_delay_override = online_max
     if interval_cap < interval_floor:
         interval_cap = interval_floor
     min_delay = max(0.0, min_delay_override)
