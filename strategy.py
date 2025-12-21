@@ -1,12 +1,105 @@
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable, Sequence
 
 
-WATCHLIST = [
+def _default_spec() -> dict[str, Any]:
+    return {
+        "version": "1.0",
+        "context": {
+            "universe": [
+                "BTC/USDT",
+                "ETH/USDT",
+                "SOL/USDT",
+                "XRP/USDT",
+                "DOGE/USDT",
+                "TON/USDT",
+                "ADA/USDT",
+                "AVAX/USDT",
+            ],
+            "timeframes": {
+                "primary": "30m",
+                "secondary": "4h",
+                "open_interest": "1h",
+                "funding": "8h",
+            },
+            "news": {"positive": 0.55, "negative": -0.55, "neutral_band": 0.15},
+        },
+        "thresholds": {
+            "atr_sigma_hot": 2.5,
+            "atr_limit_multiplier": 1.7,
+            "atr_range_ratio": 0.008,
+            "atr_extreme_ratio": 0.025,
+            "oi_change_pct": 0.012,
+        },
+        "sizing": {
+            "risk_multiplier": {"trend": 1.15, "counter": 0.55, "flat": 0.4},
+            "min_pct": 0.0025,
+            "max_pct": 0.05,
+        },
+        "rules": {
+            "trend": {
+                "long": {
+                    "rsi_max": 65,
+                    "funding_min": -0.0002,
+                    "news_block": ["negative"],
+                    "require_oi_up": True,
+                    "confidence": {"market": 0.82, "limit": 0.78},
+                },
+                "short": {
+                    "rsi_min": 35,
+                    "funding_max": 0.0002,
+                    "news_block": ["positive"],
+                    "require_oi_up": True,
+                    "confidence": {"market": 0.82, "limit": 0.78},
+                },
+            },
+            "countertrend": {
+                "long": {"rsi_max": 30, "news_block": ["negative"], "confidence": 0.72},
+                "short": {"rsi_min": 70, "news_block": ["positive"], "confidence": 0.72},
+            },
+            "flat": {"rsi_band": [45, 55]},
+        },
+        "events": {
+            "limit_gap_pct": 0.002,
+            "limit_offsets": {"buy": 0.998, "sell": 1.002},
+            "tp": {"atr_multiple": 2.0, "rsi_long": 70, "rsi_short": 30},
+            "hedge": {"funding_flip": 0.0001, "size_pct": 0.5},
+            "modify_position": {
+                "rsi_long": [40, 65],
+                "rsi_short": [35, 60],
+                "confidence": 0.58,
+                "scale": 0.5,
+            },
+        },
+    }
+
+
+def _load_spec() -> dict[str, Any]:
+    default_spec = _default_spec()
+    spec_path = Path(__file__).with_name("strategy_spec.json")
+    try:
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return default_spec
+
+
+SPEC = _load_spec()
+CONTEXT_SPEC = SPEC.get("context", {})
+THRESHOLDS = SPEC.get("thresholds", {})
+RULES_SPEC = SPEC.get("rules", {})
+SIZE_SPEC = SPEC.get("sizing", {})
+EVENTS_SPEC = SPEC.get("events", {})
+
+WATCHLIST = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
@@ -25,6 +118,24 @@ INDICATORS = [
     "funding_rate",
     "open_interest",
 ]
+
+NEWS_THRESHOLDS = CONTEXT_SPEC.get("news", {})
+NEWS_POSITIVE = float(NEWS_THRESHOLDS.get("positive", 0.55))
+NEWS_NEGATIVE = float(NEWS_THRESHOLDS.get("negative", -0.55))
+NEWS_NEUTRAL_BAND = float(NEWS_THRESHOLDS.get("neutral_band", 0.15))
+
+ATR_SIGMA_HOT = float(THRESHOLDS.get("atr_sigma_hot", 2.5))
+ATR_LIMIT_MULT = float(THRESHOLDS.get("atr_limit_multiplier", 1.7))
+ATR_RANGE_RATIO = float(THRESHOLDS.get("atr_range_ratio", 0.008))
+ATR_EXTREME_RATIO = float(THRESHOLDS.get("atr_extreme_ratio", 0.025))
+OI_CHANGE_THRESHOLD = float(THRESHOLDS.get("oi_change_pct", 0.012))
+
+SIZING_MULTIPLIERS = SIZE_SPEC.get(
+    "risk_multiplier",
+    {"trend": 1.15, "counter": 0.55, "flat": 0.4},
+)
+SIZE_MIN = float(SIZE_SPEC.get("min_pct", 0.0025))
+SIZE_MAX = float(SIZE_SPEC.get("max_pct", 0.05))
 
 
 def _normalize_side(side: str | None) -> str | None:
@@ -57,11 +168,11 @@ def _is_reduce_only(order: dict[str, Any]) -> bool:
 def _news_bias(score: float | None) -> str:
     if score is None or not math.isfinite(score):
         return "neutral"
-    if score >= 0.55:
+    if score >= NEWS_POSITIVE:
         return "positive"
-    if score <= -0.55:
+    if score <= NEWS_NEGATIVE:
         return "negative"
-    if abs(score) <= 0.15:
+    if abs(score) <= NEWS_NEUTRAL_BAND:
         return "neutral"
     return "uncertain"
 
@@ -106,9 +217,9 @@ def _open_interest_trend(values: Sequence[float]) -> str:
     if head == 0:
         head = 1e-9
     change = (tail - head) / abs(head)
-    if change > 0.012:
+    if change > OI_CHANGE_THRESHOLD:
         return "up"
-    if change < -0.012:
+    if change < -OI_CHANGE_THRESHOLD:
         return "down"
     return "flat"
 
@@ -148,7 +259,7 @@ class IndicatorBlock:
             return False
         if not math.isfinite(self.atr):
             return False
-        return self.atr > self.atr_mean * 1.7
+        return self.atr > self.atr_mean * ATR_LIMIT_MULT
 
 
 @dataclass
@@ -204,9 +315,12 @@ class StrategyContext:
         if not self.price or not math.isfinite(self.price):
             return False
         spread = abs(self.tf30.ema20 - self.tf30.ema50)
-        if spread / self.price >= 0.003:
+        flat_rule = RULES_SPEC.get("flat", {})
+        spread_limit = float(flat_rule.get("ema_spread_pct", 0.003))
+        if spread / self.price >= spread_limit:
             return False
-        if not (45 <= self.tf30.rsi <= 55):
+        lower, upper = (flat_rule.get("rsi_band") or [45, 55])[:2]
+        if not (lower <= self.tf30.rsi <= upper):
             return False
         if self.tf30.atr_mean and self.tf30.atr > self.tf30.atr_mean:
             return False
@@ -214,9 +328,12 @@ class StrategyContext:
 
     @property
     def countertrend_bias(self) -> str | None:
-        if self.tf30.rsi <= 30:
+        counter_rules = RULES_SPEC.get("countertrend", {})
+        long_rule = counter_rules.get("long", {})
+        short_rule = counter_rules.get("short", {})
+        if self.tf30.rsi <= float(long_rule.get("rsi_max", 30)):
             return "long"
-        if self.tf30.rsi >= 70:
+        if self.tf30.rsi >= float(short_rule.get("rsi_min", 70)):
             return "short"
         return None
 
@@ -275,14 +392,10 @@ class StrategyEvent:
 
 def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -> float:
     base = ctx.risk_pct or 0.01
-    if regime == "trend":
-        base *= 1.15
-    elif regime == "counter":
-        base *= 0.55
-    elif regime == "flat":
-        base *= 0.4
+    multiplier = float(SIZING_MULTIPLIERS.get(regime, 1.0))
+    base *= multiplier
     base *= scale
-    base = max(0.0025, min(0.05, base))
+    base = max(SIZE_MIN, min(SIZE_MAX, base))
     return round(base, 6)
 
 
@@ -291,7 +404,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         return StrategyEvent("skip", reason="symbol outside manual watchlist", confidence=0.0)
     if ctx.news_bias == "uncertain":
         return StrategyEvent("skip", reason="news uncertain, skip entries", confidence=0.0)
-    if ctx.atr_sigma > 2.5:
+    if ctx.atr_sigma > ATR_SIGMA_HOT:
         return StrategyEvent("skip", reason="atr spike, unsafe to open", confidence=0.0)
 
     oi_up = ctx.oi_trend == "up"
@@ -299,13 +412,17 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     news = ctx.news_bias
     trend = ctx.trend_bias
     base_reason: list[str] = []
+    trend_rules = RULES_SPEC.get("trend", {})
+    long_rule = trend_rules.get("long", {})
+    short_rule = trend_rules.get("short", {})
 
     if trend == "long":
+        confidence_map = long_rule.get("confidence", {})
         cond = (
-            ctx.tf30.rsi < 65
-            and news != "negative"
-            and funding >= -0.0002
-            and oi_up
+            ctx.tf30.rsi <= float(long_rule.get("rsi_max", 65))
+            and news not in set(long_rule.get("news_block", []))
+            and funding >= float(long_rule.get("funding_min", -0.0002))
+            and (not long_rule.get("require_oi_up", True) or oi_up)
         )
         if cond:
             order_type = "limit" if (ctx.tf30.atr_is_hot or ctx.is_flat) else "market"
@@ -316,22 +433,23 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 base_reason.append("news positive bias")
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
-            reason = "; ".join(base_reason) or "trend long confluence"
+                reason = "; ".join(base_reason) or "trend long confluence"
             return StrategyEvent(
                 f"open_{order_type}",
                 side="buy",
                 order_type=order_type,
                 reason=reason,
                 size_pct=_size_for_regime(ctx, "trend"),
-                confidence=0.82 if order_type == "market" else 0.78,
+                confidence=float(confidence_map.get("market" if order_type == "market" else "limit", 0.8)),
                 metadata={"regime": "trend"},
             )
     elif trend == "short":
+        confidence_map = short_rule.get("confidence", {})
         cond = (
-            ctx.tf30.rsi > 35
-            and news != "positive"
-            and funding <= 0.0002
-            and oi_up
+            ctx.tf30.rsi >= float(short_rule.get("rsi_min", 35))
+            and news not in set(short_rule.get("news_block", []))
+            and funding <= float(short_rule.get("funding_max", 0.0002))
+            and (not short_rule.get("require_oi_up", True) or oi_up)
         )
         if cond:
             order_type = "limit" if (ctx.tf30.atr_is_hot or ctx.is_flat) else "market"
@@ -342,14 +460,14 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 base_reason.append("news negative bias")
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
-            reason = "; ".join(base_reason) or "trend short confluence"
+                reason = "; ".join(base_reason) or "trend short confluence"
             return StrategyEvent(
                 f"open_{order_type}",
                 side="sell",
                 order_type=order_type,
                 reason=reason,
                 size_pct=_size_for_regime(ctx, "trend"),
-                confidence=0.82 if order_type == "market" else 0.78,
+                confidence=float(confidence_map.get("market" if order_type == "market" else "limit", 0.8)),
                 metadata={"regime": "trend"},
             )
 
@@ -359,26 +477,39 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         return None
     atr_calm = (ctx.tf30.atr_mean and ctx.tf30.atr <= ctx.tf30.atr_mean) or False
     oi_flat = ctx.oi_trend != "up"
-    if counter == "long" and news != "negative" and atr_calm and oi_flat:
-        reason = "countertrend long: RSI<30, ATR cooling, OI not rising"
+    counter_rules = RULES_SPEC.get("countertrend", {})
+    long_rule_ct = counter_rules.get("long", {})
+    short_rule_ct = counter_rules.get("short", {})
+    if (
+        counter == "long"
+        and news not in set(long_rule_ct.get("news_block", []))
+        and atr_calm
+        and oi_flat
+    ):
+        reason = "countertrend long: RSI extreme, ATR cooling, OI not rising"
         return StrategyEvent(
             "open_limit",
             side="buy",
             order_type="limit",
             reason=reason,
             size_pct=_size_for_regime(ctx, "counter"),
-            confidence=0.72,
+            confidence=float(long_rule_ct.get("confidence", 0.72)),
             metadata={"regime": "counter"},
         )
-    if counter == "short" and news != "positive" and atr_calm and oi_flat:
-        reason = "countertrend short: RSI>70, ATR cooling, OI not rising"
+    if (
+        counter == "short"
+        and news not in set(short_rule_ct.get("news_block", []))
+        and atr_calm
+        and oi_flat
+    ):
+        reason = "countertrend short: RSI extreme, ATR cooling, OI not rising"
         return StrategyEvent(
             "open_limit",
             side="sell",
             order_type="limit",
             reason=reason,
             size_pct=_size_for_regime(ctx, "counter"),
-            confidence=0.72,
+            confidence=float(short_rule_ct.get("confidence", 0.72)),
             metadata={"regime": "counter"},
         )
     return None
@@ -395,7 +526,10 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
         ema_cross = ctx.tf30.ema20 < ctx.tf30.ema50
     else:
         ema_cross = ctx.tf30.ema20 > ctx.tf30.ema50
-    rsi_extreme = (side == "long" and ctx.tf30.rsi >= 70) or (side == "short" and ctx.tf30.rsi <= 30)
+    tp_spec = EVENTS_SPEC.get("tp", {})
+    rsi_long_tp = float(tp_spec.get("rsi_long", 70))
+    rsi_short_tp = float(tp_spec.get("rsi_short", 30))
+    rsi_extreme = (side == "long" and ctx.tf30.rsi >= rsi_long_tp) or (side == "short" and ctx.tf30.rsi <= rsi_short_tp)
     news_against = (side == "long" and ctx.news_bias == "negative") or (side == "short" and ctx.news_bias == "positive")
     oi_flip = ctx.oi_trend == ("down" if side == "long" else "up")
     if ema_cross or (rsi_extreme and news_against) or oi_flip:
@@ -427,7 +561,9 @@ def _should_hedge(ctx: StrategyContext) -> StrategyEvent | None:
         return None
     news_against = (side == "long" and ctx.news_bias == "negative") or (side == "short" and ctx.news_bias == "positive")
     funding = ctx.funding_rate or 0.0
-    funding_flip = (side == "long" and funding < -0.0001) or (side == "short" and funding > 0.0001)
+    hedge_spec = EVENTS_SPEC.get("hedge", {})
+    funding_threshold = float(hedge_spec.get("funding_flip", 0.0001))
+    funding_flip = (side == "long" and funding < -funding_threshold) or (side == "short" and funding > funding_threshold)
     oi_drop = ctx.oi_trend == "down"
     if not (news_against or funding_flip or oi_drop):
         return None
@@ -445,7 +581,7 @@ def _should_hedge(ctx: StrategyContext) -> StrategyEvent | None:
         side=hedge_side,
         order_type="market",
         reason=reason,
-        size_pct=min(0.5, _size_for_regime(ctx, "counter")),
+        size_pct=min(float(hedge_spec.get("size_pct", 0.5)), _size_for_regime(ctx, "counter")),
         confidence=0.6,
     )
 
@@ -453,6 +589,8 @@ def _should_hedge(ctx: StrategyContext) -> StrategyEvent | None:
 def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
     # Pending limits management when flat
     entries = ctx.entry_orders
+    limit_gap_pct = float(EVENTS_SPEC.get("limit_gap_pct", 0.002))
+    limit_offsets = EVENTS_SPEC.get("limit_offsets", {"buy": 0.998, "sell": 1.002})
     if not ctx.has_position:
         if not entries:
             return None
@@ -461,8 +599,10 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
         if ctx.trend_bias is None and ctx.countertrend_bias is None:
             return StrategyEvent("cancel_limit", reason="trend flipped vs pending limit", confidence=0.55)
         gap = ctx.price_gap_to_entry
-        if gap and gap >= 0.002:
-            new_price = ctx.price * (0.998 if entries[0].get("side", "").lower() == "buy" else 1.002)
+        if gap and gap >= limit_gap_pct:
+            first_side = entries[0].get("side", "").lower()
+            offset = float(limit_offsets.get("buy" if first_side == "buy" else "sell", 1.0))
+            new_price = ctx.price * offset if offset > 0 else ctx.price
             meta = {
                 "new_price": new_price,
                 "order_ids": [order.get("id") for order in entries],
@@ -472,8 +612,10 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
 
     # Manage existing position: place TP or update protection
     side = ctx.position_side
-    if side == "long" and ctx.tf30.rsi >= 70:
-        tp_price = ctx.price + (ctx.tf30.atr * 2 if math.isfinite(ctx.tf30.atr) else 0)
+    tp_spec = EVENTS_SPEC.get("tp", {})
+    atr_multiple = float(tp_spec.get("atr_multiple", 2.0))
+    if side == "long" and ctx.tf30.rsi >= float(tp_spec.get("rsi_long", 70)):
+        tp_price = ctx.price + (ctx.tf30.atr * atr_multiple if math.isfinite(ctx.tf30.atr) else 0)
         return StrategyEvent(
             "place_limit_TP",
             side="sell",
@@ -482,8 +624,8 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
             confidence=0.62,
             metadata={"tp_price": tp_price},
         )
-    if side == "short" and ctx.tf30.rsi <= 30:
-        tp_price = ctx.price - (ctx.tf30.atr * 2 if math.isfinite(ctx.tf30.atr) else 0)
+    if side == "short" and ctx.tf30.rsi <= float(tp_spec.get("rsi_short", 30)):
+        tp_price = ctx.price - (ctx.tf30.atr * atr_multiple if math.isfinite(ctx.tf30.atr) else 0)
         return StrategyEvent(
             "place_limit_TP",
             side="buy",
@@ -493,28 +635,35 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
             metadata={"tp_price": tp_price},
         )
     regime = ctx.trend_bias
+    modify_spec = EVENTS_SPEC.get("modify_position", {})
     if regime == side:
         rsi = ctx.tf30.rsi
-        if side == "long" and 40 <= rsi <= 65 and ctx.oi_trend == "up":
-            size = _size_for_regime(ctx, "trend", scale=0.5)
-            return StrategyEvent(
-                "modify_position",
-                side="buy",
-                order_type="market",
-                reason="trend strengthening, scale in long",
-                confidence=0.58,
-                metadata={"direction": "increase", "size_pct": size},
-            )
-        if side == "short" and 35 <= rsi <= 60 and ctx.oi_trend == "up":
-            size = _size_for_regime(ctx, "trend", scale=0.5)
-            return StrategyEvent(
-                "modify_position",
-                side="sell",
-                order_type="market",
-                reason="trend strengthening, scale in short",
-                confidence=0.58,
-                metadata={"direction": "increase", "size_pct": size},
-            )
+        conf_value = float(modify_spec.get("confidence", 0.58))
+        scale = float(modify_spec.get("scale", 0.5))
+        if side == "long":
+            lower, upper = (modify_spec.get("rsi_long") or [40, 65])[:2]
+            if lower <= rsi <= upper and ctx.oi_trend == "up":
+                size = _size_for_regime(ctx, "trend", scale=scale)
+                return StrategyEvent(
+                    "modify_position",
+                    side="buy",
+                    order_type="market",
+                    reason="trend strengthening, scale in long",
+                    confidence=conf_value,
+                    metadata={"direction": "increase", "size_pct": size},
+                )
+        elif side == "short":
+            lower, upper = (modify_spec.get("rsi_short") or [35, 60])[:2]
+            if lower <= rsi <= upper and ctx.oi_trend == "up":
+                size = _size_for_regime(ctx, "trend", scale=scale)
+                return StrategyEvent(
+                    "modify_position",
+                    side="sell",
+                    order_type="market",
+                    reason="trend strengthening, scale in short",
+                    confidence=conf_value,
+                    metadata={"direction": "increase", "size_pct": size},
+                )
     return None
 
 
@@ -545,10 +694,11 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
 
 def _limit_price(event: StrategyEvent, ctx: StrategyContext) -> float:
     price = ctx.price or 0.0
+    offsets = EVENTS_SPEC.get("limit_offsets", {"buy": 0.998, "sell": 1.002})
     if event.side == "buy":
-        return round(price * 0.998, 6)
+        return round(price * float(offsets.get("buy", 0.998)), 6)
     if event.side == "sell":
-        return round(price * 1.002, 6)
+        return round(price * float(offsets.get("sell", 1.002)), 6)
     return price
 
 
@@ -580,7 +730,7 @@ def apply_event(event: StrategyEvent, ctx: StrategyContext) -> dict[str, Any]:
         decision["action"] = "open"
         decision["side"] = event.side
         decision["order_type"] = "market"
-        decision["notional_pct"] = min(0.5, event.size_pct)
+        decision["notional_pct"] = event.size_pct
         decision["reason"] = event.reason
     elif event.name == "close_position":
         decision["action"] = "close"
