@@ -11273,6 +11273,152 @@ def _describe_size_change(initial_amount: float, final_amount: float, tolerance:
     return f"size {before} -> {after}"
 
 
+def _select_best_protection_levels(
+    position_payload: dict[str, Any] | None,
+    orders,
+) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+    """
+    Returns (entry_price, ref_price, qty, best_stop, best_take).
+
+    best_stop: closest protective stop-loss on the loss side of the entry.
+    best_take: closest take-profit on the profit side of the entry.
+    """
+    if not isinstance(position_payload, dict):
+        return None, None, None, None, None
+    qty = safe_float(position_payload.get("amount") or position_payload.get("contracts"))
+    side_raw = str(position_payload.get("side") or "").lower()
+    is_long = side_raw in {"buy", "long"} or (qty is not None and qty > 0)
+
+    entry_price = safe_float(
+        position_payload.get("entryPrice")
+        or position_payload.get("avgEntryPrice")
+        or position_payload.get("average")
+        or position_payload.get("avgEntryPrice")
+    )
+    mark_price = safe_float(
+        position_payload.get("markPrice")
+        or position_payload.get("mark_price")
+        or position_payload.get("lastPrice")
+    )
+    ref_price = mark_price if mark_price is not None and math.isfinite(mark_price) else entry_price
+
+    categorized = _categorize_protection_orders(orders)
+    stop_candidates = [price for price, _amt in categorized.get("stop", []) if price is not None and math.isfinite(price)]
+    take_candidates = [price for price, _amt in categorized.get("take_profit", []) if price is not None and math.isfinite(price)]
+
+    if entry_price is None or not math.isfinite(entry_price):
+        return None, ref_price, qty, None, None
+
+    best_stop = None
+    if is_long:
+        below = [p for p in stop_candidates if p < entry_price - 1e-9]
+        if below:
+            best_stop = max(below)  # closest below entry
+    else:
+        above = [p for p in stop_candidates if p > entry_price + 1e-9]
+        if above:
+            best_stop = min(above)  # closest above entry
+
+    best_take = None
+    if is_long:
+        above = [p for p in take_candidates if p > entry_price + 1e-9]
+        if above:
+            best_take = min(above)  # closest above entry
+    else:
+        below = [p for p in take_candidates if p < entry_price - 1e-9]
+        if below:
+            best_take = max(below)  # closest below entry
+
+    return entry_price, ref_price, qty, best_stop, best_take
+
+
+def _format_progress_to_levels(
+    position_payload: dict[str, Any] | None,
+    orders,
+) -> tuple[str | None, dict[str, float | None]]:
+    """
+    Returns (human_text, metrics) where metrics contain:
+    - progress_target_pct: 0..inf (profit progress vs closest TP)
+    - risk_used_pct: 0..inf (drawdown vs closest SL)
+    - pnl_usdt: unrealized pnl if available
+    """
+    entry, ref_px, qty, stop_px, take_px = _select_best_protection_levels(position_payload, orders)
+    if entry is None or ref_px is None or not math.isfinite(entry) or not math.isfinite(ref_px) or entry <= 0:
+        return None, {"progress_target_pct": None, "risk_used_pct": None, "pnl_usdt": None}
+    qty_val = qty if qty is not None and math.isfinite(qty) else None
+    side_raw = str((position_payload or {}).get("side") or "").lower()
+    is_long = side_raw in {"buy", "long"} or (qty_val is not None and qty_val > 0)
+
+    pnl_unreal = safe_float((position_payload or {}).get("unrealizedPnl") or ((position_payload or {}).get("raw") or {}).get("unrealisedPnl"))
+
+    # Directional move from entry
+    move = (ref_px - entry) if is_long else (entry - ref_px)
+
+    progress_pct = None
+    if take_px is not None and math.isfinite(take_px) and take_px > 0:
+        target_dist = (take_px - entry) if is_long else (entry - take_px)
+        if target_dist and math.isfinite(target_dist) and target_dist > 0:
+            progress_pct = max(0.0, (move / target_dist) * 100.0)
+
+    risk_used_pct = None
+    if stop_px is not None and math.isfinite(stop_px) and stop_px > 0:
+        risk_dist = (entry - stop_px) if is_long else (stop_px - entry)
+        if risk_dist and math.isfinite(risk_dist) and risk_dist > 0:
+            drawdown = max(0.0, (-move))
+            risk_used_pct = max(0.0, (drawdown / risk_dist) * 100.0)
+
+    parts: list[str] = []
+    if progress_pct is not None and math.isfinite(progress_pct):
+        parts.append(f"+{progress_pct:.0f}% target")
+    if risk_used_pct is not None and math.isfinite(risk_used_pct):
+        parts.append(f"{risk_used_pct:.0f}% risk")
+    if pnl_unreal is not None and math.isfinite(pnl_unreal):
+        parts.append(f"PnL {pnl_unreal:+.2f} USDT")
+
+    text = "; ".join(parts) if parts else None
+    return text, {"progress_target_pct": progress_pct, "risk_used_pct": risk_used_pct, "pnl_usdt": pnl_unreal}
+
+
+def _format_close_reason(
+    initial_position_payload: dict[str, Any] | None,
+    close_price: float | None,
+    orders_before_close,
+) -> str | None:
+    entry, _ref_px, qty, stop_px, take_px = _select_best_protection_levels(initial_position_payload, orders_before_close)
+    if entry is None or close_price is None or qty is None:
+        return None
+    if not (math.isfinite(entry) and math.isfinite(close_price) and math.isfinite(qty)):
+        return None
+    if abs(qty) <= 1e-12:
+        return None
+    side_raw = str((initial_position_payload or {}).get("side") or "").lower()
+    is_long = side_raw in {"buy", "long"} or qty > 0
+    pnl = (close_price - entry) * abs(qty) if is_long else (entry - close_price) * abs(qty)
+
+    risk_usdt = None
+    if stop_px is not None and math.isfinite(stop_px):
+        risk_dist = (entry - stop_px) if is_long else (stop_px - entry)
+        if risk_dist and math.isfinite(risk_dist) and risk_dist > 0:
+            risk_usdt = risk_dist * abs(qty)
+    target_usdt = None
+    if take_px is not None and math.isfinite(take_px):
+        target_dist = (take_px - entry) if is_long else (entry - take_px)
+        if target_dist and math.isfinite(target_dist) and target_dist > 0:
+            target_usdt = target_dist * abs(qty)
+
+    if pnl >= 0:
+        pct = None
+        if target_usdt is not None and math.isfinite(target_usdt) and target_usdt > 0:
+            pct = (pnl / target_usdt) * 100.0
+        pct_text = f", {pct:.0f}% target" if pct is not None and math.isfinite(pct) else ""
+        return f"profit {pnl:+.2f} USDT{pct_text}"
+    pct = None
+    if risk_usdt is not None and math.isfinite(risk_usdt) and risk_usdt > 0:
+        pct = (abs(pnl) / risk_usdt) * 100.0
+    pct_text = f", {pct:.0f}% risk" if pct is not None and math.isfinite(pct) else ""
+    return f"loss {pnl:+.2f} USDT{pct_text}"
+
+
 def _get_position_reference_price(payload: dict | None) -> float | None:
     if not isinstance(payload, dict):
         return None
@@ -14933,6 +15079,13 @@ def run_cycle():
     cycle_mode = (os.getenv("BYBITBOT_CYCLE_MODE") or "").strip()
     cycle_state = _load_cycle_state()
     rate_limit_backoff = bool((cycle_state or {}).get("rate_limit_backoff"))
+    try:
+        provider_now = (_current_ai_provider() or "").strip().lower()
+        primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
+        if provider_now and primary_provider and provider_now != primary_provider:
+            rate_limit_backoff = True
+    except Exception:
+        pass
     # Preserve previous per-symbol unrealized PnL for pseudo-trailing decisions this cycle.
     prev_unreal_map = cycle_state.get("positions_unrealized") if isinstance(cycle_state, dict) else {}
     try:
@@ -15996,8 +16149,34 @@ def run_cycle():
                         Fore.YELLOW,
                     )
                 else:
-                    try:
-                        dec = ai_decision(
+                    def _offline_decision_fallback(note: str) -> dict[str, Any]:
+                        _emit_ai_offline_notice(note)
+                        news_score_local = _offline_news_score(news_payload_symbol)
+                        try:
+                            max_new_left_local = max(
+                                0,
+                                min(
+                                    OFFLINE_MAX_NEW_POSITIONS,
+                                    max(0, (max_positions_limit or 0) - int(open_positions or 0)) if max_positions_limit else OFFLINE_MAX_NEW_POSITIONS,
+                                ),
+                            )
+                        except Exception:
+                            max_new_left_local = OFFLINE_MAX_NEW_POSITIONS
+                        decision = _offline_decision_for_symbol(
+                            sym,
+                            df,
+                            current_position=current_position,
+                            news_score=news_score_local,
+                            max_new_positions_left=max_new_left_local,
+                        )
+                        log(
+                            f"[AI OFFLINE] {sym}: action={decision.get('action')} side={decision.get('side') or 'n/a'} reason={(decision.get('reason') or '')[:140]}",
+                            Fore.YELLOW,
+                        )
+                        return decision
+
+                    def _call_ai_decision() -> dict[str, Any]:
+                        return ai_decision(
                             sym,
                             df,
                             equity,
@@ -16011,28 +16190,52 @@ def run_cycle():
                             initial_decision=initial_payload,
                             priority_symbol=has_priority_exposure,
                         )
-                    except RateLimitError:
+
+                    try:
+                        dec = _call_ai_decision()
+                    except RateLimitError as exc_rl:
                         rate_limit_backoff = True
                         rate_limit_error_hit = True
-                        current_provider = _current_ai_provider()
-                        provider_label = current_provider.upper()
-                        if current_provider == "openai":
-                            _switch_ai_provider_to_fallback("rate limit 429 (decision loop)")
-                            msg = (
-                                "[WARN] OpenAI rate limit 429: switching to DeepSeek, "
-                                "halving symbol cap and deferring next run to 25-55m window."
-                            )
+                        current_provider = (_current_ai_provider() or "").strip().lower()
+                        primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
+                        if current_provider and current_provider == primary_provider:
+                            _switch_ai_provider_to_fallback(f"rate limit 429 (decision loop): {type(exc_rl).__name__}")
+                            msg = "[WARN] Primary AI provider rate limit: switched to secondary and retrying once."
+                            log(msg, Fore.YELLOW)
+                            try:
+                                send_tg(msg)
+                            except Exception:
+                                pass
+                            try:
+                                dec = _call_ai_decision()
+                            except Exception as exc_retry:
+                                dec = _offline_decision_fallback(f"rate limit 429; secondary failed: {type(exc_retry).__name__}")
+                                ai_offline_mode = True
                         else:
-                            msg = (
-                                f"[WARN] {provider_label} rate limit 429: "
-                                "halving symbol cap and deferring next run to 25-55m window."
-                            )
-                        log(msg, Fore.YELLOW)
-                        try:
-                            send_tg(msg)
-                        except Exception:
-                            pass
-                        break
+                            dec = _offline_decision_fallback("rate limit 429 (secondary)")
+                            ai_offline_mode = True
+                    except Exception as exc_any:
+                        current_provider = (_current_ai_provider() or "").strip().lower()
+                        primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
+                        if current_provider and current_provider == primary_provider:
+                            rate_limit_backoff = True
+                            _switch_ai_provider_to_fallback(f"{type(exc_any).__name__} (decision loop)")
+                            msg = f"[WARN] Primary AI provider error ({type(exc_any).__name__}): switched to secondary and retrying once."
+                            log(msg, Fore.YELLOW)
+                            try:
+                                send_tg(msg)
+                            except Exception:
+                                pass
+                            try:
+                                dec = _call_ai_decision()
+                            except Exception as exc_retry:
+                                dec = _offline_decision_fallback(
+                                    f"primary failed: {type(exc_any).__name__}; secondary failed: {type(exc_retry).__name__}"
+                                )
+                                ai_offline_mode = True
+                        else:
+                            dec = _offline_decision_fallback(f"AI decision failed: {type(exc_any).__name__}")
+                            ai_offline_mode = True
 
             if not dec:
                 if initial_payload:
@@ -16146,6 +16349,7 @@ def run_cycle():
             preallocated_base_asset: str | None = None
             open_executed = False
             entry_errors: list[str] = []
+            entry_order_kind: str | None = None
             skip_conf_gate = bool(dec.get("ai_unavailable"))
             if action == "open" and not has_position and not skip_conf_gate:
                 base_asset_key = _extract_base_asset(sym)
@@ -16811,6 +17015,15 @@ def run_cycle():
                         total_margin_used = 0.0
                         side_lower = side.lower()
                         total_layers = len(normalized_entries)
+                        decision_regime = str(dec.get("regime") or "").strip().lower()
+                        use_stop_entry = bool(
+                            ai_offline_mode
+                            and decision_regime == "trend"
+                            and total_layers == 1
+                            and atrv is not None
+                            and math.isfinite(atrv)
+                            and atrv > 0
+                        )
                         for idx, (share_val, offset_val) in enumerate(normalized_entries):
                             try:
                                 weight = share_val / ratio_total if ratio_total else 0.0
@@ -16821,7 +17034,16 @@ def run_cycle():
                             target_qty = min(target_qty, remaining_qty)
                             if target_qty <= 0:
                                 continue
-                            layer_price = price - offset_val * atrv if side_lower == "buy" else price + offset_val * atrv
+                            trigger_price = None
+                            if use_stop_entry:
+                                trigger_offset = max(float(atrv) * 0.15, float(price) * 0.001) if price and atrv else None
+                                if trigger_offset and math.isfinite(trigger_offset) and trigger_offset > 0:
+                                    trigger_price = float(price) + trigger_offset if side_lower == "buy" else float(price) - trigger_offset
+                            layer_price = (
+                                trigger_price
+                                if use_stop_entry and trigger_price is not None
+                                else (price - offset_val * atrv if side_lower == "buy" else price + offset_val * atrv)
+                            )
                             if layer_price is None or not math.isfinite(layer_price) or layer_price <= 0:
                                 continue
                             duplicate_match, duplicate_qty = _has_active_limit_at_price(open_orders_symbol, side_lower, layer_price)
@@ -16897,6 +17119,11 @@ def run_cycle():
                                 order_notional = precise_qty * order_price
                             layer_params = dict(base_params)
                             layer_params = _sanitize_order_params_for_category(layer_params, category)
+                            kind_label = "limit"
+                            if use_stop_entry and trigger_price is not None:
+                                layer_params["triggerPrice"] = float(trigger_price)
+                                layer_params["triggerDirection"] = "above" if side_lower == "buy" else "below"
+                                kind_label = "stop"
                             log(
                                 f"[EX] create {sym} {side_lower}/limit qty={precise_qty:.6f} price={order_price:.4f} params={layer_params}",
                                 Fore.LIGHTBLACK_EX,
@@ -16915,10 +17142,12 @@ def run_cycle():
                             )
                             open_executed = True
                             entry_created = 1
+                            if entry_order_kind is None:
+                                entry_order_kind = f"{side_lower}_{kind_label}"
                             remaining_qty = max(0.0, qty - precise_qty)
                             total_margin_used = order_notional / symbol_leverage if symbol_leverage else order_notional
                             entry_summaries.append(
-                                f"{precise_qty:.4f} @ {order_price:.2f} ({'fallback' if fallback_used else 'limit'}, margin {total_margin_used:.2f} USDT)"
+                                f"{precise_qty:.4f} @ {order_price:.2f} ({'fallback' if fallback_used else kind_label}, margin {total_margin_used:.2f} USDT)"
                             )
                         log(f"✅ Ордеры {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
@@ -17035,11 +17264,12 @@ def run_cycle():
 
             # Enrich logs with regime and entry type when available.
             regime = (dec.get("regime") if isinstance(dec, dict) else None) or symbol_meta.get("regime") or "n/a"
-            entry_kind = None
-            if side_text in ("buy", "long"):
-                entry_kind = "buy_limit"
-            elif side_text in ("sell", "short"):
-                entry_kind = "sell_limit"
+            entry_kind = entry_order_kind
+            if not entry_kind:
+                if side_text in ("buy", "long"):
+                    entry_kind = "buy_limit"
+                elif side_text in ("sell", "short"):
+                    entry_kind = "sell_limit"
             # Helper to decorate base message with regime/entry meta.
             def _with_meta(base: str) -> str:
                 extra_bits: list[str] = []
@@ -17098,9 +17328,11 @@ def run_cycle():
                     direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                     close_price = _get_position_reference_price(current_position) or _get_position_reference_price(final_position_payload)
                     close_text = f" @ {close_price:.4f}" if close_price is not None else ""
+                    close_reason = _format_close_reason(current_position, close_price, initial_protection_orders)
+                    reason_suffix = f" ({close_reason})" if close_reason else ""
                     detail_entry = _with_meta(
                         f"[{sym}] - closed {direction or 'position'} {abs(initial_position_amount):.4f}{close_text} "
-                        f"(lev x{symbol_leverage})"
+                        f"(lev x{symbol_leverage}){reason_suffix}"
                     )
                 elif action == "manage":
                     orders_desc = (
@@ -17145,6 +17377,14 @@ def run_cycle():
                     detail_entry = _with_meta(f"[{sym}] - skip" + (f" - {reason}" if reason else ""))
                 else:
                     detail_entry = _with_meta(f"[{sym}] - skip" + (f" - {reason}" if reason else ""))
+
+            # Attach progress to TP/SL for holding/manage/open (when position remains open)
+            if detail_entry:
+                progress_payload = final_position_payload if abs(final_position_amount) > amount_tolerance else current_position
+                progress_orders = final_protection_orders if abs(final_position_amount) > amount_tolerance else initial_protection_orders
+                progress_text, _metrics = _format_progress_to_levels(progress_payload, progress_orders)
+                if progress_text and (abs(final_position_amount) > amount_tolerance or action in ("hold", "manage")):
+                    detail_entry = f"{detail_entry} ({progress_text})"
             if detail_entry and sym_confidence_text:
                 tag_suffix = f" {sym_confidence_tag}" if sym_confidence_tag else ""
                 detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
