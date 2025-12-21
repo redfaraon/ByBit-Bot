@@ -56,7 +56,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.0"
+BOT_VERSION = "1.3.1"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -16205,6 +16205,10 @@ def run_cycle():
                     continue
             manual_decision = None
             manual_ctx = None
+            ai_offline_mode = (
+                _AI_OFFLINE_ACTIVE_CYCLE is not None
+                and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
+            )
             manual_allowed = (not MASTER_DECISIONS_SHARE) or is_master_user
             manual_active = manual_allowed and (
                 MANUAL_STRATEGY_FORCE or (ai_offline_mode and OFFLINE_TRADING_ENABLED)
@@ -16263,10 +16267,6 @@ def run_cycle():
             dec = None
             master_decision_used = False
             rate_limit_error_hit = False
-            ai_offline_mode = (
-                _AI_OFFLINE_ACTIVE_CYCLE is not None
-                and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
-            )
             if ai_offline_mode and AI_OFFLINE_CANCEL_ENTRIES and open_orders_symbol:
                 cancelled_offline: list[str] = []
                 for order in open_orders_symbol:
