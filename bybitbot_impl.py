@@ -15714,6 +15714,40 @@ def run_cycle():
     trade_plan_failed = trade_plan is None
     for i, sym in enumerate(symbols_sequence, 1):
         has_priority_exposure = sym in position_symbols
+        # Snapshot current state for debugging: price, side, size, protection
+        current_position = positions_map.get(sym)
+        initial_position_amount = safe_float(
+            (current_position or {}).get("amount")
+            or (current_position or {}).get("contracts")
+        )
+        if initial_position_amount is None or not math.isfinite(initial_position_amount):
+            initial_position_amount = 0.0
+        px_ref = None
+        try:
+            px_ref = _get_position_reference_price(current_position)
+        except Exception:
+            px_ref = None
+        side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
+        px_text = f"{px_ref:.4f}" if isinstance(px_ref, (int, float)) and math.isfinite(px_ref or 0) else "n/a"
+        open_orders_symbol_snapshot = open_orders_prefetch.get(sym) or []
+        prot_orders_snapshot = _extract_protection_orders(open_orders_symbol_snapshot)
+        stop_levels: list[float] = []
+        take_levels: list[float] = []
+        for order in prot_orders_snapshot:
+            if not isinstance(order, dict):
+                continue
+            stop_price = safe_float(order.get("stopPrice") or order.get("triggerPrice"))
+            take_price = safe_float(order.get("takeProfitPrice") or order.get("price"))
+            if stop_price and math.isfinite(stop_price) and stop_price > 0:
+                stop_levels.append(stop_price)
+            if take_price and math.isfinite(take_price) and take_price > 0:
+                take_levels.append(take_price)
+        stop_text = ",".join(f"{lv:.4f}" for lv in sorted(stop_levels)) if stop_levels else "n/a"
+        take_text = ",".join(f"{lv:.4f}" for lv in sorted(take_levels)) if take_levels else "n/a"
+        log(
+            f"[{i}/{len(symbols_sequence)}] {sym}: px={px_text} side={side_label} qty={initial_position_amount:.4f} stop={stop_text} take={take_text}",
+            Fore.LIGHTBLACK_EX,
+        )
         if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET and not has_priority_exposure:
             log(f"⛔ Достигнут лимит {AI_HARD_STOP_BUDGET} токенов — дальнейший анализ остановлен", Fore.YELLOW)
             break
