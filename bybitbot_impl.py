@@ -4983,7 +4983,12 @@ def _offline_decision_for_symbol(
 
     if has_position:
         side_raw = str((current_position or {}).get("side") or "").lower()
-        pos_side = "buy" if side_raw in {"buy", "long"} or amt > 0 else "sell"
+        if side_raw in {"sell", "short"}:
+            pos_side = "sell"
+        elif side_raw in {"buy", "long"}:
+            pos_side = "buy"
+        else:
+            pos_side = "buy" if amt > 0 else "sell"
         close_side = "sell" if pos_side == "buy" else "buy"
 
         # Conservative exit rules (do not overtrade):
@@ -11410,13 +11415,13 @@ def _format_close_reason(
         pct = None
         if target_usdt is not None and math.isfinite(target_usdt) and target_usdt > 0:
             pct = (pnl / target_usdt) * 100.0
-        pct_text = f", {pct:.0f}% target" if pct is not None and math.isfinite(pct) else ""
-        return f"profit {pnl:+.2f} USDT{pct_text}"
+        pct_text = f", {pct:.0f}% цели" if pct is not None and math.isfinite(pct) else ""
+        return f"фиксация прибыли {pnl:+.2f} USDT{pct_text}"
     pct = None
     if risk_usdt is not None and math.isfinite(risk_usdt) and risk_usdt > 0:
         pct = (abs(pnl) / risk_usdt) * 100.0
-    pct_text = f", {pct:.0f}% risk" if pct is not None and math.isfinite(pct) else ""
-    return f"loss {pnl:+.2f} USDT{pct_text}"
+    pct_text = f", {pct:.0f}% риска" if pct is not None and math.isfinite(pct) else ""
+    return f"фиксация убытка {pnl:+.2f} USDT{pct_text}"
 
 
 def _get_position_reference_price(payload: dict | None) -> float | None:
@@ -15916,7 +15921,13 @@ def run_cycle():
             px_ref = _get_position_reference_price(current_position)
         except Exception:
             px_ref = None
-        side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
+        position_side_raw = str((current_position or {}).get("side") or "").lower()
+        if position_side_raw in {"sell", "short"}:
+            side_label = "SHORT"
+        elif position_side_raw in {"buy", "long"}:
+            side_label = "LONG"
+        else:
+            side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
         px_text = f"{px_ref:.4f}" if isinstance(px_ref, (int, float)) and math.isfinite(px_ref or 0) else "n/a"
         open_orders_symbol_snapshot = open_orders_prefetch.get(sym) or []
         prot_orders_snapshot = _extract_protection_orders(open_orders_symbol_snapshot)
@@ -16346,8 +16357,10 @@ def run_cycle():
             detail_entry: str | None = None
             orders_activity = False
             open_error: str | None = None
+            close_error: str | None = None
             preallocated_base_asset: str | None = None
             open_executed = False
+            close_executed = False
             entry_errors: list[str] = []
             entry_order_kind: str | None = None
             skip_conf_gate = bool(dec.get("ai_unavailable"))
@@ -16615,7 +16628,13 @@ def run_cycle():
                     log(f"⚠️ Позиция по {sym} отсутствует, нечего закрывать ({reason})", Fore.YELLOW)
                     send_tg_decision(f"ℹ️ {sym}: закрытие пропущено — нет открытой позиции")
                 else:
-                    close_side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
+                    pos_side_raw = str((current_position or {}).get("side") or "").lower()
+                    if pos_side_raw in {"sell", "short"}:
+                        close_side = "buy"
+                    elif pos_side_raw in {"buy", "long"}:
+                        close_side = "sell"
+                    else:
+                        close_side = "sell" if (current_position.get("amount") or 0) > 0 else "buy"
                     qty = abs(float(current_position.get("amount") or 0))
                     if qty == 0:
                         log(f"⚠️ Объём позиции {sym} равен нулю, пропускаем закрытие", Fore.YELLOW)
@@ -16625,6 +16644,7 @@ def run_cycle():
                         if position_idx is not None:
                             params["positionIdx"] = position_idx
                         try:
+                            close_executed = True
                             ex.create_order(sym, "market", close_side, qty, None, params)
                             log(f"⚠️ Закрыть позицию {sym} ({reason})", Fore.YELLOW)
                             send_tg(f"ℹ️ Закрыт {sym} {close_side.upper()} {qty:.4f} — {reason or 'причина не указана'}")
@@ -16638,6 +16658,7 @@ def run_cycle():
                             current_position = positions_map.get(sym)
                         except Exception as e:
                             err_text = str(e)
+                            close_error = err_text
                             log(f"❌ Ошибка закрытия {sym}: {err_text}", Fore.RED)
                             send_tg(f"ℹ️ Ошибка закрытия для {sym}: {err_text}")
             elif action == "hold":
@@ -17261,6 +17282,18 @@ def run_cycle():
                 and (position_changed or (final_position_amount is not None and abs(final_position_amount) > 0))
             )
             open_pending = action == "open" and open_executed and not open_success and not open_error
+            close_success = (
+                action == "close"
+                and close_executed
+                and not close_error
+                and abs(final_position_amount) <= amount_tolerance
+            )
+            close_pending = (
+                action == "close"
+                and close_executed
+                and not close_error
+                and abs(final_position_amount) > amount_tolerance
+            )
 
             # Enrich logs with regime and entry type when available.
             regime = (dec.get("regime") if isinstance(dec, dict) else None) or symbol_meta.get("regime") or "n/a"
@@ -17325,15 +17358,26 @@ def run_cycle():
                         else:
                             detail_entry = _with_meta(f"[{sym}] - open request skipped")
                 elif action == "close":
-                    direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
-                    close_price = _get_position_reference_price(current_position) or _get_position_reference_price(final_position_payload)
-                    close_text = f" @ {close_price:.4f}" if close_price is not None else ""
-                    close_reason = _format_close_reason(current_position, close_price, initial_protection_orders)
-                    reason_suffix = f" ({close_reason})" if close_reason else ""
-                    detail_entry = _with_meta(
-                        f"[{sym}] - closed {direction or 'position'} {abs(initial_position_amount):.4f}{close_text} "
-                        f"(lev x{symbol_leverage}){reason_suffix}"
-                    )
+                    if not close_executed and abs(initial_position_amount) <= amount_tolerance:
+                        detail_entry = _with_meta(f"[{sym}] - close requested but no open position")
+                    elif close_error:
+                        detail_entry = _with_meta(f"[{sym}] - failed to close position (error: {close_error})")
+                    elif close_success:
+                        side_raw = str((current_position or {}).get("side") or "").lower()
+                        is_long = side_raw in {"buy", "long"} or initial_position_amount > 0
+                        direction = "LONG" if is_long else "SHORT"
+                        close_price = _get_position_reference_price(current_position) or _get_position_reference_price(final_position_payload)
+                        close_text = f" @ {close_price:.4f}" if close_price is not None else ""
+                        close_reason = _format_close_reason(current_position, close_price, initial_protection_orders)
+                        reason_suffix = f" ({close_reason})" if close_reason else ""
+                        detail_entry = _with_meta(
+                            f"[{sym}] - closed {direction or 'position'} {abs(initial_position_amount):.4f}{close_text} "
+                            f"(lev x{symbol_leverage}){reason_suffix}"
+                        )
+                    elif close_pending:
+                        detail_entry = _with_meta(f"[{sym}] - close requested (still open)")
+                    else:
+                        detail_entry = _with_meta(f"[{sym}] - close requested (status unknown)")
                 elif action == "manage":
                     orders_desc = (
                         f"orders updated (was {initial_orders_snapshot}; now {final_orders_snapshot})"
@@ -17400,7 +17444,7 @@ def run_cycle():
             if summary_action == "open":
                 summary_outcome = "open" if open_success else "skip"
             elif summary_action == "close":
-                summary_outcome = "close"
+                summary_outcome = "close" if close_success else "skip"
             elif summary_action == "skip":
                 summary_outcome = "skip"
             summary_keys = {"open", "close", "skip"}
