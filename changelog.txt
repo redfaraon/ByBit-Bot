@@ -1,5 +1,10 @@
 Changelog (newest first)
 
+1.3.0 (2025-12-21, commit pending)
+- Added a standalone `strategy.py` module with the eight-indicator/eight-coin rule-set (get_signal_without_ai/apply_event/should_* helpers) so the bot can run a deterministic, news-aware intraday flow with no AI dependency.
+- run_cycle now builds 30m/4h contexts, fetches funding + open interest, and feeds those into the manual strategy whenever the AI is offline (or MANUAL_STRATEGY_FORCE=1), turning each event into concrete decisions/orders.
+- Introduced MANUAL_STRATEGY_SYMBOLS/MANUAL_STRATEGY_FORCE env toggles and bumped the embedded version to 1.3.0.
+
 1.2.2 (2025-12-20, commit pending)
 - Offline strategy now scales position size by news sentiment in a side-aware way (positive news boosts longs and damps shorts; negative news does the opposite, with continuous scaling up to ±30%), and applies regime-aware risk: trend entries receive a slight size boost while countertrend entries are downscaled, with range trades governed by a dedicated flat/range risk factor.
 - Scheduler’s adaptive interval now falls back to computing ATR/price directly from recent bars across active symbols whenever AI hints are missing, so `prev_vol` and `vol` reflect real volatility changes and the ±5/±10 minute adjustments become effective even in offline mode.

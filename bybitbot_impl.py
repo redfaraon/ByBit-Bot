@@ -33,6 +33,7 @@ from colorama import Fore, Style, init
 from openai import OpenAI, RateLimitError
 from dotenv import dotenv_values
 import db_logger
+import strategy
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except ImportError:
@@ -55,7 +56,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.2.2"
+BOT_VERSION = "1.3.0"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -259,6 +260,8 @@ AI_OFFLINE_CANCEL_ENTRIES = True
 _AI_OFFLINE_NOTICE_EMITTED_CYCLE: int | None = None
 _AI_OFFLINE_ACTIVE_CYCLE: int | None = None
 OFFLINE_TRADING_ENABLED = False
+MANUAL_STRATEGY_FORCE = False
+MANUAL_STRATEGY_SYMBOLS: set[str] = set()
 OFFLINE_PAIR_LIMIT = 8
 OFFLINE_MAX_NEW_POSITIONS = 1
 OFFLINE_NEWS_BIAS_ENABLED = True
@@ -528,6 +531,212 @@ def _format_tz_suffix(dt: datetime.datetime) -> str:
     total_minutes = abs(total_minutes)
     hours, minutes = divmod(total_minutes, 60)
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> strategy.IndicatorBlock | None:
+    if tf_df is None or tf_df.empty:
+        return None
+    last_row = tf_df.iloc[-1]
+    close_val = safe_float(last_row.get("close"))
+    ema20_val = safe_float(last_row.get("ema20"))
+    ema50_val = safe_float(last_row.get("ema50"))
+    rsi_val = safe_float(last_row.get("rsi14") or last_row.get("rsi"))
+    atr_val = safe_float(last_row.get("atr14") or last_row.get("atr"))
+    if close_val is None or ema20_val is None or ema50_val is None or rsi_val is None or atr_val is None:
+        return None
+    atr_mean = None
+    atr_std = None
+    for column in ("atr14", "atr"):
+        if column in tf_df.columns:
+            series = tf_df[column].dropna().tail(120)
+            if not series.empty:
+                try:
+                    atr_mean = float(series.mean())
+                except Exception:
+                    atr_mean = None
+                try:
+                    atr_std = float(series.std(ddof=0))
+                except Exception:
+                    atr_std = None
+            break
+    return strategy.IndicatorBlock(
+        close=close_val,
+        ema20=ema20_val,
+        ema50=ema50_val,
+        rsi=rsi_val,
+        atr=atr_val,
+        atr_mean=atr_mean,
+        atr_std=atr_std,
+    )
+
+
+def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
+    if not pending_info:
+        return None
+    for key in ("price", "px", "limit", "target"):
+        val = pending_info.get(key)
+        px = safe_float(val)
+        if px is not None and px > 0:
+            return px
+    return None
+
+
+def _build_manual_strategy_context(
+    symbol: str,
+    tf30_df: pd.DataFrame | None,
+    tf4h_df: pd.DataFrame | None,
+    primary_df: pd.DataFrame | None,
+    *,
+    current_position: dict[str, Any] | None,
+    open_orders: Sequence[dict[str, Any]] | None,
+    pending_info: dict[str, Any] | None,
+    news_score: float | None,
+    funding_snapshot: dict[str, Any] | None,
+    open_interest_history: Sequence[Any] | None,
+    risk_pct: float,
+) -> strategy.StrategyContext | None:
+    block_30m = _indicator_block_from_df(tf30_df)
+    block_4h = _indicator_block_from_df(tf4h_df)
+    if block_30m is None or block_4h is None:
+        return None
+    price_val = None
+    if primary_df is not None and not primary_df.empty:
+        price_val = safe_float(primary_df.iloc[-1].get("close"))
+    if price_val is None or price_val <= 0:
+        price_val = block_30m.close
+    if price_val is None or price_val <= 0:
+        return None
+    amount_val = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
+    side_raw = (current_position or {}).get("side")
+    if not side_raw and amount_val:
+        side_raw = "buy" if amount_val > 0 else "sell"
+    funding_rate = None
+    if isinstance(funding_snapshot, dict):
+        funding_rate = safe_float(
+            funding_snapshot.get("fundingRate")
+            or funding_snapshot.get("funding_rate")
+            or funding_snapshot.get("rate")
+        )
+    pending_price = _pending_limit_price(pending_info)
+    ctx = strategy.StrategyContext(
+        symbol=symbol,
+        price=price_val,
+        tf30=block_30m,
+        tf4h=block_4h,
+        news_score=news_score,
+        funding_rate=funding_rate,
+        open_interest_history=open_interest_history or [],
+        has_position=abs(amount_val) > 0,
+        position_side=side_raw,
+        position_size=abs(amount_val),
+        open_orders=list(open_orders or []),
+        pending_entry_price=pending_price,
+        risk_pct=risk_pct,
+    )
+    return ctx
+
+
+def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> strategy.IndicatorBlock | None:
+    if tf_df is None or tf_df.empty:
+        return None
+    last_row = tf_df.iloc[-1]
+    close_val = safe_float(last_row.get("close"))
+    ema20_val = safe_float(last_row.get("ema20"))
+    ema50_val = safe_float(last_row.get("ema50"))
+    rsi_val = safe_float(last_row.get("rsi14") or last_row.get("rsi"))
+    atr_val = safe_float(last_row.get("atr14") or last_row.get("atr"))
+    if close_val is None or ema20_val is None or ema50_val is None or rsi_val is None or atr_val is None:
+        return None
+    atr_mean = None
+    atr_std = None
+    for column in ("atr14", "atr"):
+        if column in tf_df.columns:
+            series = tf_df[column].dropna().tail(120)
+            if not series.empty:
+                try:
+                    atr_mean = float(series.mean())
+                except Exception:
+                    atr_mean = None
+                try:
+                    atr_std = float(series.std(ddof=0))
+                except Exception:
+                    atr_std = None
+            break
+    return strategy.IndicatorBlock(
+        close=close_val,
+        ema20=ema20_val,
+        ema50=ema50_val,
+        rsi=rsi_val,
+        atr=atr_val,
+        atr_mean=atr_mean,
+        atr_std=atr_std,
+    )
+
+
+def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
+    if not pending_info:
+        return None
+    for key in ("price", "px", "limit", "target"):
+        val = pending_info.get(key)
+        px = safe_float(val)
+        if px is not None and px > 0:
+            return px
+    return None
+
+
+def _build_manual_strategy_context(
+    symbol: str,
+    tf30_df: pd.DataFrame | None,
+    tf4h_df: pd.DataFrame | None,
+    primary_df: pd.DataFrame | None,
+    *,
+    current_position: dict[str, Any] | None,
+    open_orders: Sequence[dict[str, Any]] | None,
+    pending_info: dict[str, Any] | None,
+    news_score: float | None,
+    funding_snapshot: dict[str, Any] | None,
+    open_interest_history: Sequence[Any] | None,
+    risk_pct: float,
+) -> strategy.StrategyContext | None:
+    block_30m = _indicator_block_from_df(tf30_df)
+    block_4h = _indicator_block_from_df(tf4h_df)
+    if block_30m is None or block_4h is None:
+        return None
+    price_val = None
+    if primary_df is not None and not primary_df.empty:
+        price_val = safe_float(primary_df.iloc[-1].get("close"))
+    if price_val is None or price_val <= 0:
+        price_val = block_30m.close
+    if price_val is None or price_val <= 0:
+        return None
+    amount_val = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
+    side_raw = (current_position or {}).get("side")
+    if not side_raw and amount_val:
+        side_raw = "buy" if amount_val > 0 else "sell"
+    funding_rate = None
+    if isinstance(funding_snapshot, dict):
+        funding_rate = safe_float(
+            funding_snapshot.get("fundingRate")
+            or funding_snapshot.get("funding_rate")
+            or funding_snapshot.get("rate")
+        )
+    pending_price = _pending_limit_price(pending_info)
+    ctx = strategy.StrategyContext(
+        symbol=symbol,
+        price=price_val,
+        tf30=block_30m,
+        tf4h=block_4h,
+        news_score=news_score,
+        funding_rate=funding_rate,
+        open_interest_history=open_interest_history or [],
+        has_position=abs(amount_val) > 0,
+        position_side=side_raw,
+        position_size=abs(amount_val),
+        open_orders=list(open_orders or []),
+        pending_entry_price=pending_price,
+        risk_pct=risk_pct,
+    )
+    return ctx
 
 def _current_log_time() -> datetime.datetime:
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -3834,6 +4043,7 @@ def refresh_settings():
     global DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL
     global AI_OFFLINE_CANCEL_ENTRIES
     global OFFLINE_TRADING_ENABLED, OFFLINE_PAIR_LIMIT, OFFLINE_MAX_NEW_POSITIONS, OFFLINE_NEWS_BIAS_ENABLED
+    global MANUAL_STRATEGY_FORCE, MANUAL_STRATEGY_SYMBOLS
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
@@ -4259,6 +4469,17 @@ def refresh_settings():
     except (TypeError, ValueError):
         OFFLINE_MAX_NEW_POSITIONS = 1
     OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
+    manual_symbols_env = os.getenv("MANUAL_STRATEGY_SYMBOLS")
+    manual_symbols: set[str] = set()
+    if manual_symbols_env:
+        for chunk in manual_symbols_env.split(","):
+            cleaned = chunk.strip().upper()
+            if cleaned:
+                manual_symbols.add(cleaned)
+    else:
+        manual_symbols = {sym.upper() for sym in strategy.WATCHLIST}
+    MANUAL_STRATEGY_SYMBOLS = manual_symbols
+    MANUAL_STRATEGY_FORCE = env_bool("MANUAL_STRATEGY_FORCE", False)
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
     TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
@@ -15632,6 +15853,8 @@ def run_cycle():
     _emit_unrealized_pnl_message("start", start_unreal_total, start_unreal_count)
 
     open_orders_cache = dict(open_orders_prefetch)
+    manual_funding_cache: dict[str, dict[str, Any]] = {}
+    manual_open_interest_cache: dict[str, Sequence[Any]] = {}
 
     if not selection_pairs:
         selection_pairs = available_pairs
@@ -16039,6 +16262,7 @@ def run_cycle():
                 except Exception as news_exc:
                     log(f"⚠️ Не удалось получить новости для {sym}: {news_exc}", Fore.YELLOW)
                     news_payload_symbol = None
+            news_score_value = _offline_news_score(news_payload_symbol)
             current_position = positions_map.get(sym)
             initial_position_amount = safe_float(
                 (current_position or {}).get("amount")
@@ -16081,7 +16305,58 @@ def run_cycle():
             ):
                 if _execute_limit_fallback(sym, pending_info, open_orders_symbol):
                     continue
-            canonical_lookup = _canonical_decision_symbol(sym)
+            manual_decision = None
+            manual_ctx = None
+            manual_allowed = (not MASTER_DECISIONS_SHARE) or is_master_user
+            manual_active = manual_allowed and (
+                MANUAL_STRATEGY_FORCE or (ai_offline_mode and OFFLINE_TRADING_ENABLED)
+            )
+            if manual_active and sym.upper() in MANUAL_STRATEGY_SYMBOLS:
+                tf30_df = timeframe_dfs.get("30m")
+                tf4h_df = timeframe_dfs.get("4h")
+                if tf30_df is not None and tf4h_df is not None:
+                    funding_snapshot = manual_funding_cache.get(sym)
+                    if funding_snapshot is None:
+                        try:
+                            funding_snapshot = get_funding_rate(ex, sym)
+                        except Exception:
+                            funding_snapshot = {}
+                        manual_funding_cache[sym] = funding_snapshot or {}
+                    oi_history = manual_open_interest_cache.get(sym)
+                    if oi_history is None:
+                        try:
+                            oi_history = get_open_interest(ex, sym)
+                        except Exception:
+                            oi_history = []
+                        manual_open_interest_cache[sym] = oi_history or []
+                    manual_ctx = _build_manual_strategy_context(
+                        sym,
+                        tf30_df,
+                        tf4h_df,
+                        df,
+                        current_position=current_position,
+                        open_orders=open_orders_symbol or [],
+                        pending_info=pending_info if isinstance(pending_info, dict) else None,
+                        news_score=news_score_value,
+                        funding_snapshot=funding_snapshot or {},
+                        open_interest_history=manual_open_interest_cache.get(sym) or [],
+                        risk_pct=CURRENT_RISK_PCT or RISK_PCT,
+                    )
+                    if manual_ctx:
+                        manual_event = strategy.get_signal_without_ai(manual_ctx)
+                        if manual_event:
+                            manual_decision = strategy.apply_event(manual_event, manual_ctx)
+                            manual_decision["ai_unavailable"] = True
+                            manual_decision.setdefault("reason", manual_event.reason)
+                            log(
+                                f"[MANUAL] {sym}: {manual_event.name} -> {manual_decision.get('action')}",
+                                Fore.LIGHTBLACK_EX,
+                            )
+                            dec = manual_decision
+            if manual_decision:
+                canonical_lookup = _canonical_decision_symbol(sym)
+            else:
+                canonical_lookup = _canonical_decision_symbol(sym)
             preloaded_decision = decisions_map.get(canonical_lookup)
             initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
             if initial_payload:
@@ -16137,7 +16412,6 @@ def run_cycle():
             if dec is None:
                 if ai_offline_mode:
                     # Offline algorithmic replacement for per-symbol initial decision.
-                    news_score = _offline_news_score(news_payload_symbol)
                     try:
                         max_new_left = max(
                             0,
@@ -16152,7 +16426,7 @@ def run_cycle():
                         sym,
                         df,
                         current_position=current_position,
-                        news_score=news_score,
+                        news_score=news_score_value,
                         max_new_positions_left=max_new_left,
                     )
                     log(
@@ -16162,7 +16436,7 @@ def run_cycle():
                 else:
                     def _offline_decision_fallback(note: str) -> dict[str, Any]:
                         _emit_ai_offline_notice(note)
-                        news_score_local = _offline_news_score(news_payload_symbol)
+                        news_score_local = news_score_value
                         try:
                             max_new_left_local = max(
                                 0,
@@ -16177,7 +16451,7 @@ def run_cycle():
                             sym,
                             df,
                             current_position=current_position,
-                            news_score=news_score_local,
+                        news_score=news_score_local,
                             max_new_positions_left=max_new_left_local,
                         )
                         log(
