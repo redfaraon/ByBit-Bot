@@ -34,6 +34,7 @@ from openai import OpenAI, RateLimitError
 from dotenv import dotenv_values
 import db_logger
 import strategy
+import strategy_context
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except ImportError:
@@ -533,108 +534,6 @@ def _format_tz_suffix(dt: datetime.datetime) -> str:
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 
-
-def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> strategy.IndicatorBlock | None:
-    if tf_df is None or tf_df.empty:
-        return None
-    last_row = tf_df.iloc[-1]
-    close_val = safe_float(last_row.get("close"))
-    ema20_val = safe_float(last_row.get("ema20"))
-    ema50_val = safe_float(last_row.get("ema50"))
-    rsi_val = safe_float(last_row.get("rsi14") or last_row.get("rsi"))
-    atr_val = safe_float(last_row.get("atr14") or last_row.get("atr"))
-    if close_val is None or ema20_val is None or ema50_val is None or rsi_val is None or atr_val is None:
-        return None
-    atr_mean = None
-    atr_std = None
-    for column in ("atr14", "atr"):
-        if column in tf_df.columns:
-            series = tf_df[column].dropna().tail(120)
-            if not series.empty:
-                try:
-                    atr_mean = float(series.mean())
-                except Exception:
-                    atr_mean = None
-                try:
-                    atr_std = float(series.std(ddof=0))
-                except Exception:
-                    atr_std = None
-            break
-    return strategy.IndicatorBlock(
-        close=close_val,
-        ema20=ema20_val,
-        ema50=ema50_val,
-        rsi=rsi_val,
-        atr=atr_val,
-        atr_mean=atr_mean,
-        atr_std=atr_std,
-    )
-
-
-def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
-    if not pending_info:
-        return None
-    for key in ("price", "px", "limit", "target"):
-        val = pending_info.get(key)
-        px = safe_float(val)
-        if px is not None and px > 0:
-            return px
-    return None
-
-
-def _build_manual_strategy_context(
-    symbol: str,
-    tf30_df: pd.DataFrame | None,
-    tf4h_df: pd.DataFrame | None,
-    primary_df: pd.DataFrame | None,
-    *,
-    current_position: dict[str, Any] | None,
-    open_orders: Sequence[dict[str, Any]] | None,
-    pending_info: dict[str, Any] | None,
-    news_score: float | None,
-    funding_snapshot: dict[str, Any] | None,
-    open_interest_history: Sequence[Any] | None,
-    risk_pct: float,
-) -> strategy.StrategyContext | None:
-    block_30m = _indicator_block_from_df(tf30_df)
-    block_4h = _indicator_block_from_df(tf4h_df)
-    if block_30m is None or block_4h is None:
-        return None
-    price_val = None
-    if primary_df is not None and not primary_df.empty:
-        price_val = safe_float(primary_df.iloc[-1].get("close"))
-    if price_val is None or price_val <= 0:
-        price_val = block_30m.close
-    if price_val is None or price_val <= 0:
-        return None
-    amount_val = safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
-    side_raw = (current_position or {}).get("side")
-    if not side_raw and amount_val:
-        side_raw = "buy" if amount_val > 0 else "sell"
-    funding_rate = None
-    if isinstance(funding_snapshot, dict):
-        funding_rate = safe_float(
-            funding_snapshot.get("fundingRate")
-            or funding_snapshot.get("funding_rate")
-            or funding_snapshot.get("rate")
-        )
-    pending_price = _pending_limit_price(pending_info)
-    ctx = strategy.StrategyContext(
-        symbol=symbol,
-        price=price_val,
-        tf30=block_30m,
-        tf4h=block_4h,
-        news_score=news_score,
-        funding_rate=funding_rate,
-        open_interest_history=open_interest_history or [],
-        has_position=abs(amount_val) > 0,
-        position_side=side_raw,
-        position_size=abs(amount_val),
-        open_orders=list(open_orders or []),
-        pending_entry_price=pending_price,
-        risk_pct=risk_pct,
-    )
-    return ctx
 
 def _current_log_time() -> datetime.datetime:
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -4377,7 +4276,7 @@ def refresh_settings():
     else:
         manual_symbols = {sym.upper() for sym in strategy.WATCHLIST}
     MANUAL_STRATEGY_SYMBOLS = manual_symbols
-    MANUAL_STRATEGY_FORCE = env_bool("MANUAL_STRATEGY_FORCE", False)
+    MANUAL_STRATEGY_FORCE = env_bool("MANUAL_STRATEGY_FORCE", True)
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
     TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
@@ -16205,6 +16104,9 @@ def run_cycle():
                     continue
             manual_decision = None
             manual_ctx = None
+            manual_handled = False
+            master_decision_used = False
+            rate_limit_error_hit = False
             ai_offline_mode = (
                 _AI_OFFLINE_ACTIVE_CYCLE is not None
                 and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
@@ -16231,7 +16133,7 @@ def run_cycle():
                         except Exception:
                             oi_history = []
                         manual_open_interest_cache[sym] = oi_history or []
-                    manual_ctx = _build_manual_strategy_context(
+                    manual_ctx = strategy_context.build_manual_strategy_context(
                         sym,
                         tf30_df,
                         tf4h_df,
@@ -16254,89 +16156,84 @@ def run_cycle():
                                 f"[MANUAL] {sym}: {manual_event.name} -> {manual_decision.get('action')}",
                                 Fore.LIGHTBLACK_EX,
                             )
+                            log_user(
+                                f"[MANUAL] {sym}: {manual_event.name} -> {manual_decision.get('action')}",
+                                color=Fore.LIGHTBLACK_EX,
+                            )
                             dec = manual_decision
-            if manual_decision:
+                            manual_handled = True
+                    else:
+                        log(f"[MANUAL] {sym}: context unavailable for strategy input", Fore.YELLOW)
+                        log_user(f"[MANUAL] {sym}: context unavailable for strategy input", color=Fore.YELLOW)
+                        manual_decision = {
+                            "symbol": sym,
+                            "action": "skip",
+                            "reason": "manual context unavailable",
+                            "ai_unavailable": True,
+                            "confidence": 0.0,
+                        }
+                        dec = manual_decision
+                        manual_handled = True
+            if not manual_handled:
                 canonical_lookup = _canonical_decision_symbol(sym)
+                preloaded_decision = decisions_map.get(canonical_lookup)
+                initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
+                if initial_payload:
+                    initial_payload["symbol"] = sym
+
+                dec = None
+                master_decision_used = False
+                rate_limit_error_hit = False
             else:
                 canonical_lookup = _canonical_decision_symbol(sym)
-            preloaded_decision = decisions_map.get(canonical_lookup)
-            initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
-            if initial_payload:
-                initial_payload["symbol"] = sym
+                preloaded_decision = decisions_map.get(canonical_lookup)
+                initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
 
-            dec = None
-            master_decision_used = False
-            rate_limit_error_hit = False
-            if ai_offline_mode and AI_OFFLINE_CANCEL_ENTRIES and open_orders_symbol:
-                cancelled_offline: list[str] = []
-                for order in open_orders_symbol:
-                    if not isinstance(order, dict):
-                        continue
-                    if _is_reduce_only(order):
-                        continue
-                    oid = order.get("id")
-                    if not oid:
-                        continue
-                    order_summary = _summarize_order_spec(order)
-                    summary_suffix = f": {order_summary}" if order_summary else ""
-                    success, err = cancel_order_by_id(ex, sym, str(oid))
-                    if success:
-                        cancelled_offline.append(f"{oid}{summary_suffix}")
-                if cancelled_offline:
-                    msg = f"[AI OFFLINE] {sym}: cancelled non-reduce orders: {', '.join(cancelled_offline[:8])}"
-                    log(msg, Fore.YELLOW)
-                    try:
-                        send_tg(msg)
-                    except Exception:
-                        pass
-            if MASTER_DECISIONS_SHARE and not is_master_user:
-                dec = _pull_master_decision(sym)
-                if dec:
-                    master_decision_used = True
-                    log(
-                        f"[AI SHARE] {sym}: using master decision action={dec.get('action')} reason={(dec.get('reason') or '')[:120]}",
-                        Fore.LIGHTBLACK_EX,
-                    )
-                else:
-                    log(
-                        f"[WARN] {sym}: master decision unavailable; skipping AI call for follower user {active_user_id}",
-                        Fore.YELLOW,
-                    )
-                    dec = {
-                        "symbol": sym,
-                        "action": "skip",
-                        "reason": "master decision unavailable for follower run",
-                    }
-            if dec is None:
-                if ai_offline_mode:
-                    # Offline algorithmic replacement for per-symbol initial decision.
-                    try:
-                        max_new_left = max(
-                            0,
-                            min(
-                                OFFLINE_MAX_NEW_POSITIONS,
-                                max(0, (max_positions_limit or 0) - int(open_positions or 0)) if max_positions_limit else OFFLINE_MAX_NEW_POSITIONS,
-                            ),
-                        )
-                    except Exception:
-                        max_new_left = OFFLINE_MAX_NEW_POSITIONS
-                    dec = _offline_decision_for_symbol(
-                        sym,
-                        df,
-                        current_position=current_position,
-                        news_score=news_score_value,
-                        max_new_positions_left=max_new_left,
-                    )
-                    log(
-                        f"[AI OFFLINE] {sym}: action={dec.get('action')} side={dec.get('side') or 'n/a'} reason={(dec.get('reason') or '')[:140]}",
-                        Fore.YELLOW,
-                    )
-                else:
-                    def _offline_decision_fallback(note: str) -> dict[str, Any]:
-                        _emit_ai_offline_notice(note)
-                        news_score_local = news_score_value
+            if not manual_handled:
+                if ai_offline_mode and AI_OFFLINE_CANCEL_ENTRIES and open_orders_symbol:
+                    cancelled_offline: list[str] = []
+                    for order in open_orders_symbol:
+                        if not isinstance(order, dict):
+                            continue
+                        if _is_reduce_only(order):
+                            continue
+                        oid = order.get("id")
+                        if not oid:
+                            continue
+                        order_summary = _summarize_order_spec(order)
+                        summary_suffix = f": {order_summary}" if order_summary else ""
+                        success, err = cancel_order_by_id(ex, sym, str(oid))
+                        if success:
+                            cancelled_offline.append(f"{oid}{summary_suffix}")
+                    if cancelled_offline:
+                        msg = f"[AI OFFLINE] {sym}: cancelled non-reduce orders: {', '.join(cancelled_offline[:8])}"
+                        log(msg, Fore.YELLOW)
                         try:
-                            max_new_left_local = max(
+                            send_tg(msg)
+                        except Exception:
+                            pass
+                if MASTER_DECISIONS_SHARE and not is_master_user:
+                    dec = _pull_master_decision(sym)
+                    if dec:
+                        master_decision_used = True
+                        log(
+                            f"[AI SHARE] {sym}: using master decision action={dec.get('action')} reason={(dec.get('reason') or '')[:120]}",
+                            Fore.LIGHTBLACK_EX,
+                        )
+                    else:
+                        log(
+                            f"[WARN] {sym}: master decision unavailable; skipping AI call for follower user {active_user_id}",
+                            Fore.YELLOW,
+                        )
+                        dec = {
+                            "symbol": sym,
+                            "action": "skip",
+                            "reason": "master decision unavailable for follower run",
+                        }
+                if dec is None and not manual_handled:
+                    if ai_offline_mode:
+                        try:
+                            max_new_left = max(
                                 0,
                                 min(
                                     OFFLINE_MAX_NEW_POSITIONS,
@@ -16344,78 +16241,103 @@ def run_cycle():
                                 ),
                             )
                         except Exception:
-                            max_new_left_local = OFFLINE_MAX_NEW_POSITIONS
-                        decision = _offline_decision_for_symbol(
+                            max_new_left = OFFLINE_MAX_NEW_POSITIONS
+                        dec = _offline_decision_for_symbol(
                             sym,
                             df,
                             current_position=current_position,
-                        news_score=news_score_local,
-                            max_new_positions_left=max_new_left_local,
+                            news_score=news_score_value,
+                            max_new_positions_left=max_new_left,
                         )
                         log(
-                            f"[AI OFFLINE] {sym}: action={decision.get('action')} side={decision.get('side') or 'n/a'} reason={(decision.get('reason') or '')[:140]}",
+                            f"[AI OFFLINE] {sym}: action={dec.get('action')} side={dec.get('side') or 'n/a'} reason={(dec.get('reason') or '')[:140]}",
                             Fore.YELLOW,
                         )
-                        return decision
-
-                    def _call_ai_decision() -> dict[str, Any]:
-                        return ai_decision(
-                            sym,
-                            df,
-                            equity,
-                            available_margin,
-                            ex,
-                            current_position=current_position,
-                            open_orders=open_orders_symbol,
-                            extra_context=extra_serialized,
-                            target_meta=symbol_meta,
-                            news_payload=news_payload_symbol,
-                            initial_decision=initial_payload,
-                            priority_symbol=has_priority_exposure,
-                        )
-
-                    try:
-                        dec = _call_ai_decision()
-                    except RateLimitError as exc_rl:
-                        rate_limit_backoff = True
-                        rate_limit_error_hit = True
-                        current_provider = (_current_ai_provider() or "").strip().lower()
-                        primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
-                        if current_provider and current_provider == primary_provider:
-                            _switch_ai_provider_to_fallback(f"rate limit 429 (decision loop): {type(exc_rl).__name__}")
-                            msg = "[WARN] Primary AI provider rate limit: switched to secondary and retrying once."
-                            log(msg, Fore.YELLOW)
+                    else:
+                        def _offline_decision_fallback(note: str) -> dict[str, Any]:
+                            _emit_ai_offline_notice(note)
+                            news_score_local = news_score_value
                             try:
-                                send_tg(msg)
-                            except Exception:
-                                pass
-                            try:
-                                dec = _call_ai_decision()
-                            except Exception as exc_retry:
-                                dec = _offline_decision_fallback(f"rate limit 429; secondary failed: {type(exc_retry).__name__}")
-                                ai_offline_mode = True
-                        else:
-                            dec = _offline_decision_fallback("rate limit 429 (secondary)")
-                            ai_offline_mode = True
-                    except Exception as exc_any:
-                        current_provider = (_current_ai_provider() or "").strip().lower()
-                        primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
-                        if current_provider and current_provider == primary_provider:
-                            rate_limit_backoff = True
-                            _switch_ai_provider_to_fallback(f"{type(exc_any).__name__} (decision loop)")
-                            msg = f"[WARN] Primary AI provider error ({type(exc_any).__name__}): switched to secondary and retrying once."
-                            log(msg, Fore.YELLOW)
-                            try:
-                                send_tg(msg)
-                            except Exception:
-                                pass
-                            try:
-                                dec = _call_ai_decision()
-                            except Exception as exc_retry:
-                                dec = _offline_decision_fallback(
-                                    f"primary failed: {type(exc_any).__name__}; secondary failed: {type(exc_retry).__name__}"
+                                max_new_left_local = max(
+                                    0,
+                                    min(
+                                        OFFLINE_MAX_NEW_POSITIONS,
+                                        max(0, (max_positions_limit or 0) - int(open_positions or 0)) if max_positions_limit else OFFLINE_MAX_NEW_POSITIONS,
+                                    ),
                                 )
+                            except Exception:
+                                max_new_left_local = OFFLINE_MAX_NEW_POSITIONS
+                            decision = _offline_decision_for_symbol(
+                                sym,
+                                df,
+                                current_position=current_position,
+                                news_score=news_score_local,
+                                max_new_positions_left=max_new_left_local,
+                            )
+                            log(
+                                f"[AI OFFLINE] {sym}: action={decision.get('action')} side={decision.get('side') or 'n/a'} reason={(decision.get('reason') or '')[:140]}",
+                                Fore.YELLOW,
+                            )
+                            return decision
+
+                        def _call_ai_decision() -> dict[str, Any]:
+                            return ai_decision(
+                                sym,
+                                df,
+                                equity,
+                                available_margin,
+                                ex,
+                                current_position=current_position,
+                                open_orders=open_orders_symbol,
+                                extra_context=extra_serialized,
+                                target_meta=symbol_meta,
+                                news_payload=news_payload_symbol,
+                                initial_decision=initial_payload,
+                                priority_symbol=has_priority_exposure,
+                            )
+
+                        try:
+                            dec = _call_ai_decision()
+                        except RateLimitError as exc_rl:
+                            rate_limit_backoff = True
+                            rate_limit_error_hit = True
+                            current_provider = (_current_ai_provider() or "").strip().lower()
+                            primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
+                            if current_provider and current_provider == primary_provider:
+                                _switch_ai_provider_to_fallback(f"rate limit 429 (decision loop): {type(exc_rl).__name__}")
+                                msg = "[WARN] Primary AI provider rate limit: switched to secondary and retrying once."
+                                log(msg, Fore.YELLOW)
+                                try:
+                                    send_tg(msg)
+                                except Exception:
+                                    pass
+                                try:
+                                    dec = _call_ai_decision()
+                                except Exception as exc_retry:
+                                    dec = _offline_decision_fallback(f"rate limit 429; secondary failed: {type(exc_retry).__name__}")
+                                    ai_offline_mode = True
+                            else:
+                                dec = _offline_decision_fallback("rate limit 429 (secondary)")
                                 ai_offline_mode = True
+                        except Exception as exc_any:
+                            current_provider = (_current_ai_provider() or "").strip().lower()
+                            primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
+                            if current_provider and current_provider == primary_provider:
+                                rate_limit_backoff = True
+                                _switch_ai_provider_to_fallback(f"{type(exc_any).__name__} (decision loop)")
+                                msg = f"[WARN] Primary AI provider error ({type(exc_any).__name__}): switched to secondary and retrying once."
+                                log(msg, Fore.YELLOW)
+                                try:
+                                    send_tg(msg)
+                                except Exception:
+                                    pass
+                                try:
+                                    dec = _call_ai_decision()
+                                except Exception as exc_retry:
+                                    dec = _offline_decision_fallback(
+                                        f"primary failed: {type(exc_any).__name__}; secondary failed: {type(exc_retry).__name__}"
+                                    )
+                                    ai_offline_mode = True
                         else:
                             dec = _offline_decision_fallback(f"AI decision failed: {type(exc_any).__name__}")
                             ai_offline_mode = True
