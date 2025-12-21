@@ -4855,7 +4855,8 @@ def _offline_select_pairs(
             pct_move = 0.0
         news_score = _offline_news_score((news_digest or {}).get(sym))
         news_strength = abs(news_score) if OFFLINE_NEWS_BIAS_ENABLED else 0.0
-        score = (pct_move * 0.7) + (news_strength * 0.3)
+        # Heavier weight on news: keep volatility as a filter but prioritize strong headlines.
+        score = (pct_move * 0.4) + (news_strength * 0.6)
         scored.append((score, sym))
 
     scored.sort(reverse=True, key=lambda x: (x[0], x[1]))
@@ -17032,15 +17033,33 @@ def run_cycle():
             )
             open_pending = action == "open" and open_executed and not open_success and not open_error
 
+            # Enrich logs with regime and entry type when available.
+            regime = (dec.get("regime") if isinstance(dec, dict) else None) or symbol_meta.get("regime") or "n/a"
+            entry_kind = None
+            if side_text in ("buy", "long"):
+                entry_kind = "buy_limit"
+            elif side_text in ("sell", "short"):
+                entry_kind = "sell_limit"
+            # Helper to decorate base message with regime/entry meta.
+            def _with_meta(base: str) -> str:
+                extra_bits: list[str] = []
+                if regime and regime not in {"n/a", ""}:
+                    extra_bits.append(f"regime={regime}")
+                if entry_kind and action == "open":
+                    extra_bits.append(f"entry={entry_kind}")
+                if extra_bits:
+                    return f"{base} [{'; '.join(extra_bits)}]"
+                return base
+
             if detail_entry is None:
                 if action == "open":
                     if open_error:
-                        detail_entry = f"[{sym}] - failed to open position (error: {open_error})"
+                        detail_entry = _with_meta(f"[{sym}] - failed to open position (error: {open_error})")
                     elif open_success:
                         direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                         entry_price = _get_position_reference_price(final_position_payload)
                         entry_text = f" @ {entry_price:.4f}" if entry_price is not None else ""
-                        detail_entry = (
+                        detail_entry = _with_meta(
                             f"[{sym}] - opened {direction or 'position'} {abs(final_position_amount):.4f}{entry_text} "
                             f"(lev x{symbol_leverage}); orders {final_orders_snapshot}"
                         )
@@ -17051,7 +17070,7 @@ def run_cycle():
                             plural = "layer" if entry_created == 1 else "layers"
                             pending_parts.append(f"{entry_created} {plural}")
                         pending_desc = ", ".join(pending_parts)
-                        detail_entry = f"[{sym}] - entry orders placed ({pending_desc}) {direction or ''} (lev x{symbol_leverage})"
+                        detail_entry = _with_meta(f"[{sym}] - entry orders placed ({pending_desc}) {direction or ''} (lev x{symbol_leverage})")
                         if entry_errors:
                             detail_entry += f" (last error: {entry_errors[-1]})"
                     else:
@@ -17072,14 +17091,14 @@ def run_cycle():
                                 combined_reasons.append(err)
                                 seen_reasons.add(err)
                         if combined_reasons:
-                            detail_entry = f"[{sym}] - open request skipped ({'; '.join(combined_reasons[-3:])})"
+                            detail_entry = _with_meta(f"[{sym}] - open request skipped ({'; '.join(combined_reasons[-3:])})")
                         else:
-                            detail_entry = f"[{sym}] - open request skipped"
+                            detail_entry = _with_meta(f"[{sym}] - open request skipped")
                 elif action == "close":
                     direction = "LONG" if side_text in ("buy", "long") else "SHORT" if side_text in ("sell", "short") else ""
                     close_price = _get_position_reference_price(current_position) or _get_position_reference_price(final_position_payload)
                     close_text = f" @ {close_price:.4f}" if close_price is not None else ""
-                    detail_entry = (
+                    detail_entry = _with_meta(
                         f"[{sym}] - closed {direction or 'position'} {abs(initial_position_amount):.4f}{close_text} "
                         f"(lev x{symbol_leverage})"
                     )
@@ -17104,12 +17123,12 @@ def run_cycle():
                     elif abs(final_position_amount) < abs(initial_position_amount) - amount_tolerance:
                         manage_label = "reduce"
                     if initial_position_amount == 0.0 and final_position_amount == 0.0:
-                        detail_entry = f"[{sym}] - {manage_label} with no open position ({orders_desc})"
+                        detail_entry = _with_meta(f"[{sym}] - {manage_label} with no open position ({orders_desc})")
                     else:
                         parts: list[str] = [f"{manage_label}: {pos_label_before} -> {pos_label_after}", orders_desc]
                         if size_change_label:
                             parts.append(size_change_label)
-                        detail_entry = f"[{sym}] - {', '.join(parts)}"
+                        detail_entry = _with_meta(f"[{sym}] - {', '.join(parts)}")
                 elif action in ("hold", "none"):
                     change_parts: list[str] = []
                     if size_change_label:
@@ -17121,11 +17140,11 @@ def run_cycle():
                     change_parts.extend(protection_changes)
                     if not change_parts:
                         change_parts.append("no changes")
-                    detail_entry = f"[{sym}] - holding position ({', '.join(change_parts)})"
+                    detail_entry = _with_meta(f"[{sym}] - holding position ({', '.join(change_parts)})")
                 elif action == "skip":
-                    detail_entry = f"[{sym}] - skip" + (f" - {reason}" if reason else "")
+                    detail_entry = _with_meta(f"[{sym}] - skip" + (f" - {reason}" if reason else ""))
                 else:
-                    detail_entry = f"[{sym}] - skip" + (f" - {reason}" if reason else "")
+                    detail_entry = _with_meta(f"[{sym}] - skip" + (f" - {reason}" if reason else ""))
             if detail_entry and sym_confidence_text:
                 tag_suffix = f" {sym_confidence_tag}" if sym_confidence_tag else ""
                 detail_entry = f"{detail_entry} [conf {sym_confidence_text}{tag_suffix}]"
