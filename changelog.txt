@@ -1,8 +1,8 @@
 Changelog (newest first)
 
-1.3.4 (2025-12-22, commit pending)
-- Manual strategy now normalizes symbols (e.g., DOGE/USDT:USDT) against the JSON universe to avoid skips on open-position tickers.
-- Version metadata bumped to 1.3.4.
+1.3.5 (2025-12-22, commit pending)
+- Added module-level logging wrappers (context/executor/cleanup/protection/trailing) to trace inputs/outputs and keep manual decisions auditable; protection/trailing/cleanup calls now emit `[MODULE]` logs.
+- Version metadata bumped to 1.3.5.
 
 1.3.3 (2025-12-22, commit pending)
 - Strategy spec v1.1.1: open news providers list (no keys), universe_mode (fixed/news, include open positions, cap size), and ladder configs for entries/TPs moved into JSON; risk/execution still override `.env`.

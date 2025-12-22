@@ -12,11 +12,21 @@ def apply_trailing(
     *,
     config: dict | None,
     handler: Callable[[Any, str, dict | None, Any, Sequence[dict] | None, dict | None], Sequence[dict]] | None,
+    log_fn: Callable[[str], None] | None = None,
 ) -> Sequence[dict]:
     """
     Thin wrapper that delegates trailing/protection to the injected handler.
     This keeps the trailing step modular without duplicating exchange logic here.
     """
+    if log_fn:
+        log_fn(
+            f"[MODULE][trailing] sym={symbol} pos={'yes' if position else 'no'} open_orders={len(open_orders or [])} config_keys={list((config or {}).keys()) if isinstance(config, dict) else []}"
+        )
     if handler is None:
         return list(open_orders or [])
-    return handler(exchange, symbol, position, df_primary, open_orders, config)
+    result = handler(exchange, symbol, position, df_primary, open_orders, config)
+    if log_fn:
+        log_fn(
+            f"[MODULE][trailing] sym={symbol} result_orders={len(result or []) if isinstance(result, (list, tuple)) else 'n/a'}"
+        )
+    return result

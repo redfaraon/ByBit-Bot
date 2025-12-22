@@ -80,7 +80,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.4"
+BOT_VERSION = "1.3.5"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -12773,6 +12773,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             is_long,
             keep_ids_preferred=stop_ids_preferred,
             handler=_cleanup_redundant_stop_orders,
+            log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
         )
         if cancelled_stop_entries:
             summary = "; ".join(cancelled_stop_entries)
@@ -12875,6 +12876,7 @@ def _refresh_position_protection_if_possible(
         open_orders,
         config=symbol_meta,
         handler=ensure_position_protection,
+        log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
     )
     has_stop = False
     has_take = False
@@ -12890,6 +12892,7 @@ def _refresh_position_protection_if_possible(
             updated_orders,
             config=symbol_meta,
             handler=ensure_position_protection,
+            log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
         )
         _, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
         if not has_take:
@@ -16178,6 +16181,7 @@ def run_cycle():
                 (current_position or {}).get("side"),
                 MAX_NON_REDUCE_LIMITS_PER_SIDE,
                 handler=_cleanup_excess_non_reduce_limits,
+                log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
             )
             open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
@@ -16214,6 +16218,7 @@ def run_cycle():
                         except Exception:
                             oi_history = []
                         manual_open_interest_cache[sym] = oi_history or []
+                    log(f"[MODULE][context] build {sym}: tf30={tf30_df is not None} tf4h={tf4h_df is not None} pos_amt={safe_float((current_position or {}).get('amount') or (current_position or {}).get('contracts'))} orders={len(open_orders_symbol or [])}", Fore.LIGHTBLACK_EX)
                     manual_ctx = strategy_context.build_manual_strategy_context(
                         sym,
                         tf30_df,
@@ -16244,6 +16249,7 @@ def run_cycle():
                         log(signal_msg, Fore.LIGHTBLACK_EX)
                         log_user(signal_msg, color=Fore.LIGHTBLACK_EX)
                         manual_decision = strategy_executor.apply_event(manual_event, manual_ctx)
+                        log(f"[MODULE][executor] {sym}: event={manual_event.name} side={manual_event.side} -> decision={manual_decision}", Fore.LIGHTBLACK_EX)
                         manual_decision["ai_unavailable"] = True
                         manual_decision.setdefault("reason", manual_event.reason)
                 else:
@@ -17767,6 +17773,7 @@ def run_cycle():
                     open_orders_attempt,
                     config=None,
                     handler=ensure_position_protection,
+                    log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
                 )
                 if isinstance(updated_orders, list):
                     open_orders_attempt = updated_orders
