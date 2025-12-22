@@ -10,7 +10,7 @@ from typing import Any, Iterable, Sequence
 
 def _default_spec() -> dict[str, Any]:
     return {
-        "version": "1.1.0",
+        "version": "1.1.1",
         "context": {
             "universe": [
                 "BTC/USDT",
@@ -77,6 +77,10 @@ def _default_spec() -> dict[str, Any]:
                 "scale": 0.5,
             },
         },
+        "events": {
+            "entry_ladder": [(0.6, 0.0), (0.4, 0.6)],
+            "tp_ladder": [(0.33, 1.2), (0.33, 2.0), (0.34, 3.0)],
+        },
     }
 
 
@@ -98,6 +102,8 @@ THRESHOLDS = SPEC.get("thresholds", {})
 RULES_SPEC = SPEC.get("rules", {})
 SIZE_SPEC = SPEC.get("sizing", {})
 EVENTS_SPEC = SPEC.get("events", {})
+ENTRY_LADDER = EVENTS_SPEC.get("entry_ladder") or []
+TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
 
 WATCHLIST = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "BTC/USDT",
@@ -400,8 +406,7 @@ def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -
 
 
 def should_open(ctx: StrategyContext) -> StrategyEvent | None:
-    if ctx.symbol not in WATCHLIST:
-        return StrategyEvent("skip", reason="symbol outside manual watchlist", confidence=0.0)
+    # Allow processing even if symbol not listed to cover open-position symbols injected by universe builder.
     if ctx.news_bias == "uncertain":
         return StrategyEvent("skip", reason="news uncertain, skip entries", confidence=0.0)
     if ctx.atr_sigma > ATR_SIGMA_HOT:
@@ -434,6 +439,9 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
                 reason = "; ".join(base_reason) or "trend long confluence"
+            metadata: dict[str, Any] = {"regime": "trend"}
+            if order_type == "limit" and ENTRY_LADDER:
+                metadata["ladder_orders"] = ENTRY_LADDER
             return StrategyEvent(
                 f"open_{order_type}",
                 side="buy",
@@ -441,7 +449,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 reason=reason,
                 size_pct=_size_for_regime(ctx, "trend"),
                 confidence=float(confidence_map.get("market" if order_type == "market" else "limit", 0.8)),
-                metadata={"regime": "trend"},
+                metadata=metadata,
             )
     elif trend == "short":
         confidence_map = short_rule.get("confidence", {})
@@ -461,6 +469,9 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
                 reason = "; ".join(base_reason) or "trend short confluence"
+            metadata: dict[str, Any] = {"regime": "trend"}
+            if order_type == "limit" and ENTRY_LADDER:
+                metadata["ladder_orders"] = ENTRY_LADDER
             return StrategyEvent(
                 f"open_{order_type}",
                 side="sell",
@@ -468,7 +479,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 reason=reason,
                 size_pct=_size_for_regime(ctx, "trend"),
                 confidence=float(confidence_map.get("market" if order_type == "market" else "limit", 0.8)),
-                metadata={"regime": "trend"},
+                metadata=metadata,
             )
 
     # Countertrend entries
@@ -487,6 +498,9 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         and oi_flat
     ):
         reason = "countertrend long: RSI extreme, ATR cooling, OI not rising"
+        meta: dict[str, Any] = {"regime": "counter"}
+        if ENTRY_LADDER:
+            meta["ladder_orders"] = ENTRY_LADDER
         return StrategyEvent(
             "open_limit",
             side="buy",
@@ -494,7 +508,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             reason=reason,
             size_pct=_size_for_regime(ctx, "counter"),
             confidence=float(long_rule_ct.get("confidence", 0.72)),
-            metadata={"regime": "counter"},
+            metadata=meta,
         )
     if (
         counter == "short"
@@ -503,6 +517,9 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         and oi_flat
     ):
         reason = "countertrend short: RSI extreme, ATR cooling, OI not rising"
+        meta: dict[str, Any] = {"regime": "counter"}
+        if ENTRY_LADDER:
+            meta["ladder_orders"] = ENTRY_LADDER
         return StrategyEvent(
             "open_limit",
             side="sell",
@@ -510,7 +527,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             reason=reason,
             size_pct=_size_for_regime(ctx, "counter"),
             confidence=float(short_rule_ct.get("confidence", 0.72)),
-            metadata={"regime": "counter"},
+            metadata=meta,
         )
     return None
 
@@ -616,23 +633,29 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
     atr_multiple = float(tp_spec.get("atr_multiple", 2.0))
     if side == "long" and ctx.tf30.rsi >= float(tp_spec.get("rsi_long", 70)):
         tp_price = ctx.price + (ctx.tf30.atr * atr_multiple if math.isfinite(ctx.tf30.atr) else 0)
+        metadata: dict[str, Any] = {"tp_price": tp_price}
+        if TP_LADDER and math.isfinite(ctx.tf30.atr):
+            metadata["tp_ladder"] = TP_LADDER
         return StrategyEvent(
             "place_limit_TP",
             side="sell",
             order_type="limit",
             reason="RSI>70 -> scale out / TP",
             confidence=0.62,
-            metadata={"tp_price": tp_price},
+            metadata=metadata,
         )
     if side == "short" and ctx.tf30.rsi <= float(tp_spec.get("rsi_short", 30)):
         tp_price = ctx.price - (ctx.tf30.atr * atr_multiple if math.isfinite(ctx.tf30.atr) else 0)
+        metadata = {"tp_price": tp_price}
+        if TP_LADDER and math.isfinite(ctx.tf30.atr):
+            metadata["tp_ladder"] = TP_LADDER
         return StrategyEvent(
             "place_limit_TP",
             side="buy",
             order_type="limit",
             reason="RSI<30 -> scale out / TP",
             confidence=0.62,
-            metadata={"tp_price": tp_price},
+            metadata=metadata,
         )
     regime = ctx.trend_bias
     modify_spec = EVENTS_SPEC.get("modify_position", {})
@@ -690,4 +713,3 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     if event:
         return event
     return StrategyEvent("skip", reason="no confluence", confidence=0.0)
-

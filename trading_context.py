@@ -5,8 +5,7 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-from strategy import IndicatorBlock, StrategyContext
-import trading_context
+from strategy import StrategyContext, IndicatorBlock
 
 
 def _safe_float(val: Any) -> float | None:
@@ -66,7 +65,7 @@ def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
     return None
 
 
-def build_manual_strategy_context(
+def build_symbol_context(
     symbol: str,
     tf30_df: pd.DataFrame | None,
     tf4h_df: pd.DataFrame | None,
@@ -80,16 +79,41 @@ def build_manual_strategy_context(
     open_interest_history: Sequence[Any] | None,
     risk_pct: float,
 ) -> StrategyContext | None:
-    return trading_context.build_symbol_context(
-        symbol,
-        tf30_df,
-        tf4h_df,
-        primary_df,
-        current_position=current_position,
-        open_orders=open_orders,
-        pending_info=pending_info,
+    block_30m = _indicator_block_from_df(tf30_df)
+    block_4h = _indicator_block_from_df(tf4h_df)
+    if block_30m is None or block_4h is None:
+        return None
+    price_val = None
+    if primary_df is not None and not primary_df.empty:
+        price_val = _safe_float(primary_df.iloc[-1].get("close"))
+    if price_val is None or price_val <= 0:
+        price_val = block_30m.close
+    if price_val is None or price_val <= 0:
+        return None
+    amount_val = _safe_float((current_position or {}).get("amount") or (current_position or {}).get("contracts")) or 0.0
+    side_raw = (current_position or {}).get("side")
+    if not side_raw and amount_val:
+        side_raw = "buy" if amount_val > 0 else "sell"
+    funding_rate = None
+    if isinstance(funding_snapshot, dict):
+        funding_rate = _safe_float(
+            funding_snapshot.get("fundingRate")
+            or funding_snapshot.get("funding_rate")
+            or funding_snapshot.get("rate")
+        )
+    pending_price = _pending_limit_price(pending_info)
+    return StrategyContext(
+        symbol=symbol,
+        price=price_val,
+        tf30=block_30m,
+        tf4h=block_4h,
         news_score=news_score,
-        funding_snapshot=funding_snapshot,
-        open_interest_history=open_interest_history,
+        funding_rate=funding_rate,
+        open_interest_history=open_interest_history or [],
+        has_position=abs(amount_val) > 0,
+        position_side=side_raw,
+        position_size=abs(amount_val),
+        open_orders=list(open_orders or []),
+        pending_entry_price=pending_price,
         risk_pct=risk_pct,
     )

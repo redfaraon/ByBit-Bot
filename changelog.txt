@@ -1,9 +1,9 @@
 Changelog (newest first)
 
-1.3.2 (2025-12-21, commit pending)
-- Centralised all trading knobs into `strategy_spec.json` (risk/leverage/protection/trailing/news providers/position caps) with JSON priority over `.env`; news tokens now resolve via the provider's `token_env`. Manual mode stays forced on; no offline/AI fallbacks.
-- Added modular wrappers for protection/trailing and order cleanup, wiring `run_cycle` through them so the manual path is isolated from legacy helpers.
-- Documented the full project layout in `PROJECT_OVERVIEW.md` and refreshed `strategy_spec.md` to v1.1.0 with the new execution/providers blocks and clarified that the `account` section only configures logging.
+1.3.3 (2025-12-22, commit pending)
+- Strategy spec v1.1.1: open news providers list (no keys), universe_mode (fixed/news, include open positions, cap size), and ladder configs for entries/TPs moved into JSON; risk/execution still override `.env`.
+- Universe and manual flow rebuilt each cycle via `universe_builder` (always injects open-position symbols). Manual loop no longer skips symbols outside the watchlist.
+- Added `trading_context.py` split from strategy_context and documented full orchestrator flow in `PROJECT_OVERVIEW.md`; ladders now flow through strategy -> executor for placement.
 
 1.3.1 (2025-12-21, commit pending)
 - Manual JSON spec now owns every decision: offline/AI fallbacks are disabled, `[MANUAL]` logs cover context, signal, and execution, and the executor never drops back to the legacy offline planner.

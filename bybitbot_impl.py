@@ -40,6 +40,7 @@ import account_context
 import order_cleanup
 import protection_utils
 import trailing_utils
+import universe_builder
 STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get("env_vars", []) if isinstance(var, str)}
 STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
 STRATEGY_EXECUTION_SPEC = strategy.SPEC.get("execution", {})
@@ -79,7 +80,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.2"
+BOT_VERSION = "1.3.3"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -4493,18 +4494,17 @@ def refresh_settings():
         NEW_IDEAS_LIMIT = 6
     NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
 
-    news_spec = STRATEGY_PROVIDERS_SPEC.get("news") if isinstance(STRATEGY_PROVIDERS_SPEC, dict) else {}
-    news_primary = str(news_spec.get("primary") or "").strip().lower() if isinstance(news_spec, dict) else ""
-    news_fallback = str(news_spec.get("fallback") or "").strip().lower() if isinstance(news_spec, dict) else ""
+    news_spec_raw = STRATEGY_PROVIDERS_SPEC.get("news") if isinstance(STRATEGY_PROVIDERS_SPEC, dict) else None
+    news_list = []
+    if isinstance(news_spec_raw, list):
+        news_list = [str(x).strip().lower() for x in news_spec_raw if x]
+    elif isinstance(news_spec_raw, dict):
+        primary = str(news_spec_raw.get("primary") or "").strip().lower()
+        fallback = str(news_spec_raw.get("fallback") or "").strip().lower()
+        news_list = [p for p in (primary, fallback) if p]
     news_provider_env = os.getenv("CRYPTO_NEWS_PROVIDER") or os.getenv("NEWS_PROVIDER") or ""
-    NEWS_PROVIDER = news_primary or news_provider_env.strip().lower() or news_fallback or "hybrid"
-    news_token_env = news_spec.get("token_env") if isinstance(news_spec, dict) else None
-    if news_token_env:
-        NEWS_API_TOKEN = os.getenv(str(news_token_env))
-    else:
-        NEWS_API_TOKEN = None
-    if not NEWS_API_TOKEN:
-        NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
+    NEWS_PROVIDER = (news_list[0] if news_list else "") or news_provider_env.strip().lower() or "hybrid"
+    NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
     AI_INITIAL_NEWS_PROVIDER = os.getenv("AI_INITIAL_NEWS_PROVIDER") or NEWS_PROVIDER
     AI_INITIAL_NEWS_LIMIT = max(1, env_int("AI_INITIAL_NEWS_LIMIT", NEWS_ITEMS_LIMIT or 5))
@@ -15992,6 +15992,17 @@ def run_cycle():
     if not symbols_sequence:
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
+    # Rebuild manual universe to include open positions and JSON constraints.
+    manual_universe_built = universe_builder.build_universe(strategy.CONTEXT_SPEC, position_symbols)
+    try:
+        MANUAL_STRATEGY_SYMBOLS.clear()
+        MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})
+    except Exception:
+        MANUAL_STRATEGY_SYMBOLS = {sym.upper() for sym in manual_universe_built}
+    # Ensure symbols_sequence aligns with manual universe if present.
+    if manual_universe_built:
+        symbols_sequence = manual_universe_built
+
     SYMBOL_MARKET_MODE_HINTS.clear()
     decisions_total = 0
     counts = {"open":0,"close":0,"skip":0}
@@ -16185,7 +16196,7 @@ def run_cycle():
             manual_event = None
             ai_offline_mode = False
             manual_active = MANUAL_STRATEGY_FORCE
-            if manual_active and sym.upper() in MANUAL_STRATEGY_SYMBOLS:
+            if manual_active:
                 tf30_df = timeframe_dfs.get("30m")
                 tf4h_df = timeframe_dfs.get("4h")
                 if tf30_df is not None and tf4h_df is not None:
@@ -16238,15 +16249,6 @@ def run_cycle():
                 else:
                     log(f"[MANUAL] {sym}: context unavailable for strategy input", Fore.YELLOW)
                     log_user(f"[MANUAL] {sym}: context unavailable for strategy input", color=Fore.YELLOW)
-            else:
-                log(
-                    f"[MANUAL] {sym}: symbol outside manual universe, skip",
-                    Fore.LIGHTBLACK_EX,
-                )
-                log_user(
-                    f"[MANUAL] {sym}: symbol outside manual universe, skip",
-                    color=Fore.LIGHTBLACK_EX,
-                )
             if manual_decision is None:
                 manual_decision = {
                     "symbol": sym,

@@ -22,6 +22,7 @@ def apply_event(event: StrategyEvent, ctx: StrategyContext) -> dict[str, Any]:
         "strategy_event": event.name,
         "confidence": event.confidence,
     }
+    ladder_orders = event.metadata.get("ladder_orders") if isinstance(event.metadata, dict) else None
     if event.name in {"open_market", "open_limit"}:
         decision["action"] = "open"
         decision["side"] = event.side
@@ -30,15 +31,31 @@ def apply_event(event: StrategyEvent, ctx: StrategyContext) -> dict[str, Any]:
             decision["order_type"] = "market"
         else:
             decision["order_type"] = "limit"
-            limit_price = event.metadata.get("limit_price") or _limit_price(event, ctx)
-            decision["orders"] = [
-                {
-                    "type": "limit",
-                    "side": event.side,
-                    "price": limit_price,
-                    "params": {"reduceOnly": False},
-                }
-            ]
+            if ladder_orders:
+                orders: list[dict[str, Any]] = []
+                for share, offset in ladder_orders:
+                    try:
+                        share_f = float(share)
+                        offset_f = float(offset)
+                    except (TypeError, ValueError):
+                        continue
+                    price = ctx.price
+                    if price and ctx.tf30 and ctx.tf30.atr and ctx.tf30.atr > 0:
+                        price = ctx.price - offset_f * ctx.tf30.atr if event.side == "buy" else ctx.price + offset_f * ctx.tf30.atr
+                    if price is None:
+                        continue
+                    orders.append({"type": "limit", "side": event.side, "price": round(price, 6), "params": {"reduceOnly": False}, "share": share_f})
+                decision["orders"] = orders or None
+            else:
+                limit_price = event.metadata.get("limit_price") or _limit_price(event, ctx)
+                decision["orders"] = [
+                    {
+                        "type": "limit",
+                        "side": event.side,
+                        "price": limit_price,
+                        "params": {"reduceOnly": False},
+                    }
+                ]
     elif event.name == "hedge_open":
         decision["action"] = "open"
         decision["side"] = event.side
@@ -52,14 +69,29 @@ def apply_event(event: StrategyEvent, ctx: StrategyContext) -> dict[str, Any]:
     elif event.name == "place_limit_TP":
         decision["action"] = "manage"
         tp_price = event.metadata.get("tp_price") or _limit_price(event, ctx)
-        decision["orders"] = [
-            {
-                "type": "limit",
-                "side": event.side,
-                "price": tp_price,
-                "params": {"reduceOnly": True},
-            }
-        ]
+        tp_ladder = event.metadata.get("tp_ladder") if isinstance(event.metadata, dict) else None
+        if tp_ladder and ctx.tf30 and ctx.tf30.atr:
+            orders = []
+            for share, mult in tp_ladder:
+                try:
+                    share_f = float(share)
+                    mult_f = float(mult)
+                except (TypeError, ValueError):
+                    continue
+                price = tp_price
+                if ctx.price and ctx.tf30.atr:
+                    price = ctx.price + mult_f * ctx.tf30.atr if event.side == "sell" else ctx.price - mult_f * ctx.tf30.atr
+                orders.append({"type": "limit", "side": event.side, "price": price, "params": {"reduceOnly": True}, "share": share_f})
+            decision["orders"] = orders or None
+        else:
+            decision["orders"] = [
+                {
+                    "type": "limit",
+                    "side": event.side,
+                    "price": tp_price,
+                    "params": {"reduceOnly": True},
+                }
+            ]
     elif event.name == "cancel_limit":
         decision["action"] = "manage"
         order_ids = [order.get("id") for order in ctx.entry_orders if order.get("id")]

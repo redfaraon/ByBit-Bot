@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.1.1",
   "context": {
     "universe": [
       "BTC/USDT",
@@ -27,7 +27,12 @@
       "RISK_PCT",
       "MIN_DYNAMIC_RISK_PCT",
       "MAX_DYNAMIC_RISK_PCT"
-    ]
+    ],
+    "universe_mode": {
+      "source": "fixed",                // fixed | news
+      "max_symbols": 8,                 // cap, includes symbols with open positions
+      "include_positions": true         // ensure open-position symbols are always in universe
+    }
   },
   "risk": {
     "base_pct": 0.02,
@@ -106,6 +111,15 @@
       "buy": 0.998,
       "sell": 1.002
     },
+    "entry_ladder": [
+      [0.6, 0.0],
+      [0.4, 0.6]
+    ],
+    "tp_ladder": [
+      [0.33, 1.2],
+      [0.33, 2.0],
+      [0.34, 3.0]
+    ],
     "tp": {
       "atr_multiple": 2.0,
       "rsi_long": 70,
@@ -138,11 +152,11 @@
     "log_tag": "[ACCOUNT]"
   },
   "providers": {
-    "news": {
-      "primary": "cryptopanic",
-      "fallback": "rss",
-      "token_env": "CRYPTO_NEWS_TOKEN"
-    }
+    "news": [
+      "cryptopanic",
+      "rss",
+      "coindesk"
+    ]
   },
   "execution": {
     "manual_only": true,

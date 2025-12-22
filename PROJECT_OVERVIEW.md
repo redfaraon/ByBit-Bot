@@ -1,9 +1,11 @@
 ## Project Overview (ByBit Bot)
 
 ### Modules & Roles
-- `bybitbot_impl.py` — main runner: loads settings, fetches public/private context, routes manual strategy decisions to execution, manages orders/protection, Telegram handlers, persistence (state/log files).
+- `bybitbot_impl.py` — orchestrator: loads settings, fetches public/private context, routes manual strategy decisions to execution, manages orders/protection, Telegram handlers, persistence (state/log files).
+- `universe_builder.py` — builds the manual universe from JSON (`context.universe_mode`) and injects symbols with open positions.
 - `strategy.py` — JSON-driven manual strategy (no AI): builds `StrategyContext`, detects regimes, emits `StrategyEvent`s, holds sizing/thresholds from `strategy_spec.json`.
 - `strategy_context.py` — builds indicator/news/funding/OI context for the manual strategy.
+- `trading_context.py` — per-symbol context builder (bars/indicators/news/open interest/funding) used by the interpreter.
 - `strategy_executor.py` — maps `StrategyEvent` → executable decision dict (orders, side, type, notional_pct).
 - `account_context.py` — snapshots private account state (equity, margin, positions, open orders) and logs `[ACCOUNT] ...`.
 - `order_cleanup.py` — wrappers for limit/stop cleanup (delegates to impl handlers).
@@ -57,6 +59,17 @@
 - `strategy_spec.json` — active strategy config (universe, risk, execution, providers, events).
 
 ### Laddering / Orders
-- Opens: ladder built from `ENTRY_LADDER_SCHEME` (weights + ATR offsets); defaults `(0.6@0 ATR, 0.4@0.6 ATR)`. Limit drift refresh uses `events.limit_gap_pct`.
-- Takes/scale-outs: `PARTIAL_TP_SCHEME` defines reduce-only TP ladder; interpreter also emits `place_limit_TP` when RSI extremes hit. Protection refresh enforces SL/TP/trailing per `execution` ATR multipliers.
+- Opens: ladder driven by `events.entry_ladder` in `strategy_spec.json` (share, ATR offset). Defaults `(0.6@0 ATR, 0.4@0.6 ATR)`. Limit drift refresh uses `events.limit_gap_pct`.
+- Takes/scale-outs: `events.tp_ladder` defines reduce-only TP ladder (share, ATR multiple). Protection refresh enforces SL/TP/trailing per `execution` ATR multipliers.
 - Order cleanup: non-reduce entry limits pruned to `MAX_NON_REDUCE_LIMITS_PER_SIDE`; redundant reduce-only stops trimmed after fresh protection is placed.
+
+### Flow (impl orchestrator, manual-only)
+1. Verify HEAD; if running backup and a new HEAD exists, leave backup and reload modules.
+2. Collect user account context (equity/margin/positions/orders) via `account_context`; log `[ACCOUNT] ...`.
+3. Build universe via `universe_builder` (fixed/news per JSON, always includes open positions).
+4. For each symbol:
+   - Build trading context (bars/indicators/news/funding/oi) via `trading_context`/`strategy_context`.
+   - Run strategy → signals/events; log `[MANUAL][SIGNAL]`.
+   - Execute via `strategy_executor` (order/place/cancel/modify) and log `[MANUAL][EXEC]`.
+   - Cleanup stale limits, apply trailing, enforce protection; if protection fails to place, close the position and surface an error.
+5. Summarize cycle, compute next start time, and wait until the scheduled run.
