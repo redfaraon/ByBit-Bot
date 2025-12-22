@@ -1,8 +1,9 @@
 Changelog (newest first)
 
 1.3.1 (2025-12-21, commit pending)
-- Guarded the manual strategy by computing `ai_offline_mode` before it is referenced so forced/manual runs never crash with `UnboundLocalError`.
-- Confirmed the manual flow still uses core `run_cycle` state (funding, OI, news) and left the 1.3.0 notes below unchanged.
+- Manual JSON spec now owns every decision: offline/AI fallbacks are disabled, `[MANUAL]` logs cover context, signal, and execution, and the executor never drops back to the legacy offline planner.
+- `strategy_spec.json`/`.md` gained `risk`, `account`, and `execution` sections; all trading parameters (risk window, universe, thresholds, events) come from JSON and env overrides are only honored when whitelisted in `context.env_vars`.
+- Added dedicated modules for account snapshots, context building, and event execution plus mirrored logging into `assets/bybit.log`, making manual/manual-only runs auditable per symbol.
 
 1.3.0 (2025-12-21, commit pending)
 - Added a standalone `strategy.py` module with the eight-indicator/eight-coin rule-set (get_signal_without_ai/apply_event/should_* helpers) so the bot can run a deterministic, news-aware intraday flow with no AI dependency.

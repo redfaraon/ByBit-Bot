@@ -35,6 +35,24 @@ from dotenv import dotenv_values
 import db_logger
 import strategy
 import strategy_context
+import strategy_executor
+import account_context
+STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get("env_vars", []) if isinstance(var, str)}
+STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
+STRATEGY_EXECUTION_SPEC = strategy.SPEC.get("execution", {})
+
+
+def _strategy_env_value(var_name: str) -> str | None:
+    """Return the env value only if JSON spec explicitly allows it."""
+    if not var_name:
+        return None
+    if var_name.upper() not in STRATEGY_ENV_WHITELIST:
+        return None
+    raw_value = os.getenv(var_name)
+    if raw_value is None:
+        return None
+    cleaned = raw_value.strip()
+    return cleaned or None
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except ImportError:
@@ -3877,28 +3895,40 @@ def refresh_settings():
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
     LEVERAGE = int(os.getenv("LEVERAGE", 10))
-    risk_env_value = os.getenv("RISK_PCT")
-    if risk_env_value is None:
-        risk_env_value = os.getenv("RISK_EQUITY_PCT")
-    try:
-        RISK_PCT = float(risk_env_value) if risk_env_value is not None else DEFAULT_RISK_PCT
-    except (TypeError, ValueError):
-        log(f"[WARN] Invalid RISK_PCT value '{risk_env_value}', using default {DEFAULT_RISK_PCT:.4f}", Fore.YELLOW)
-        RISK_PCT = DEFAULT_RISK_PCT
+    spec_base_risk = float(STRATEGY_RISK_SPEC.get("base_pct") or DEFAULT_RISK_PCT)
+    spec_min_risk = float(STRATEGY_RISK_SPEC.get("min_pct") or max(0.0005, spec_base_risk * 0.5))
+    spec_max_risk = float(STRATEGY_RISK_SPEC.get("max_pct") or max(spec_base_risk, spec_base_risk * 1.8))
+    RISK_PCT = spec_base_risk
+    risk_env_value = _strategy_env_value("RISK_PCT")
+    if risk_env_value is not None:
+        try:
+            candidate = float(risk_env_value)
+            if candidate > 0:
+                RISK_PCT = candidate
+            else:
+                log(f"[WARN] Ignoring non-positive RISK_PCT={candidate}; using JSON value {spec_base_risk:.4f}", Fore.YELLOW)
+        except (TypeError, ValueError):
+            log(f"[WARN] Invalid RISK_PCT value '{risk_env_value}', using JSON value {spec_base_risk:.4f}", Fore.YELLOW)
     if not math.isfinite(RISK_PCT) or RISK_PCT <= 0:
-        log(f"[WARN] RISK_PCT={RISK_PCT} is not positive, using default {DEFAULT_RISK_PCT:.4f}", Fore.YELLOW)
-        RISK_PCT = DEFAULT_RISK_PCT
+        log(f"[WARN] RISK_PCT={RISK_PCT} is invalid, reverting to JSON value {spec_base_risk:.4f}", Fore.YELLOW)
+        RISK_PCT = spec_base_risk
     DYNAMIC_RISK_ENABLED = env_int("RISK_DYNAMIC_ENABLED", 1) != 0
-    base_min_default = max(0.0005, RISK_PCT * 0.5)
-    base_max_default = max(RISK_PCT, RISK_PCT * 1.8)
-    try:
-        MIN_DYNAMIC_RISK_PCT = float(os.getenv("MIN_DYNAMIC_RISK_PCT", str(base_min_default)))
-    except (TypeError, ValueError):
-        MIN_DYNAMIC_RISK_PCT = base_min_default
-    try:
-        MAX_DYNAMIC_RISK_PCT = float(os.getenv("MAX_DYNAMIC_RISK_PCT", str(base_max_default)))
-    except (TypeError, ValueError):
-        MAX_DYNAMIC_RISK_PCT = base_max_default
+    min_candidate = spec_min_risk
+    min_env_value = _strategy_env_value("MIN_DYNAMIC_RISK_PCT")
+    if min_env_value is not None:
+        try:
+            min_candidate = float(min_env_value)
+        except (TypeError, ValueError):
+            log(f"[WARN] Invalid MIN_DYNAMIC_RISK_PCT '{min_env_value}', using JSON value {spec_min_risk:.4f}", Fore.YELLOW)
+    max_candidate = spec_max_risk
+    max_env_value = _strategy_env_value("MAX_DYNAMIC_RISK_PCT")
+    if max_env_value is not None:
+        try:
+            max_candidate = float(max_env_value)
+        except (TypeError, ValueError):
+            log(f"[WARN] Invalid MAX_DYNAMIC_RISK_PCT '{max_env_value}', using JSON value {spec_max_risk:.4f}", Fore.YELLOW)
+    MIN_DYNAMIC_RISK_PCT = max(1e-5, min(min_candidate, RISK_PCT))
+    MAX_DYNAMIC_RISK_PCT = max(RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, max_candidate))
     MIN_DYNAMIC_RISK_PCT = max(1e-5, min(MIN_DYNAMIC_RISK_PCT, RISK_PCT))
     MAX_DYNAMIC_RISK_PCT = max(RISK_PCT, max(MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT))
     # Market allocation defaults (overridable by model via trade plan 'allocations')
@@ -4244,39 +4274,37 @@ def refresh_settings():
         "yes",
         "on",
     }
-    OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    try:
-        OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
-    except (TypeError, ValueError):
-        OFFLINE_PAIR_LIMIT = 8
-    OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
-    try:
-        OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
-    except (TypeError, ValueError):
-        OFFLINE_MAX_NEW_POSITIONS = 1
-    OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
-    manual_symbols_env = os.getenv("MANUAL_STRATEGY_SYMBOLS")
-    manual_symbols: set[str] = set()
-    if manual_symbols_env:
-        for chunk in manual_symbols_env.split(","):
-            cleaned = chunk.strip().upper()
-            if cleaned:
-                manual_symbols.add(cleaned)
+    manual_only_execution = bool(STRATEGY_EXECUTION_SPEC.get("manual_only"))
+    if manual_only_execution:
+        OFFLINE_TRADING_ENABLED = False
+        OFFLINE_NEWS_BIAS_ENABLED = False
+        OFFLINE_PAIR_LIMIT = 0
+        OFFLINE_MAX_NEW_POSITIONS = 0
     else:
-        manual_symbols = {sym.upper() for sym in strategy.WATCHLIST}
-    MANUAL_STRATEGY_SYMBOLS = manual_symbols
-    MANUAL_STRATEGY_FORCE = env_bool("MANUAL_STRATEGY_FORCE", True)
+        OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        try:
+            OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
+        except (TypeError, ValueError):
+            OFFLINE_PAIR_LIMIT = 8
+        OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
+        try:
+            OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
+        except (TypeError, ValueError):
+            OFFLINE_MAX_NEW_POSITIONS = 1
+        OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
+    MANUAL_STRATEGY_SYMBOLS = {sym.upper() for sym in strategy.WATCHLIST}
+    MANUAL_STRATEGY_FORCE = True
 
     global TOKEN_LIMIT, TOKEN_SOFT_LIMIT
     TOKEN_LIMIT = env_int("OPENAI_REQUEST_TOKEN_LIMIT", 12000)
@@ -4746,8 +4774,8 @@ def _emit_ai_offline_notice(reason: str) -> None:
     provider = _current_ai_provider().upper()
     cancel_entries = "on" if AI_OFFLINE_CANCEL_ENTRIES else "off"
     msg = (
-        f"[AI] OFFLINE fallback active ({provider} unavailable: {reason}). "
-        f"Strategy: no new entries; cancel non-reduce orders={cancel_entries}; manage existing positions with local protection."
+        f"[MANUAL] AI providers unavailable ({provider}: {reason}). "
+        f"JSON strategy taking over; cancel non-reduce orders={cancel_entries}; manage positions locally."
     )
     log(msg, Fore.YELLOW)
     try:
@@ -15480,7 +15508,8 @@ def run_cycle():
             order_symbols.add(sym_candidate)
 
     if (
-        updated_universe is None
+        OFFLINE_TRADING_ENABLED
+        and updated_universe is None
         and _AI_OFFLINE_ACTIVE_CYCLE is not None
         and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
     ):
@@ -15498,7 +15527,7 @@ def run_cycle():
         universe_state["ai_offline"] = True
         save_universe_cache(universe_state)
         log(
-            f"[AI OFFLINE] Universe selection: {', '.join(offline_pairs)} (limit={OFFLINE_PAIR_LIMIT})",
+            f"[MANUAL] Universe selection fallback: {', '.join(offline_pairs)} (limit={OFFLINE_PAIR_LIMIT})",
             Fore.YELLOW,
         )
 
@@ -15650,6 +15679,14 @@ def run_cycle():
     _emit_unrealized_pnl_message("start", start_unreal_total, start_unreal_count)
 
     open_orders_cache = dict(open_orders_prefetch)
+    account_snapshot = account_context.build_snapshot(
+        equity=equity,
+        available_margin=available_margin,
+        positions=positions_map,
+        open_orders=open_orders_cache,
+        balance_snapshot=balance_snapshot_start if isinstance(balance_snapshot_start, dict) else None,
+    )
+    account_context.log_snapshot(account_snapshot, log_fn=log, user_log_fn=log_user)
     manual_funding_cache: dict[str, dict[str, Any]] = {}
     manual_open_interest_cache: dict[str, Sequence[Any]] = {}
 
@@ -16104,17 +16141,9 @@ def run_cycle():
                     continue
             manual_decision = None
             manual_ctx = None
-            manual_handled = False
-            master_decision_used = False
-            rate_limit_error_hit = False
-            ai_offline_mode = (
-                _AI_OFFLINE_ACTIVE_CYCLE is not None
-                and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
-            )
-            manual_allowed = (not MASTER_DECISIONS_SHARE) or is_master_user
-            manual_active = manual_allowed and (
-                MANUAL_STRATEGY_FORCE or (ai_offline_mode and OFFLINE_TRADING_ENABLED)
-            )
+            manual_event = None
+            ai_offline_mode = False
+            manual_active = MANUAL_STRATEGY_FORCE
             if manual_active and sym.upper() in MANUAL_STRATEGY_SYMBOLS:
                 tf30_df = timeframe_dfs.get("30m")
                 tf4h_df = timeframe_dfs.get("4h")
@@ -16147,225 +16176,62 @@ def run_cycle():
                         risk_pct=CURRENT_RISK_PCT or RISK_PCT,
                     )
                     if manual_ctx:
+                        price_display = manual_ctx.price or 0.0
+                        context_msg = (
+                            f"[MANUAL][CONTEXT] {sym}: price={price_display:.4f} trend={manual_ctx.trend_bias or 'none'} "
+                            f"news={manual_ctx.news_bias} oi={manual_ctx.oi_trend} risk={manual_ctx.risk_pct:.4f}"
+                        )
+                        log(context_msg, Fore.LIGHTBLACK_EX)
+                        log_user(context_msg, color=Fore.LIGHTBLACK_EX)
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
-                        if manual_event:
-                            manual_decision = strategy.apply_event(manual_event, manual_ctx)
-                            manual_decision["ai_unavailable"] = True
-                            manual_decision.setdefault("reason", manual_event.reason)
-                            log(
-                                f"[MANUAL] {sym}: {manual_event.name} -> {manual_decision.get('action')}",
-                                Fore.LIGHTBLACK_EX,
-                            )
-                            log_user(
-                                f"[MANUAL] {sym}: {manual_event.name} -> {manual_decision.get('action')}",
-                                color=Fore.LIGHTBLACK_EX,
-                            )
-                            dec = manual_decision
-                            manual_handled = True
-                    else:
-                        log(f"[MANUAL] {sym}: context unavailable for strategy input", Fore.YELLOW)
-                        log_user(f"[MANUAL] {sym}: context unavailable for strategy input", color=Fore.YELLOW)
-                        manual_decision = {
-                            "symbol": sym,
-                            "action": "skip",
-                            "reason": "manual context unavailable",
-                            "ai_unavailable": True,
-                            "confidence": 0.0,
-                        }
-                        dec = manual_decision
-                        manual_handled = True
-            if not manual_handled:
-                canonical_lookup = _canonical_decision_symbol(sym)
-                preloaded_decision = decisions_map.get(canonical_lookup)
-                initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
-                if initial_payload:
-                    initial_payload["symbol"] = sym
-
-                dec = None
-                master_decision_used = False
-                rate_limit_error_hit = False
-            else:
-                canonical_lookup = _canonical_decision_symbol(sym)
-                preloaded_decision = decisions_map.get(canonical_lookup)
-                initial_payload = dict(preloaded_decision) if isinstance(preloaded_decision, dict) else None
-
-            if not manual_handled:
-                if ai_offline_mode and AI_OFFLINE_CANCEL_ENTRIES and open_orders_symbol:
-                    cancelled_offline: list[str] = []
-                    for order in open_orders_symbol:
-                        if not isinstance(order, dict):
-                            continue
-                        if _is_reduce_only(order):
-                            continue
-                        oid = order.get("id")
-                        if not oid:
-                            continue
-                        order_summary = _summarize_order_spec(order)
-                        summary_suffix = f": {order_summary}" if order_summary else ""
-                        success, err = cancel_order_by_id(ex, sym, str(oid))
-                        if success:
-                            cancelled_offline.append(f"{oid}{summary_suffix}")
-                    if cancelled_offline:
-                        msg = f"[AI OFFLINE] {sym}: cancelled non-reduce orders: {', '.join(cancelled_offline[:8])}"
-                        log(msg, Fore.YELLOW)
-                        try:
-                            send_tg(msg)
-                        except Exception:
-                            pass
-                if MASTER_DECISIONS_SHARE and not is_master_user:
-                    dec = _pull_master_decision(sym)
-                    if dec:
-                        master_decision_used = True
-                        log(
-                            f"[AI SHARE] {sym}: using master decision action={dec.get('action')} reason={(dec.get('reason') or '')[:120]}",
-                            Fore.LIGHTBLACK_EX,
+                        confidence_value = manual_event.confidence if manual_event.confidence is not None else 0.0
+                        signal_msg = (
+                            f"[MANUAL][SIGNAL] {sym}: {manual_event.name} "
+                            f"reason={manual_event.reason or 'n/a'} conf={confidence_value:.2f}"
                         )
-                    else:
-                        log(
-                            f"[WARN] {sym}: master decision unavailable; skipping AI call for follower user {active_user_id}",
-                            Fore.YELLOW,
-                        )
-                        dec = {
-                            "symbol": sym,
-                            "action": "skip",
-                            "reason": "master decision unavailable for follower run",
-                        }
-                if dec is None and not manual_handled:
-                    if ai_offline_mode:
-                        try:
-                            max_new_left = max(
-                                0,
-                                min(
-                                    OFFLINE_MAX_NEW_POSITIONS,
-                                    max(0, (max_positions_limit or 0) - int(open_positions or 0)) if max_positions_limit else OFFLINE_MAX_NEW_POSITIONS,
-                                ),
-                            )
-                        except Exception:
-                            max_new_left = OFFLINE_MAX_NEW_POSITIONS
-                        dec = _offline_decision_for_symbol(
-                            sym,
-                            df,
-                            current_position=current_position,
-                            news_score=news_score_value,
-                            max_new_positions_left=max_new_left,
-                        )
-                        log(
-                            f"[AI OFFLINE] {sym}: action={dec.get('action')} side={dec.get('side') or 'n/a'} reason={(dec.get('reason') or '')[:140]}",
-                            Fore.YELLOW,
-                        )
-                    else:
-                        def _offline_decision_fallback(note: str) -> dict[str, Any]:
-                            _emit_ai_offline_notice(note)
-                            news_score_local = news_score_value
-                            try:
-                                max_new_left_local = max(
-                                    0,
-                                    min(
-                                        OFFLINE_MAX_NEW_POSITIONS,
-                                        max(0, (max_positions_limit or 0) - int(open_positions or 0)) if max_positions_limit else OFFLINE_MAX_NEW_POSITIONS,
-                                    ),
-                                )
-                            except Exception:
-                                max_new_left_local = OFFLINE_MAX_NEW_POSITIONS
-                            decision = _offline_decision_for_symbol(
-                                sym,
-                                df,
-                                current_position=current_position,
-                                news_score=news_score_local,
-                                max_new_positions_left=max_new_left_local,
-                            )
-                            log(
-                                f"[AI OFFLINE] {sym}: action={decision.get('action')} side={decision.get('side') or 'n/a'} reason={(decision.get('reason') or '')[:140]}",
-                                Fore.YELLOW,
-                            )
-                            return decision
-
-                        def _call_ai_decision() -> dict[str, Any]:
-                            return ai_decision(
-                                sym,
-                                df,
-                                equity,
-                                available_margin,
-                                ex,
-                                current_position=current_position,
-                                open_orders=open_orders_symbol,
-                                extra_context=extra_serialized,
-                                target_meta=symbol_meta,
-                                news_payload=news_payload_symbol,
-                                initial_decision=initial_payload,
-                                priority_symbol=has_priority_exposure,
-                            )
-
-                        try:
-                            dec = _call_ai_decision()
-                        except RateLimitError as exc_rl:
-                            rate_limit_backoff = True
-                            rate_limit_error_hit = True
-                            current_provider = (_current_ai_provider() or "").strip().lower()
-                            primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
-                            if current_provider and current_provider == primary_provider:
-                                _switch_ai_provider_to_fallback(f"rate limit 429 (decision loop): {type(exc_rl).__name__}")
-                                msg = "[WARN] Primary AI provider rate limit: switched to secondary and retrying once."
-                                log(msg, Fore.YELLOW)
-                                try:
-                                    send_tg(msg)
-                                except Exception:
-                                    pass
-                                try:
-                                    dec = _call_ai_decision()
-                                except Exception as exc_retry:
-                                    dec = _offline_decision_fallback(f"rate limit 429; secondary failed: {type(exc_retry).__name__}")
-                                    ai_offline_mode = True
-                            else:
-                                dec = _offline_decision_fallback("rate limit 429 (secondary)")
-                                ai_offline_mode = True
-                        except Exception as exc_any:
-                            current_provider = (_current_ai_provider() or "").strip().lower()
-                            primary_provider = (AI_PROVIDER_PRIMARY or "openai").strip().lower()
-                            if current_provider and current_provider == primary_provider:
-                                rate_limit_backoff = True
-                                _switch_ai_provider_to_fallback(f"{type(exc_any).__name__} (decision loop)")
-                                msg = f"[WARN] Primary AI provider error ({type(exc_any).__name__}): switched to secondary and retrying once."
-                                log(msg, Fore.YELLOW)
-                                try:
-                                    send_tg(msg)
-                                except Exception:
-                                    pass
-                                try:
-                                    dec = _call_ai_decision()
-                                except Exception as exc_retry:
-                                    dec = _offline_decision_fallback(
-                                        f"primary failed: {type(exc_any).__name__}; secondary failed: {type(exc_retry).__name__}"
-                                    )
-                                    ai_offline_mode = True
-                        else:
-                            dec = _offline_decision_fallback(f"AI decision failed: {type(exc_any).__name__}")
-                            ai_offline_mode = True
-
-            if not dec:
-                if initial_payload:
-                    dec = initial_payload
+                        log(signal_msg, Fore.LIGHTBLACK_EX)
+                        log_user(signal_msg, color=Fore.LIGHTBLACK_EX)
+                        manual_decision = strategy_executor.apply_event(manual_event, manual_ctx)
+                        manual_decision["ai_unavailable"] = True
+                        manual_decision.setdefault("reason", manual_event.reason)
                 else:
-                    default_action = "hold" if has_position else "skip"
-                    exposure_notes = []
-                    if has_position:
-                        exposure_notes.append(f"open amount {initial_position_amount:.4f}")
-                    pending_count = len(open_orders_symbol or [])
-                    if pending_count:
-                        exposure_notes.append(f"{pending_count} pending order(s)")
-                    if not exposure_notes:
-                        exposure_notes.append("no active exposure")
-                    if trade_plan:
-                        base_reason = "trade plan omitted symbol"
-                    else:
-                        base_reason = "trade plan unavailable"
-                    detail_text = "; ".join(exposure_notes)
-                    default_reason = f"{base_reason}; {detail_text}"
-                    dec = {
-                        "symbol": sym,
-                        "action": default_action,
-                        "reason": default_reason,
-                    }
+                    log(f"[MANUAL] {sym}: context unavailable for strategy input", Fore.YELLOW)
+                    log_user(f"[MANUAL] {sym}: context unavailable for strategy input", color=Fore.YELLOW)
+            else:
+                log(
+                    f"[MANUAL] {sym}: symbol outside manual universe, skip",
+                    Fore.LIGHTBLACK_EX,
+                )
+                log_user(
+                    f"[MANUAL] {sym}: symbol outside manual universe, skip",
+                    color=Fore.LIGHTBLACK_EX,
+                )
+            if manual_decision is None:
+                manual_decision = {
+                    "symbol": sym,
+                    "action": "skip",
+                    "reason": "manual strategy unavailable",
+                    "ai_unavailable": True,
+                    "confidence": 0.0,
+                }
+            exec_action = (manual_decision.get("action") or "skip").upper()
+            exec_side = (manual_decision.get("side") or "").upper()
+            exec_type = (manual_decision.get("order_type") or "").upper()
+            exec_reason = manual_decision.get("reason") or "manual strategy unavailable"
+            exec_parts = [f"[MANUAL][EXEC] {sym}: action={exec_action}"]
+            if exec_side:
+                exec_parts.append(f"side={exec_side}")
+            if exec_type:
+                exec_parts.append(f"type={exec_type}")
+            exec_parts.append(f"reason={exec_reason}")
+            exec_msg = " ".join(exec_parts)
+            log(exec_msg, Fore.LIGHTBLACK_EX)
+            log_user(exec_msg, color=Fore.LIGHTBLACK_EX)
+            dec = manual_decision
+            decision_tag = "[MANUAL]" if dec.get("ai_unavailable") else "[AI]"
+            master_decision_used = False
+            rate_limit_error_hit = False
+
             if MASTER_DECISIONS_SHARE and is_master_user and not master_decision_used and dec:
                 _cache_master_decision(sym, dec)
             decision_confidence_raw = dec.get("confidence")
@@ -16386,7 +16252,7 @@ def run_cycle():
                 else:
                     sym_confidence_tag = "UNKNOWN"
                 tag_display = f" ({sym_confidence_tag})" if sym_confidence_tag else ""
-                confidence_msg = f"[AI] {sym} confidence: {sym_confidence_text}{tag_display}"
+                confidence_msg = f"{decision_tag} {sym} confidence: {sym_confidence_text}{tag_display}"
                 log(confidence_msg, Fore.LIGHTBLACK_EX)
                 send_tg_decision(confidence_msg)
             else:
@@ -16427,7 +16293,7 @@ def run_cycle():
             }
             action = action_aliases.get(action_raw, action_raw)
             if action != action_raw:
-                log(f"[AI] {sym}: normalized action {action_raw!r} -> {action!r}", Fore.LIGHTBLACK_EX)
+                log(f"{decision_tag} {sym}: normalized action {action_raw!r} -> {action!r}", Fore.LIGHTBLACK_EX)
             dec["action"] = action
             side = (dec.get("side") or "").strip().lower()
             reason = dec.get("reason") or ""
@@ -16638,19 +16504,19 @@ def run_cycle():
                 if sym_confidence_tag:
                     conf_part += f" ({sym_confidence_tag})"
                 decision_meta_parts.append(conf_part)
-            log(f"[AI] {sym} decision: " + "; ".join(decision_meta_parts), Fore.CYAN)
+            log(f"{decision_tag} {sym} decision: " + "; ".join(decision_meta_parts), Fore.CYAN)
             if cancel_candidates:
-                log(f"[AI] {sym} cancel_orders: {', '.join(cancel_candidates)}", Fore.LIGHTBLACK_EX)
+                log(f"{decision_tag} {sym} cancel_orders: {', '.join(cancel_candidates)}", Fore.LIGHTBLACK_EX)
             if replace_summaries:
-                log(f"[AI] {sym} replace_orders: {', '.join(replace_summaries)}", Fore.LIGHTBLACK_EX)
+                log(f"{decision_tag} {sym} replace_orders: {', '.join(replace_summaries)}", Fore.LIGHTBLACK_EX)
             planned_orders_for_log: list[dict[str, Any]] = list(extra_orders)
             for _, new_orders in parsed_replacements:
                 planned_orders_for_log.extend(new_orders)
             if planned_orders_for_log:
                 order_summaries = [_summarize_order_spec(item) for item in planned_orders_for_log[:5]]
-                log(f"[AI] {sym} orders: {'; '.join(order_summaries)}", Fore.LIGHTBLACK_EX)
+                log(f"{decision_tag} {sym} orders: {'; '.join(order_summaries)}", Fore.LIGHTBLACK_EX)
                 if len(planned_orders_for_log) > 5:
-                    log(f"[AI] {sym}: ... +{len(planned_orders_for_log) - 5} more order(s)", Fore.LIGHTBLACK_EX)
+                    log(f"{decision_tag} {sym}: ... +{len(planned_orders_for_log) - 5} more order(s)", Fore.LIGHTBLACK_EX)
 
             def try_cancel(order_id: str, source: str):
                 nonlocal orders_activity
@@ -17967,7 +17833,8 @@ def run_cycle():
     prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
     current_cycle_no = safe_int(_CURRENT_CYCLE_NUMBER)
     ai_offline_active = (
-        current_cycle_no is not None
+        OFFLINE_TRADING_ENABLED
+        and current_cycle_no is not None
         and _AI_OFFLINE_ACTIVE_CYCLE is not None
         and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == current_cycle_no
     )

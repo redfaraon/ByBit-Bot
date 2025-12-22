@@ -29,6 +29,11 @@
       "MAX_DYNAMIC_RISK_PCT"
     ]
   },
+  "risk": {
+    "base_pct": 0.02,
+    "min_pct": 0.01,
+    "max_pct": 0.0375
+  },
   "thresholds": {
     "atr_sigma_hot": 2.5,
     "atr_limit_multiplier": 1.7,
@@ -121,6 +126,25 @@
       ],
       "confidence": 0.58,
       "scale": 0.5
+    }
+  },
+  "account": {
+    "fields": [
+      "equity",
+      "available_margin",
+      "positions",
+      "open_orders"
+    ],
+    "log_tag": "[ACCOUNT]"
+  },
+  "execution": {
+    "manual_only": true,
+    "max_retries": 1,
+    "retry_delay_sec": 2,
+    "limit_to_market_seconds": 10,
+    "fallbacks": {
+      "market_on_timeout": true,
+      "cancel_on_conflict": true
     }
   }
 }

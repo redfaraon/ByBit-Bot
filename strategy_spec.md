@@ -1,43 +1,36 @@
 ## JSON Strategy Specification
 
-This document describes the contract for `strategy_spec.json`, the file that drives the rule‑based/manual trading flow.
+`strategy_spec.json` is the single source of truth for every manual decision. JSON overrides `.env` for all trading parameters (env keeps only secrets). If an env variable must remain configurable it has to be listed under `context.env_vars`; otherwise it is ignored.
 
-### 1. Context Block
+### 1. Context
 
 ```jsonc
 "context": {
-  "universe": ["BTC/USDT", ...],        // up to 8 symbols
-  "timeframes": {
+  "universe": ["BTC/USDT", ...],      // up to 8 symbols, drives MANUAL_STRATEGY_SYMBOLS
+  "timeframes": {                     // which slices the public context loader must fetch
     "primary": "30m",
     "secondary": "4h",
     "open_interest": "1h",
     "funding": "8h"
   },
-  "news": {
-    "positive": 0.55,                   // >= threshold → positive bias
-    "negative": -0.55,                  // <= threshold → negative bias
-    "neutral_band": 0.15                // |score| ≤ band → neutral
+  "news": {                          // CryptoPanic/RSS sentiment thresholds
+    "positive": 0.55,
+    "negative": -0.55,
+    "neutral_band": 0.15
   },
-  "schedule_minutes": 10,               // recommended cycle interval
-  "env_vars": ["RISK_PCT", ...]         // allowed env inputs (no API keys)
+  "schedule_minutes": 10,            // recommended cycle interval
+  "env_vars": ["RISK_PCT", ...]      // env overrides that stay allowed (secrets excluded)
 }
 ```
 
-### 2. Thresholds
+### 2. Risk & Sizing
 
 ```jsonc
-"thresholds": {
-  "atr_sigma_hot": 2.5,                 // skip opens above this z-score
-  "atr_limit_multiplier": 1.7,          // ATR hotness for switching to limit entries
-  "atr_range_ratio": 0.008,             // EMA spread vs price for flat regime
-  "atr_extreme_ratio": 0.025,           // reduces size when ATR/price is high
-  "oi_change_pct": 0.012                // OI % change to label up/down trend
-}
-```
-
-### 3. Sizing
-
-```jsonc
+"risk": {
+  "base_pct": 0.02,
+  "min_pct": 0.01,
+  "max_pct": 0.0375
+},
 "sizing": {
   "risk_multiplier": {
     "trend": 1.15,
@@ -49,11 +42,18 @@ This document describes the contract for `strategy_spec.json`, the file that dri
 }
 ```
 
-Manual decisions multiply the current risk pct by the regime multiplier, clamp it to `[min_pct, max_pct]`, then optionally scale (`events.modify_position.scale`, etc.).
+`risk` feeds the bot-level risk window (CURRENT/MIN/MAX). `sizing` is used by the interpreter when it converts a regime into notional percentages.
 
-### 4. Rules
+### 3. Thresholds & Rules
 
 ```jsonc
+"thresholds": {
+  "atr_sigma_hot": 2.5,
+  "atr_limit_multiplier": 1.7,
+  "atr_range_ratio": 0.008,
+  "atr_extreme_ratio": 0.025,
+  "oi_change_pct": 0.012
+},
 "rules": {
   "trend": {
     "long": {
@@ -63,7 +63,7 @@ Manual decisions multiply the current risk pct by the regime multiplier, clamp i
       "require_oi_up": true,
       "confidence": { "market": 0.82, "limit": 0.78 }
     },
-    "short": { ... }
+    "short": { "...": "..." }
   },
   "countertrend": {
     "long": { "rsi_max": 30, "news_block": ["negative"], "confidence": 0.72 },
@@ -76,17 +76,24 @@ Manual decisions multiply the current risk pct by the regime multiplier, clamp i
 }
 ```
 
-Trend rules gate long/short entries. Countertrend rules describe RSI extremes and news vetoes. Flat rules decide whether the regime is “range only”.
+The indicator thresholds classify the market into trend/countertrend/flat regimes and gate entries.
 
-### 5. Events
+### 4. Events
 
 ```jsonc
 "events": {
-  "limit_gap_pct": 0.002,
+  "limit_gap_pct": 0.002,                   // refresh pending limits when drift >0.2%
   "limit_offsets": { "buy": 0.998, "sell": 1.002 },
-  "tp": { "atr_multiple": 2.0, "rsi_long": 70, "rsi_short": 30 },
-  "hedge": { "funding_flip": 0.0001, "size_pct": 0.5 },
-  "modify_position": {
+  "tp": {                                   // TP/scale-out rules
+    "atr_multiple": 2.0,
+    "rsi_long": 70,
+    "rsi_short": 30
+  },
+  "hedge": {                                // hedge_open trigger and sizing
+    "funding_flip": 0.0001,
+    "size_pct": 0.5
+  },
+  "modify_position": {                      // scale in/out rules
     "rsi_long": [40, 65],
     "rsi_short": [35, 60],
     "confidence": 0.58,
@@ -95,16 +102,41 @@ Trend rules gate long/short entries. Countertrend rules describe RSI extremes an
 }
 ```
 
-- `limit_gap_pct`: percentage move away from a pending limit order that triggers `modify_limit`.
-- `limit_offsets`: default limit price offsets for new entries.
-- `tp`: ATR multiplier + RSI triggers for placing reduce‑only take profits.
-- `hedge`: funding flip threshold and hedge size as a fraction of notional.
-- `modify_position`: RSI ranges and sizing for scale‑ins when trend entries stay valid.
+The interpreter emits one of the documented events (open_market, open_limit, hedge_open, place_limit_TP, modify_limit, cancel_limit, modify_position, close_position, skip). `strategy_executor.py` converts an event into explicit actions/orders while respecting `execution`.
 
-### 6. Execution Flow
+### 5. Account & Context Logging
 
-1. **Context builder** (see `strategy_context.py`) collects bars/indicators/news/OI/funding according to the spec.
-2. **Interpreter** (`strategy.py`) loads `strategy_spec.json`, evaluates the rules for each symbol, and emits `StrategyEvent` objects.
-3. **Adapter** (`apply_event`) converts events into decisions compatible with `run_cycle`.
+```jsonc
+"account": {
+  "fields": ["equity", "available_margin", "positions", "open_orders"],
+  "log_tag": "[ACCOUNT]"
+}
+```
 
-To extend behaviour, adjust `strategy_spec.json` fields; no code changes are required unless new event types are introduced.***
+`account_context.py` must collect the listed private fields from Bybit, build a snapshot, and log one `[ACCOUNT] ...` line per cycle into `assets/bybit.log`. Public-market context (candles, indicators, news, funding, OI) is logged via `[MANUAL][CONTEXT]`.
+
+### 6. Execution Parameters
+
+```jsonc
+"execution": {
+  "manual_only": true,
+  "max_retries": 1,
+  "retry_delay_sec": 2,
+  "limit_to_market_seconds": 10,
+  "fallbacks": {
+    "market_on_timeout": true,
+    "cancel_on_conflict": true
+  }
+}
+```
+
+`strategy_executor.py` reads this section while preparing orders (e.g., deciding if a pending limit should flip to market). `manual_only=true` disables the legacy AI/offline planner so every symbol is handled by the JSON interpreter.
+
+### 7. Flow Summary
+
+1. **Public context** — `strategy_context.py` builds the indicator snapshot for every symbol in `context.universe` and logs `[MANUAL][CONTEXT]`.
+2. **Account context** — `account_context.py` logs balances/positions/orders using `account.fields`.
+3. **Interpreter** — `strategy.py` parses the JSON, evaluates rules, and emits `StrategyEvent` results along with confidence/size metadata.
+4. **Executor** — `strategy_executor.py` applies `execution` settings and returns the final `decision` dict. `bybitbot_impl.py` executes it and logs `[MANUAL][EXEC]` entries.
+
+Whenever JSON and `.env` disagree, JSON wins. Only the env variables listed under `context.env_vars` are even read; every other trading parameter (universe, sizing, risk, events, etc.) must come from `strategy_spec.json`. Credentials (API keys, Telegram tokens, etc.) stay in `.env`.
