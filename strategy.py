@@ -105,7 +105,7 @@ EVENTS_SPEC = SPEC.get("events", {})
 ENTRY_LADDER = EVENTS_SPEC.get("entry_ladder") or []
 TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
 
-WATCHLIST = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
+WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
@@ -115,6 +115,7 @@ WATCHLIST = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "ADA/USDT",
     "AVAX/USDT",
 ]
+WATCHLIST = WATCHLIST_BASE[:]
 
 INDICATORS = [
     "ema20",
@@ -406,7 +407,8 @@ def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -
 
 
 def should_open(ctx: StrategyContext) -> StrategyEvent | None:
-    # Allow processing even if symbol not listed to cover open-position symbols injected by universe builder.
+    if not _symbol_allowed(ctx.symbol):
+        return StrategyEvent("skip", reason="symbol not monitored", confidence=0.0)
     if ctx.news_bias == "uncertain":
         return StrategyEvent("skip", reason="news uncertain, skip entries", confidence=0.0)
     if ctx.atr_sigma > ATR_SIGMA_HOT:
@@ -691,7 +693,7 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
 
 
 def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
-    if ctx.symbol not in WATCHLIST:
+    if not _symbol_allowed(ctx.symbol):
         return StrategyEvent("skip", reason="symbol not monitored", confidence=0.0)
     if ctx.price is None or not math.isfinite(ctx.price):
         return StrategyEvent("skip", reason="no price data", confidence=0.0)
@@ -713,3 +715,11 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     if event:
         return event
     return StrategyEvent("skip", reason="no confluence", confidence=0.0)
+def _symbol_allowed(symbol: str) -> bool:
+    if not symbol:
+        return False
+    sym_upper = symbol.upper()
+    if sym_upper in WATCHLIST:
+        return True
+    base = sym_upper.split(":")[0]
+    return base in WATCHLIST

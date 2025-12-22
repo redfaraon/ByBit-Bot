@@ -80,7 +80,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.3"
+BOT_VERSION = "1.3.4"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )

@@ -16,7 +16,6 @@ runtime/
 users/*/secrets.env
 users/*/secrets.local
 strategy_spec.json
-PROJECT_OVERVIEW.md
 bybit.log
 assets/bybit.log
 cycle_state.json
