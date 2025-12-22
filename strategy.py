@@ -10,7 +10,7 @@ from typing import Any, Iterable, Sequence
 
 def _default_spec() -> dict[str, Any]:
     return {
-        "version": "1.0",
+        "version": "1.1.0",
         "context": {
             "universe": [
                 "BTC/USDT",
@@ -690,5 +690,4 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     if event:
         return event
     return StrategyEvent("skip", reason="no confluence", confidence=0.0)
-
 

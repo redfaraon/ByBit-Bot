@@ -37,9 +37,13 @@ import strategy
 import strategy_context
 import strategy_executor
 import account_context
+import order_cleanup
+import protection_utils
+import trailing_utils
 STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get("env_vars", []) if isinstance(var, str)}
 STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
 STRATEGY_EXECUTION_SPEC = strategy.SPEC.get("execution", {})
+STRATEGY_PROVIDERS_SPEC = strategy.SPEC.get("providers", {})
 
 
 def _strategy_env_value(var_name: str) -> str | None:
@@ -75,7 +79,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.1"
+BOT_VERSION = "1.3.2"
 BOT_CHANGELOG = (
     "Volatility-aware balance between news and technicals guides the AI to lean on catalysts in high ATR and on TA in calm markets."
 )
@@ -3894,7 +3898,17 @@ def refresh_settings():
         TELEGRAM_MESSAGE_PREFIX = USER_LABEL.strip()
     PAIR_LIST = os.getenv("PAIR_LIST", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT").split(",")
     TIMEFRAME = os.getenv("TIMEFRAME", "30m")
-    LEVERAGE = int(os.getenv("LEVERAGE", 10))
+    leverage_spec = STRATEGY_EXECUTION_SPEC.get("leverage")
+    try:
+        LEVERAGE = int(leverage_spec) if leverage_spec is not None else int(os.getenv("LEVERAGE", 10))
+    except Exception:
+        LEVERAGE = 10
+    default_next_run_spec = STRATEGY_EXECUTION_SPEC.get("default_next_run_minutes")
+    if default_next_run_spec is not None:
+        try:
+            DEFAULT_NEXT_RUN_MINUTES = int(float(default_next_run_spec))
+        except Exception:
+            pass
     spec_base_risk = float(STRATEGY_RISK_SPEC.get("base_pct") or DEFAULT_RISK_PCT)
     spec_min_risk = float(STRATEGY_RISK_SPEC.get("min_pct") or max(0.0005, spec_base_risk * 0.5))
     spec_max_risk = float(STRATEGY_RISK_SPEC.get("max_pct") or max(spec_base_risk, spec_base_risk * 1.8))
@@ -3959,9 +3973,12 @@ def refresh_settings():
         BREAKEVEN_BUFFER_ATR = 0.15
     BREAKEVEN_ATR_MULT = max(0.0, BREAKEVEN_ATR_MULT)
     BREAKEVEN_BUFFER_ATR = max(0.0, BREAKEVEN_BUFFER_ATR)
-    SL_ATR = float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
-    TP_ATR = float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
-    TRAILING_ATR_MULT = float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
+    sl_spec = STRATEGY_EXECUTION_SPEC.get("sl_atr")
+    tp_spec = STRATEGY_EXECUTION_SPEC.get("tp_atr")
+    trailing_spec = STRATEGY_EXECUTION_SPEC.get("trailing_atr_mult")
+    SL_ATR = float(sl_spec) if sl_spec is not None else float(os.getenv("SL_ATR", os.getenv("SL_ATR_MULT", 0.8)))
+    TP_ATR = float(tp_spec) if tp_spec is not None else float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
+    TRAILING_ATR_MULT = float(trailing_spec) if trailing_spec is not None else float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
     try:
         TRAILING_DYNAMIC_TRIGGER_ATR = float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
@@ -4151,16 +4168,26 @@ def refresh_settings():
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
     AI_AFTER_NEEDS_BIAS = int(os.getenv("AI_AFTER_NEEDS_BIAS", 1))
-    MAX_OPEN_POSITIONS = env_int("MAX_OPEN_POSITIONS", 15)
-    MAX_POSITIONS_PER_BASE = max(0, env_int("MAX_POSITIONS_PER_BASE", MAX_POSITIONS_PER_BASE))
-    env_default_next = os.getenv("DEFAULT_NEXT_RUN_MINUTES")
-    if env_default_next:
-        try:
-            default_val = float(env_default_next)
-            if math.isfinite(default_val) and default_val > 0:
-                DEFAULT_NEXT_RUN_MINUTES = default_val
-        except (TypeError, ValueError):
-            pass
+    max_open_spec = STRATEGY_EXECUTION_SPEC.get("max_open_positions")
+    MAX_OPEN_POSITIONS = (
+        int(max_open_spec)
+        if max_open_spec is not None and safe_int(max_open_spec) is not None
+        else env_int("MAX_OPEN_POSITIONS", 15)
+    )
+    max_base_spec = STRATEGY_EXECUTION_SPEC.get("max_positions_per_base")
+    if max_base_spec is not None and safe_int(max_base_spec) is not None:
+        MAX_POSITIONS_PER_BASE = max(0, int(float(max_base_spec)))
+    else:
+        MAX_POSITIONS_PER_BASE = max(0, env_int("MAX_POSITIONS_PER_BASE", MAX_POSITIONS_PER_BASE))
+    if STRATEGY_EXECUTION_SPEC.get("default_next_run_minutes") is None:
+        env_default_next = os.getenv("DEFAULT_NEXT_RUN_MINUTES")
+        if env_default_next:
+            try:
+                default_val = float(env_default_next)
+                if math.isfinite(default_val) and default_val > 0:
+                    DEFAULT_NEXT_RUN_MINUTES = default_val
+            except (TypeError, ValueError):
+                pass
     DEFAULT_NEXT_RUN_MINUTES = max(1.0, DEFAULT_NEXT_RUN_MINUTES)
 
     TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -4466,9 +4493,18 @@ def refresh_settings():
         NEW_IDEAS_LIMIT = 6
     NEW_IDEAS_LIMIT = max(0, min(NEW_IDEAS_LIMIT, 12))
 
-    news_provider_env = os.getenv("CRYPTO_NEWS_PROVIDER") or os.getenv("NEWS_PROVIDER") or "hybrid"
-    NEWS_PROVIDER = news_provider_env.strip().lower() or "hybrid"
-    NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
+    news_spec = STRATEGY_PROVIDERS_SPEC.get("news") if isinstance(STRATEGY_PROVIDERS_SPEC, dict) else {}
+    news_primary = str(news_spec.get("primary") or "").strip().lower() if isinstance(news_spec, dict) else ""
+    news_fallback = str(news_spec.get("fallback") or "").strip().lower() if isinstance(news_spec, dict) else ""
+    news_provider_env = os.getenv("CRYPTO_NEWS_PROVIDER") or os.getenv("NEWS_PROVIDER") or ""
+    NEWS_PROVIDER = news_primary or news_provider_env.strip().lower() or news_fallback or "hybrid"
+    news_token_env = news_spec.get("token_env") if isinstance(news_spec, dict) else None
+    if news_token_env:
+        NEWS_API_TOKEN = os.getenv(str(news_token_env))
+    else:
+        NEWS_API_TOKEN = None
+    if not NEWS_API_TOKEN:
+        NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
     AI_INITIAL_NEWS_PROVIDER = os.getenv("AI_INITIAL_NEWS_PROVIDER") or NEWS_PROVIDER
     AI_INITIAL_NEWS_LIMIT = max(1, env_int("AI_INITIAL_NEWS_LIMIT", NEWS_ITEMS_LIMIT or 5))
@@ -4477,8 +4513,9 @@ def refresh_settings():
     ACTIVE_POSITION_MODE = POSITION_MODE
     ACTIVE_HEDGE_MODE = HEDGE_MODE
     POSITION_MODE_MISMATCH_STATE = None
+    margin_util_spec = STRATEGY_EXECUTION_SPEC.get("order_margin_utilization")
     try:
-        ORDER_MARGIN_UTILIZATION = float(os.getenv("ORDER_MARGIN_UTILIZATION", 0.95))
+        ORDER_MARGIN_UTILIZATION = float(margin_util_spec) if margin_util_spec is not None else float(os.getenv("ORDER_MARGIN_UTILIZATION", 0.95))
     except (TypeError, ValueError):
         ORDER_MARGIN_UTILIZATION = 0.95
     ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))
@@ -12727,7 +12764,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
     try:
         refreshed_open = fetch_open_orders_for_symbol(exchange, symbol, limit=200)
         refreshed_reduce = [order for order in (refreshed_open or []) if isinstance(order, dict)]
-        cancelled_stop_entries, cancel_stop_errors = _cleanup_redundant_stop_orders(
+        cancelled_stop_entries, cancel_stop_errors = order_cleanup.cleanup_redundant_stops(
             exchange,
             symbol,
             refreshed_reduce,
@@ -12735,6 +12772,7 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             position_qty,
             is_long,
             keep_ids_preferred=stop_ids_preferred,
+            handler=_cleanup_redundant_stop_orders,
         )
         if cancelled_stop_entries:
             summary = "; ".join(cancelled_stop_entries)
@@ -12829,13 +12867,14 @@ def _refresh_position_protection_if_possible(
     protection_df = _prepare_protection_dataframe(df_candidate, df_primary, symbol)
     if protection_df is None:
         return None, False
-    updated_orders = ensure_position_protection(
+    updated_orders = trailing_utils.apply_trailing(
         exchange,
         symbol,
         position,
         protection_df,
         open_orders,
         config=symbol_meta,
+        handler=ensure_position_protection,
     )
     has_stop = False
     has_take = False
@@ -12843,13 +12882,14 @@ def _refresh_position_protection_if_possible(
         has_stop, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
     if not has_take:
         log(f"[WARN] {symbol}: protection refresh left position without take-profit, retrying once", Fore.YELLOW)
-        updated_orders = ensure_position_protection(
+        updated_orders = protection_utils.ensure_protection(
             exchange,
             symbol,
             position,
             protection_df,
             updated_orders,
             config=symbol_meta,
+            handler=ensure_position_protection,
         )
         _, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
         if not has_take:
@@ -16120,12 +16160,13 @@ def run_cycle():
                     log(f"⚠️ Не удалось получить открытые ордера для {sym}: {fetch_exc}", Fore.YELLOW)
                     open_orders_symbol = []
                 open_orders_prefetch[sym] = open_orders_symbol
-            open_orders_symbol = _cleanup_excess_non_reduce_limits(
+            open_orders_symbol = order_cleanup.cleanup_excess_non_reduce_limits(
                 ex,
                 sym,
                 open_orders_symbol,
                 (current_position or {}).get("side"),
                 MAX_NON_REDUCE_LIMITS_PER_SIDE,
+                handler=_cleanup_excess_non_reduce_limits,
             )
             open_orders_prefetch[sym] = open_orders_symbol
             initial_protection_orders = _extract_protection_orders(open_orders_symbol)
@@ -17716,12 +17757,14 @@ def run_cycle():
             open_orders_attempt = []
         if df_attempt is not None and position_payload:
             try:
-                updated_orders = ensure_position_protection(
+                updated_orders = protection_utils.ensure_protection(
                     ex,
                     sym_unprotected,
                     position_payload,
                     df_attempt,
                     open_orders_attempt,
+                    config=None,
+                    handler=ensure_position_protection,
                 )
                 if isinstance(updated_orders, list):
                     open_orders_attempt = updated_orders

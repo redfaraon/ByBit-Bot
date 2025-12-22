@@ -1,0 +1,62 @@
+## Project Overview (ByBit Bot)
+
+### Modules & Roles
+- `bybitbot_impl.py` — main runner: loads settings, fetches public/private context, routes manual strategy decisions to execution, manages orders/protection, Telegram handlers, persistence (state/log files).
+- `strategy.py` — JSON-driven manual strategy (no AI): builds `StrategyContext`, detects regimes, emits `StrategyEvent`s, holds sizing/thresholds from `strategy_spec.json`.
+- `strategy_context.py` — builds indicator/news/funding/OI context for the manual strategy.
+- `strategy_executor.py` — maps `StrategyEvent` → executable decision dict (orders, side, type, notional_pct).
+- `account_context.py` — snapshots private account state (equity, margin, positions, open orders) and logs `[ACCOUNT] ...`.
+- `order_cleanup.py` — wrappers for limit/stop cleanup (delegates to impl handlers).
+- `protection_utils.py` — wrapper for protection/trailing application (delegates to impl handler).
+- `trailing_utils.py` — wrapper for trailing/protection step (delegates to impl handler).
+- `strategy_spec.json` / `strategy_spec.md` — canonical strategy/config contract (universe, risk, execution, providers, events).
+- `assets/bybit.log` — main combined log (stdout/stderr mirrored), includes `[MANUAL]`, `[ACCOUNT]`, protection/trade/order messages.
+
+### Key Constants (set in impl via JSON where provided)
+- `BOT_VERSION` — release marker.
+- `LEVERAGE`, `ORDER_MARGIN_UTILIZATION`, `SL_ATR`, `TP_ATR`, `TRAILING_ATR_MULT` — execution knobs (from `execution` block).
+- `RISK_PCT`, `MIN_DYNAMIC_RISK_PCT`, `MAX_DYNAMIC_RISK_PCT` — risk window (from `risk` block, env only if whitelisted in `context.env_vars`).
+- `MAX_OPEN_POSITIONS`, `MAX_POSITIONS_PER_BASE`, `DEFAULT_NEXT_RUN_MINUTES` — portfolio pacing/limits (from `execution`).
+- `NEWS_PROVIDER`, `NEWS_API_TOKEN` — news source configuration (from `providers.news` + env token).
+- `ENTRY_LADDER_SCHEME`, `PARTIAL_TP_SCHEME` — laddering ratios for entries/take-profits (env fallback if not overridden elsewhere).
+
+### Core Functions (selected)
+- `run_cycle()` (impl) — orchestrates a full trading cycle: context fetch → manual decision → execution → protection/cleanup → scheduling.
+- `strategy.get_signal_without_ai(ctx)` — regime detection + event selection (manual-only).
+- `strategy_executor.apply_event(event, ctx)` — produce executable decision dict.
+- `strategy_context.build_manual_strategy_context(...)` — assemble per-symbol manual context.
+- `protection_utils.ensure_protection(...)` / `trailing_utils.apply_trailing(...)` — delegate to impl protection logic.
+- `order_cleanup.cleanup_excess_non_reduce_limits(...)` / `cleanup_redundant_stops(...)` — delegate to impl cleanup logic.
+- Telegram handlers: `handle_telegram_command`, `_handle_schedule_command`, `_handle_logs_command`, `_handle_tokens_command`, `_handle_bybit_key_command`, `_handle_add_user_command`, `_handle_config_command`, `_handle_sandbox_command`.
+
+### Logging Conventions
+- `[MANUAL][CONTEXT]` — per-symbol public snapshot (price/trend/news/OI/risk).
+- `[MANUAL][SIGNAL]` — interpreter decision summary before execution.
+- `[MANUAL][EXEC]` — final action/side/type/reason.
+- `[ACCOUNT]` — equity/margin/positions/open_orders snapshot per cycle.
+- Other notable tags: protection/trailing warnings, cleanup summaries, margin/risk messages; AI/offline tags are suppressed in manual-only mode.
+- Telegram mirrors key events (protection changes, order placements/cancellations, warnings) and command replies; `send_tg_decision` mirrors decision confidence.
+
+### Telegram Commands (handled in impl)
+- `/start`, `/help` — help text.
+- `/status`, `/positions`, `/risk`, `/version` — runtime summaries.
+- `/logs` (`logtail`, `log`) — fetch log snippets.
+- `/logmode` — adjust forwarding verbosity.
+- `/schedule` — set/cancel next run (minutes, absolute time, now).
+- `/tokens` — token budget info.
+- `/bybitkey` — supply/clear API keys (owner/DM).
+- `/adduser`, `/config`, `/sandbox` — multi-user and sandbox controls.
+- `/ai payload` — inspect last AI payload (legacy; manual flow suppresses AI).
+
+### Data & State Files
+- `assets/bybit.log` — main rotating log (stdout/stderr tee).
+- `assets/error.log` — error mirror (if enabled).
+- `cycle_state.json`, `results_state.json`, `equity_history.json`, `fallback_history.json`, `release_state.json` — runtime/state snapshots.
+- `bybit_credentials.json` — stored API keys per user (secrets).
+- `users/*.json` — multi-user profiles (user IDs, preferences, secrets paths).
+- `strategy_spec.json` — active strategy config (universe, risk, execution, providers, events).
+
+### Laddering / Orders
+- Opens: ladder built from `ENTRY_LADDER_SCHEME` (weights + ATR offsets); defaults `(0.6@0 ATR, 0.4@0.6 ATR)`. Limit drift refresh uses `events.limit_gap_pct`.
+- Takes/scale-outs: `PARTIAL_TP_SCHEME` defines reduce-only TP ladder; interpreter also emits `place_limit_TP` when RSI extremes hit. Protection refresh enforces SL/TP/trailing per `execution` ATR multipliers.
+- Order cleanup: non-reduce entry limits pruned to `MAX_NON_REDUCE_LIMITS_PER_SIDE`; redundant reduce-only stops trimmed after fresh protection is placed.

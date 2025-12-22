@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1.0",
   "context": {
     "universe": [
       "BTC/USDT",
@@ -137,8 +137,23 @@
     ],
     "log_tag": "[ACCOUNT]"
   },
+  "providers": {
+    "news": {
+      "primary": "cryptopanic",
+      "fallback": "rss",
+      "token_env": "CRYPTO_NEWS_TOKEN"
+    }
+  },
   "execution": {
     "manual_only": true,
+    "leverage": 10,
+    "order_margin_utilization": 0.95,
+    "sl_atr": 1.6,
+    "tp_atr": 2.8,
+    "trailing_atr_mult": 1.0,
+    "max_open_positions": 4,
+    "max_positions_per_base": 1,
+    "default_next_run_minutes": 10,
     "max_retries": 1,
     "retry_delay_sec": 2,
     "limit_to_market_seconds": 10,
