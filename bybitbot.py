@@ -1349,6 +1349,7 @@ def _run_script_candidate(
         env["BYBITBOT_SUPPRESS_ROUTINE_COUNTER"] = "1"
     else:
         env.pop("BYBITBOT_SUPPRESS_ROUTINE_COUNTER", None)
+    env.setdefault("PYTHONUNBUFFERED", "1")
     candidate_root = _resolve_repo_root_from_path(script_path.parent)
     if not candidate_root.exists():
         candidate_root = REPO_ROOT
@@ -1358,8 +1359,45 @@ def _run_script_candidate(
         env["PYTHONPATH"] = repo_path + os.pathsep + existing_pythonpath
     else:
         env["PYTHONPATH"] = repo_path
-    result = subprocess.run([sys.executable, str(script_path)], env=env, cwd=str(candidate_root))
-    return result.returncode == 0
+
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(script_path)],
+        env=env,
+        cwd=str(candidate_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    def pump(stream, prefix: str, target_stream):
+        if not stream:
+            return
+        try:
+            for line in stream:
+                text_line = line.rstrip("\n")
+                if not text_line:
+                    continue
+                payload = f"{prefix} {text_line}"
+                try:
+                    print(payload, file=target_stream)
+                except Exception:
+                    pass
+                _boot_log_line(payload)
+        except Exception:
+            pass
+
+    t_out = threading.Thread(target=pump, args=(proc.stdout, "[STDOUT]", sys.stdout), daemon=True)
+    t_err = threading.Thread(target=pump, args=(proc.stderr, "[STDERR]", sys.stderr), daemon=True)
+    t_out.start()
+    t_err.start()
+    code = proc.wait()
+    try:
+        t_out.join(timeout=2.0)
+        t_err.join(timeout=2.0)
+    except Exception:
+        pass
+    return code == 0
 
 
 def _run_current():

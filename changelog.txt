@@ -4,6 +4,7 @@ Changelog (newest first)
 - Switch fallback execution to full-repo snapshots via `git worktree` so stable/commit fallbacks include all modules (not just `bybitbot_impl.py`).
 - Mirror launcher (`bybitbot.py`) stderr/tracebacks into the main log and default `BYBIT_MAIN_LOG` to `assets/bybit.log`.
 - Restore `_sync_with_remote()` in `bybitbot_impl.py` to pull updates (ff-only) and trigger reloads via metadata checks.
+- Fix stable fallback crash (`get_current_commit_info`) and mirror fallback subprocess stdout/stderr into `assets/bybit.log`.
 
 1.3.7 (2025-12-23, commit pending)
 - Fix module config sync order to avoid startup NameError and enable early stdio mirroring for import-time errors.
@@ -507,3 +508,15 @@ Recent commits (last 8)
 - 2025-12-16 1851276 fix: protect restore entry price
 - 2025-12-16 0fcad9a fix: stable fallback and env init
 - 2025-12-16 e5848b4 feat: auto adjust exposure direction
+
+1.3.8
+Recent commits (last 8)
+- 2025-12-23 8e8ef8b Worktree snapshot fallback and restore git sync
+- 2025-12-23 463cb62 Fix startup logging and fallback imports
+- 2025-12-23 3874f1d Refactor protection/execution into engines
+- 2025-12-23 772382d Move execution and protection logic into modules
+- 2025-12-23 2d977e0 Add module tracing and DOGE protection logs
+- 2025-12-22 0136ed2 chore: add module-level logging for manual flow
+- 2025-12-22 ea37799 fix: normalize symbols for manual strategy and bump version
+- 2025-12-22 07c997b feat: expand json spec and universe pipeline for manual strategy
+

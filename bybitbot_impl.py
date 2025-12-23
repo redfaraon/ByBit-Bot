@@ -1725,9 +1725,25 @@ _GIT_SYNC_LOCK = threading.Lock()
 _LAST_GIT_SYNC_TS = 0.0
 
 
+def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
+    """Return (hash, subject, timestamp) for the current HEAD."""
+    head = _current_git_head()
+    if head:
+        commit_hash, commit_message, commit_timestamp = _resolve_commit_metadata(head)
+        if commit_hash or commit_message or commit_timestamp:
+            return commit_hash, commit_message, commit_timestamp
+    return _resolve_commit_metadata("HEAD")
+
+
 def _sync_with_remote(*, min_interval_sec: float = 60.0) -> None:
     """Fetch/pull the current branch from origin (ff-only)."""
     global _LAST_GIT_SYNC_TS
+    # Do not mutate snapshot worktrees during fallback cycles; the launcher owns updates.
+    cycle_kind = str(os.getenv("BYBITBOT_CYCLE_KIND") or "").strip().lower()
+    if cycle_kind and cycle_kind != "normal":
+        return
+    if str(os.getenv("BYBITBOT_SOURCE_LABEL") or "").strip().upper() not in {"", "HEAD"}:
+        return
     if str(os.getenv("BYBITBOT_GIT_SYNC_DISABLE", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}:
         return
     if not (REPO_ROOT / ".git").exists():
@@ -1735,6 +1751,7 @@ def _sync_with_remote(*, min_interval_sec: float = 60.0) -> None:
     branch = get_current_branch_name()
     if not branch:
         return
+    remote_branch = branch.split("/", 1)[1] if branch.startswith("fallback/") and "/" in branch else branch
     now = time.time()
     if min_interval_sec > 0 and now - _LAST_GIT_SYNC_TS < min_interval_sec:
         return
@@ -1796,10 +1813,10 @@ def _sync_with_remote(*, min_interval_sec: float = 60.0) -> None:
             except Exception:
                 stash_created = False
 
-        log(f"[GIT] pull: Pulling origin/{branch}", Fore.LIGHTBLACK_EX)
+        log(f"[GIT] pull: Pulling origin/{remote_branch}", Fore.LIGHTBLACK_EX)
         try:
             pull_proc = subprocess.run(
-                ["git", "pull", "--ff-only", "origin", branch],
+                ["git", "pull", "--ff-only", "origin", remote_branch],
                 capture_output=True,
                 text=True,
                 cwd=str(SCRIPT_DIR),
