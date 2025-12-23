@@ -5542,36 +5542,6 @@ def _update_runtime_status_field(key: str, value: Any) -> None:
         pass
 
 
-def _format_tz_suffix(dt: datetime.datetime) -> str:
-    parts = []
-    tz_name = (dt.tzname() or "").strip()
-    if tz_name and tz_name.upper() != "UTC":
-        parts.append(tz_name)
-    offset = dt.utcoffset()
-    if offset is not None:
-        total_minutes = int(offset.total_seconds() // 60)
-        sign = "+" if total_minutes >= 0 else "-"
-        total_minutes = abs(total_minutes)
-        hours, minutes = divmod(total_minutes, 60)
-        offset_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
-        if offset_str not in parts:
-            parts.append(offset_str)
-    return " ".join(parts).strip()
-
-
-def log(msg: str, color=Fore.WHITE):
-    now = _current_log_time()
-    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
-    tz_suffix = _format_tz_suffix(now)
-    if tz_suffix:
-        stamp = f"{stamp} {tz_suffix}"
-    record = f"[{stamp}] {msg}"
-    _LOG_HISTORY.append(record)
-    print(color + record + Style.RESET_ALL)
-    if TELEGRAM_FORWARD_LOGS:
-        _enqueue_tg_log(record)
-
-
 def _append_user_log(user_id: int | None, text: str) -> None:
     """Append a line to the shared chat log (runtime/chat.log)."""
     if user_id is None:
