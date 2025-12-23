@@ -39,6 +39,7 @@
 
 1. **Стабилизация текущего монолита**
    - Убедиться, что `bybitbot_impl.run_cycle` работает как раньше (регрессия по логам/ордерам).
+   - Execution/protection/trailing logic is now in `execution_engine.py` and `protection_engine.py`; impl keeps thin wrappers.
    - Зафиксировать формат runtime-снапшотов (`runtime/engine/trade_plan.json`).
 
 2. **Выделение ядра и userbot-воркера**
