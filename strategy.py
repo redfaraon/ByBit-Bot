@@ -825,11 +825,32 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     event = should_modify(ctx)
     if event:
         return event
+    trace_details = [
+        "skip",
+        "no_confluence",
+        f"trend={ctx.trend_bias or 'none'}",
+        f"counter={ctx.countertrend_bias or 'none'}",
+        f"news={ctx.news_bias}",
+        f"oi={ctx.oi_trend}",
+        f"atr_sigma={ctx.atr_sigma:.2f}",
+        f"rsi30={ctx.tf30.rsi:.1f}",
+    ]
+    metadata = _with_trace(
+        {
+            "trend_bias": ctx.trend_bias,
+            "counter_bias": ctx.countertrend_bias,
+            "news_bias": ctx.news_bias,
+            "oi_trend": ctx.oi_trend,
+            "atr_sigma": ctx.atr_sigma,
+            "rsi30": ctx.tf30.rsi,
+        },
+        trace_details,
+    )
     return StrategyEvent(
         "skip",
         reason="no confluence",
         confidence=0.0,
-        metadata=_with_trace(None, ["skip", "no_confluence"]),
+        metadata=metadata,
     )
 def _symbol_allowed(symbol: str) -> bool:
     if not symbol:

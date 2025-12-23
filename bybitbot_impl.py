@@ -35,6 +35,7 @@ from dotenv import dotenv_values
 import db_logger
 import strategy
 import strategy_context
+import trading_context
 import strategy_executor
 import account_context
 import order_cleanup
@@ -6331,19 +6332,19 @@ def _current_module_version_label() -> str:
 def _module_version_targets() -> list[tuple[str, Any]]:
     return [
         ("bybitbot_impl", sys.modules.get(__name__)),
-        ("strategy", strategy),
-        ("strategy_context", strategy_context),
-        ("strategy_executor", strategy_executor),
-        ("trading_context", trading_context),
-        ("account_context", account_context),
-        ("universe_builder", universe_builder),
-        ("execution_engine", execution_engine),
-        ("protection_engine", protection_engine),
-        ("order_utils", order_utils),
-        ("order_cleanup", order_cleanup),
-        ("protection_utils", protection_utils),
-        ("trailing_utils", trailing_utils),
-        ("execution_utils", execution_utils),
+        ("strategy", sys.modules.get("strategy") or strategy),
+        ("strategy_context", sys.modules.get("strategy_context") or strategy_context),
+        ("strategy_executor", sys.modules.get("strategy_executor") or strategy_executor),
+        ("trading_context", sys.modules.get("trading_context") or trading_context),
+        ("account_context", sys.modules.get("account_context") or account_context),
+        ("universe_builder", sys.modules.get("universe_builder") or universe_builder),
+        ("execution_engine", sys.modules.get("execution_engine") or execution_engine),
+        ("protection_engine", sys.modules.get("protection_engine") or protection_engine),
+        ("order_utils", sys.modules.get("order_utils") or order_utils),
+        ("order_cleanup", sys.modules.get("order_cleanup") or order_cleanup),
+        ("protection_utils", sys.modules.get("protection_utils") or protection_utils),
+        ("trailing_utils", sys.modules.get("trailing_utils") or trailing_utils),
+        ("execution_utils", sys.modules.get("execution_utils") or execution_utils),
     ]
 
 
@@ -13510,6 +13511,7 @@ def run_cycle():
     add_candidates(position_symbols, record_missing=False)
 
     universe_cache = load_universe_cache()
+    universe_origin = "config_spec"
     news_headlines = _build_news_digest(sorted(candidate_pairs_set))
     selection_result = None
     universe_state = dict(universe_cache)
@@ -13528,11 +13530,16 @@ def run_cycle():
         universe_state = universe_state or {}
         universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_universe_cache(universe_state)
+        universe_origin = (selection_result or {}).get("source") or "ai_update"
     if universe_state.get("pairs"):
         for pair in universe_state.get("pairs", []):
             resolved_pair = normalize_symbol(pair, record_missing=False)
             if resolved_pair:
                 candidate_pairs_set.add(resolved_pair)
+        if universe_state.get("ai_offline"):
+            universe_origin = "offline_cache"
+        elif universe_origin == "config_spec":
+            universe_origin = "cached_universe"
     news_full_cache: dict[str, dict] = {}
     for req in news_requests or []:
         if isinstance(req, dict):
@@ -13682,6 +13689,7 @@ def run_cycle():
         universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         universe_state["ai_offline"] = True
         save_universe_cache(universe_state)
+        universe_origin = "offline_fallback"
         log(
             f"[MANUAL] Universe selection fallback: {', '.join(offline_pairs)} (limit={OFFLINE_PAIR_LIMIT})",
             Fore.YELLOW,
@@ -13722,6 +13730,12 @@ def run_cycle():
         new_universe_set = set(new_universe_candidates)
 
     news_sorted = sorted(news_priority)
+    selection_source_label = universe_origin or "unknown"
+    news_source_label = ", ".join(news_sorted) if news_sorted else "none"
+    log(
+        f"[MANUAL] Universe source={selection_source_label}; pairs={', '.join(selection_pairs) if selection_pairs else 'none'}; news_priority={news_source_label}; ai_offline={bool(universe_state.get('ai_offline'))}",
+        Fore.LIGHTBLACK_EX,
+    )
     if position_symbols:
         prioritized_positions = sorted(
             position_symbols,
@@ -14366,11 +14380,26 @@ def run_cycle():
                         )
                         log(signal_msg, Fore.LIGHTBLACK_EX)
                         log_user(signal_msg, color=Fore.LIGHTBLACK_EX)
-                        manual_decision = strategy_executor.apply_event(manual_event, manual_ctx)
-                        log(f"[MODULE][executor] {sym}: event={manual_event.name} side={manual_event.side} -> decision={manual_decision}", Fore.LIGHTBLACK_EX)
                         trace_items = None
                         if isinstance(manual_event.metadata, dict):
                             trace_items = manual_event.metadata.get("trace")
+                        if manual_event.name == "skip":
+                            manual_decision = {
+                                "symbol": sym,
+                                "action": "skip",
+                                "reason": manual_event.reason or "no signal",
+                                "strategy_event": manual_event.name,
+                                "confidence": confidence_value,
+                                "ai_unavailable": True,
+                            }
+                            if trace_items:
+                                manual_decision["trace"] = trace_items
+                        else:
+                            manual_decision = strategy_executor.apply_event(manual_event, manual_ctx)
+                            log(
+                                f"[MODULE][executor] {sym}: event={manual_event.name} side={manual_event.side} -> decision={manual_decision}",
+                                Fore.LIGHTBLACK_EX,
+                            )
                         if trace_items:
                             trace_text = " | ".join(map(str, trace_items))
                             log(f"[MANUAL][TRACE] {sym}: {trace_text}", Fore.LIGHTBLACK_EX)
@@ -14841,15 +14870,20 @@ def run_cycle():
                 elif requested_context:
                     context_parts.append(str(requested_context))
                 context_desc = ", ".join(context_parts) if context_parts else "context not specified"
-                log(f"ℹ️ Needs data for {sym}: {reason} (requested {context_desc})", Fore.WHITE)
-                send_tg(
-                    f"ℹ️ {sym}: needs additional data — {reason or 'reason not provided'} (requested {context_desc})"
-                )
+                log(f"[INFO] {sym}: needs additional data - {reason or 'reason not provided'} (requested {context_desc})", Fore.WHITE)
+                send_tg(f"[INFO] {sym}: needs additional data - {reason or 'reason not provided'} (requested {context_desc})")
                 continue
             elif action == "open":
-                if current_position and abs(float(current_position.get("amount") or 0)) > 0:
-                    log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
-                    send_tg_decision(f"ℹ️ {sym}: позиция уже открыта, сигнал open пропущен")
+                existing_amount = abs(float((current_position or {}).get("amount") or 0))
+                current_side = str((current_position or {}).get("side") or "").strip().lower()
+                requested_side = (side or "").strip().lower()
+                if existing_amount > 0:
+                    if ACTIVE_HEDGE_MODE and requested_side and current_side and requested_side != current_side:
+                        log(f"[INFO] {sym}: hedge mode -> keep {current_side} {existing_amount} and open {requested_side}", Fore.LIGHTBLACK_EX)
+                    elif requested_side and current_side and requested_side != current_side:
+                        log(f"[INFO] {sym}: oneway mode, opposite position exists (side={current_side}, amount={existing_amount}), new order will close/flip", Fore.LIGHTBLACK_EX)
+                    else:
+                        log(f"[INFO] {sym}: position already open (side={current_side}, amount={existing_amount}), refreshing protection and treating as scale", Fore.LIGHTBLACK_EX)
                     updated_orders, refreshed = protection_engine._refresh_position_protection_if_possible(
                         ex,
                         sym,
@@ -14864,16 +14898,15 @@ def run_cycle():
                     if refreshed and isinstance(updated_orders, list):
                         open_orders_symbol = updated_orders
                         open_orders_cache[sym] = updated_orders
-                    continue
-                elif max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
-                    log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), пропускаем {sym}", Fore.YELLOW)
-                    send_tg(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), {sym} пропущен")
+                if max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
+                    log(f"[WARN] Position cap reached {open_positions}/{max_positions_limit}, skipping open for {sym}", Fore.YELLOW)
+                    send_tg(f"[WARN] {sym}: position cap {open_positions}/{max_positions_limit}, skipping open")
                 else:
-                    log(f"✅ Сигнал {side.upper()} ({reason})", Fore.GREEN)
-                    send_tg(f"ℹ️ {sym} {side.upper()} — {reason or 'причина не указана'}")
+                    log(f"[EXEC] OPEN {sym} {side.upper()} ({reason})", Fore.GREEN)
+                    send_tg(f"[EXEC] {sym} {side.upper()} ? {reason or 'reason not provided'}")
                     if df.empty:
-                        log(f"⚠️ Нет данных 30m для {sym}, пропускаем открытие", Fore.YELLOW)
-                        send_tg(f"ℹ️ {sym}: недостаточно данных для открытия позиции")
+                        log(f"[WARN] {sym}: no 30m data, skipping open", Fore.YELLOW)
+                        send_tg(f"[WARN] {sym}: no 30m data, skip open")
                         continue
                     df["atr"] = atr(df,14)
                     trade_rules = _get_symbol_trade_rules(ex, sym)
@@ -14895,15 +14928,15 @@ def run_cycle():
                     price = float(last_row.get("close") or 0)
                     atrv = float(last_row.get("atr") or 0)
                     if not (math.isfinite(price) and math.isfinite(atrv) and atrv > 0):
-                        log(f"⚠️ Не удалось рассчитать ATR/цену для {sym}, пропуск сигнала", Fore.YELLOW)
-                        send_tg(f"ℹ️ {sym}: нет валидных значений ATR для расчёта размера")
+                        log(f"тЪая╕П ╨Э╨╡ ╤Г╨┤╨░╨╗╨╛╤Б╤М ╤А╨░╤Б╤Б╤З╨╕╤В╨░╤В╤М ATR/╤Ж╨╡╨╜╤Г ╨┤╨╗╤П {sym}, ╨┐╤А╨╛╨┐╤Г╤Б╨║ ╤Б╨╕╨│╨╜╨░╨╗╨░", Fore.YELLOW)
+                        send_tg(f"тД╣я╕П {sym}: ╨╜╨╡╤В ╨▓╨░╨╗╨╕╨┤╨╜╤Л╤Е ╨╖╨╜╨░╤З╨╡╨╜╨╕╨╣ ATR ╨┤╨╗╤П ╤А╨░╤Б╤З╤С╤В╨░ ╤А╨░╨╖╨╝╨╡╤А╨░")
                         continue
                     atr_ratio = atrv / price if price > 0 else 0.0
                     low_vol_multiplier = 1.0
                     if VOL_GUARD_ENABLED and price > 0:
                         if ATR_GUARD_MAX_RATIO > 0 and atr_ratio >= ATR_GUARD_MAX_RATIO:
                             guard_msg = (
-                                f"[RISK] {sym}: ATR/price {atr_ratio:.2%} ≥ guard {ATR_GUARD_MAX_RATIO:.2%}, skip entry"
+                                f"[RISK] {sym}: ATR/price {atr_ratio:.2%} тЙе guard {ATR_GUARD_MAX_RATIO:.2%}, skip entry"
                             )
                             log(guard_msg, Fore.YELLOW)
                             send_tg(guard_msg)
@@ -14995,8 +15028,8 @@ def run_cycle():
                             alloc = 1.0
                         alloc = max(0.0, min(1.0, alloc))
                         risk_budget_base *= alloc
-                        # Используем динамический риск, если он включён и валиден,
-                        # иначе возвращаемся к базовому RISK_PCT.
+                        # ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╡╨╝ ╨┤╨╕╨╜╨░╨╝╨╕╤З╨╡╤Б╨║╨╕╨╣ ╤А╨╕╤Б╨║, ╨╡╤Б╨╗╨╕ ╨╛╨╜ ╨▓╨║╨╗╤О╤З╤С╨╜ ╨╕ ╨▓╨░╨╗╨╕╨┤╨╡╨╜,
+                        # ╨╕╨╜╨░╤З╨╡ ╨▓╨╛╨╖╨▓╤А╨░╤Й╨░╨╡╨╝╤Б╤П ╨║ ╨▒╨░╨╖╨╛╨▓╨╛╨╝╤Г RISK_PCT.
                         raw_risk_pct = (
                             CURRENT_RISK_PCT
                             if DYNAMIC_RISK_ENABLED
@@ -15115,7 +15148,7 @@ def run_cycle():
                     except Exception:
                         qty = float(round(qty, 8))
                     if qty <= 0:
-                        log(f"⚠️ После округления объём стал ? 0 для {sym}", Fore.YELLOW)
+                        log(f"тЪая╕П ╨Я╨╛╤Б╨╗╨╡ ╨╛╨║╤А╤Г╨│╨╗╨╡╨╜╨╕╤П ╨╛╨▒╤К╤С╨╝ ╤Б╤В╨░╨╗ ? 0 ╨┤╨╗╤П {sym}", Fore.YELLOW)
                         continue
                     notional = qty * price
                     if notional + NOTIONAL_EPSILON < min_notional_required:
@@ -15139,7 +15172,7 @@ def run_cycle():
                             ok, err = _spot_funds_sufficient(ex, sym, side, qty, price)
                             if not ok:
                                 log(f"[WARN] Skipping spot SELL for {sym}: {err}", Fore.YELLOW)
-                                send_tg(f"[WARN] {sym}: spot sell skipped — {err}")
+                                send_tg(f"[WARN] {sym}: spot sell skipped тАФ {err}")
                                 continue
                         scheme = ENTRY_LADDER_SCHEME if ENTRY_LADDER_SCHEME else [(1.0, 0.0)]
                         normalized_entries: list[tuple[float, float]] = []
@@ -15303,11 +15336,11 @@ def run_cycle():
                             entry_summaries.append(
                                 f"{precise_qty:.4f} @ {order_price:.2f} ({'fallback' if fallback_used else kind_label}, margin {total_margin_used:.2f} USDT)"
                             )
-                        log(f"✅ Ордеры {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
+                        log(f"тЬЕ ╨Ю╤А╨┤╨╡╤А╤Л {sym} {side.upper()} ({entry_created}) SL:{sl:.2f} TP:{tp:.2f}", Fore.GREEN)
                         send_tg(
-                            f"ℹ️ {sym} {side.upper()} входы:\n"
+                            f"тД╣я╕П {sym} {side.upper()} ╨▓╤Е╨╛╨┤╤Л:\n"
                             + "\n".join(f"- {summary}" for summary in entry_summaries)
-                            + f"\nSL {sl:.2f} TP {tp:.2f}\nМаржа {total_margin_used:.2f} USDT, плечо x{symbol_leverage}"
+                            + f"\nSL {sl:.2f} TP {tp:.2f}\n╨Ь╨░╤А╨╢╨░ {total_margin_used:.2f} USDT, ╨┐╨╗╨╡╤З╨╛ x{symbol_leverage}"
                         )
                         open_orders_symbol = fetch_open_orders_for_symbol(ex, sym)
                         positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
@@ -15321,8 +15354,8 @@ def run_cycle():
                         entry_errors.append(err_text)
                         log_open_skip(sym, err_text)
                         open_error = err_text
-                        log(f"❌ Ошибка ордера: {err_text}", Fore.RED)
-                        send_tg(f"ℹ️ Ошибка ордера для {sym}: {err_text}")
+                        log(f"тЭМ ╨Ю╤И╨╕╨▒╨║╨░ ╨╛╤А╨┤╨╡╤А╨░: {err_text}", Fore.RED)
+                        send_tg(f"тД╣я╕П ╨Ю╤И╨╕╨▒╨║╨░ ╨╛╤А╨┤╨╡╤А╨░ ╨┤╨╗╤П {sym}: {err_text}")
                 if preallocated_base_asset:
                     pending_val = pending_base_allocations.get(preallocated_base_asset, 0)
                     if pending_val > 0:

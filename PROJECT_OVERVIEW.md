@@ -1,23 +1,24 @@
 ## Project Overview (ByBit Bot)
 
 ### Modules & Roles
-- `bybitbot.py` — launcher: pulls latest HEAD, runs `bybitbot_impl`, and on failures falls back to stable/tag/commit via full-repo `git worktree` snapshots (so all modules stay consistent).
-- `bybitbot_impl.py` — orchestrator: loads settings, fetches public/private context, routes manual strategy decisions to execution, delegates execution/protection/trailing to module engines, Telegram handlers, persistence (state/log files).
-- `universe_builder.py` — builds the manual universe from JSON (`context.universe_mode`) and injects symbols with open positions.
-- `strategy.py` — JSON-driven manual strategy (no AI): builds `StrategyContext`, detects regimes, emits `StrategyEvent`s, holds sizing/thresholds from `strategy_spec.json`.
-- `strategy_context.py` — builds indicator/news/funding/OI context for the manual strategy.
-- `trading_context.py` — per-symbol context builder (bars/indicators/news/open interest/funding) used by the interpreter.
-- `strategy_executor.py` — maps `StrategyEvent` → executable decision dict (orders, side, type, notional_pct).
-- `account_context.py` — snapshots private account state (equity, margin, positions, open orders) and logs `[ACCOUNT] ...`.
-- `execution_engine.py` — order execution core (extra orders, reduce-only handling, logging) used by the orchestrator.
-- `protection_engine.py` — protection/trailing engine (SL/TP/trailing cleanup + logging) used by wrappers and the orchestrator.
-- `order_utils.py` — shared order normalization helpers (order types, trigger directions, sizing).
-- `order_cleanup.py` — wrappers for limit/stop cleanup (delegates to protection engine handlers).
-- `protection_utils.py` — wrapper for protection/trailing application (delegates to protection engine).
-- `trailing_utils.py` — wrapper for trailing/protection step (delegates to protection engine).
-- `strategy_spec.json` / `strategy_spec.md` — canonical strategy/config contract (universe, risk, execution, providers, events).
-- `assets/bybit.log` — main combined log (stdout/stderr mirrored), includes `[MANUAL]`, `[ACCOUNT]`, protection/trade/order messages.
-
+- `bybitbot.py` ? launcher: updates code, runs `bybitbot_impl`, manages fallbacks via git worktree snapshots.
+- `bybitbot_impl.py` ? orchestrator: cycle loop, logging/telemetry, routing between modules, Telegram handlers.
+- `universe_builder.py` ? universe generator (json config + news + open positions).
+- `strategy.py` ? JSON-driven rule set that emits `StrategyEvent`s.
+- `strategy_context.py` ? builds manual-strategy context (bars/indicators/funding/OI/news) for the signal generator.
+- `trading_context.py` ? builds trading/execution context (bars/indicators/news/OI/funding/pending) for engines.
+- `strategy_executor.py` ? maps `StrategyEvent` to execution intents (side/type/size/ladder).
+- `execution_engine.py` ? executes intents on exchange (orders/TP-SL, margin checks) using `order_utils`.
+- `execution_utils.py` ? thin execution wrapper (logging + delegation).
+- `order_utils.py` ? order math/helpers (side/type normalization, qty/amount, positionIdx, precision).
+- `order_cleanup.py` ? removes redundant/open orders (delegates to protection/cleanup handlers).
+- `protection_engine.py` ? protection/trailing engine (SL/TP/breakeven/trailing refresh).
+- `protection_utils.py` ? thin wrapper to call protection logic with consistent logging.
+- `trailing_utils.py` ? helper wrappers for trailing/protection steps.
+- `account_context.py` ? fetches equity/margin/positions/open orders per user.
+- `bybit_userbot.py` ? userbot: Telegram attach/detach, listens/responds, adapts master signals.
+- `strategy_spec.json` / `strategy_spec.md` ? canonical strategy/config contract.
+- Logs: `assets/bybit.log` ? main combined log (stdout/stderr tee).
 ### Key Constants (set in impl via JSON where provided)
 - `BOT_VERSION` — release marker.
 - `LEVERAGE`, `ORDER_MARGIN_UTILIZATION`, `SL_ATR`, `TP_ATR`, `TRAILING_ATR_MULT` — execution knobs (from `execution` block).
