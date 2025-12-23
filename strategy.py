@@ -397,6 +397,13 @@ class StrategyEvent:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _with_trace(metadata: dict[str, Any] | None, trace: Sequence[str] | None) -> dict[str, Any]:
+    meta = dict(metadata or {})
+    if trace:
+        meta["trace"] = list(trace)
+    return meta
+
+
 def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -> float:
     base = ctx.risk_pct or 0.01
     multiplier = float(SIZING_MULTIPLIERS.get(regime, 1.0))
@@ -408,11 +415,26 @@ def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -
 
 def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     if not _symbol_allowed(ctx.symbol):
-        return StrategyEvent("skip", reason="symbol not monitored", confidence=0.0)
+        return StrategyEvent(
+            "skip",
+            reason="symbol not monitored",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "symbol_not_monitored"]),
+        )
     if ctx.news_bias == "uncertain":
-        return StrategyEvent("skip", reason="news uncertain, skip entries", confidence=0.0)
+        return StrategyEvent(
+            "skip",
+            reason="news uncertain, skip entries",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "news_uncertain"]),
+        )
     if ctx.atr_sigma > ATR_SIGMA_HOT:
-        return StrategyEvent("skip", reason="atr spike, unsafe to open", confidence=0.0)
+        return StrategyEvent(
+            "skip",
+            reason="atr spike, unsafe to open",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "atr_sigma_hot"]),
+        )
 
     oi_up = ctx.oi_trend == "up"
     funding = ctx.funding_rate or 0.0
@@ -444,6 +466,16 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             metadata: dict[str, Any] = {"regime": "trend"}
             if order_type == "limit" and ENTRY_LADDER:
                 metadata["ladder_orders"] = ENTRY_LADDER
+            metadata = _with_trace(
+                metadata,
+                [
+                    "open",
+                    "trend.long",
+                    f"order={order_type}",
+                    f"news={news}",
+                    f"oi={ctx.oi_trend}",
+                ],
+            )
             return StrategyEvent(
                 f"open_{order_type}",
                 side="buy",
@@ -474,6 +506,16 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             metadata: dict[str, Any] = {"regime": "trend"}
             if order_type == "limit" and ENTRY_LADDER:
                 metadata["ladder_orders"] = ENTRY_LADDER
+            metadata = _with_trace(
+                metadata,
+                [
+                    "open",
+                    "trend.short",
+                    f"order={order_type}",
+                    f"news={news}",
+                    f"oi={ctx.oi_trend}",
+                ],
+            )
             return StrategyEvent(
                 f"open_{order_type}",
                 side="sell",
@@ -503,6 +545,15 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         meta: dict[str, Any] = {"regime": "counter"}
         if ENTRY_LADDER:
             meta["ladder_orders"] = ENTRY_LADDER
+        meta = _with_trace(
+            meta,
+            [
+                "open",
+                "countertrend.long",
+                f"news={news}",
+                f"oi={ctx.oi_trend}",
+            ],
+        )
         return StrategyEvent(
             "open_limit",
             side="buy",
@@ -522,6 +573,15 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         meta: dict[str, Any] = {"regime": "counter"}
         if ENTRY_LADDER:
             meta["ladder_orders"] = ENTRY_LADDER
+        meta = _with_trace(
+            meta,
+            [
+                "open",
+                "countertrend.short",
+                f"news={news}",
+                f"oi={ctx.oi_trend}",
+            ],
+        )
         return StrategyEvent(
             "open_limit",
             side="sell",
@@ -554,12 +614,16 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
     if ema_cross or (rsi_extreme and news_against) or oi_flip:
         close_side = "sell" if side == "long" else "buy"
         reasons: list[str] = []
+        trace: list[str] = ["close_position"]
         if ema_cross:
             reasons.append("ema20 cross against position")
+            trace.append("ema_cross")
         if rsi_extreme and news_against:
             reasons.append("rsi extreme + adverse news")
+            trace.append("rsi_extreme_news")
         if oi_flip:
             reasons.append("open interest reversed")
+            trace.append("oi_flip")
         reason = "; ".join(reasons) or "exit signal"
         return StrategyEvent(
             "close_position",
@@ -568,6 +632,7 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
             reason=reason,
             size_pct=1.0,
             confidence=0.84,
+            metadata=_with_trace(None, trace),
         )
     return None
 
@@ -588,12 +653,16 @@ def _should_hedge(ctx: StrategyContext) -> StrategyEvent | None:
         return None
     hedge_side = "sell" if side == "long" else "buy"
     reason_bits = []
+    trace: list[str] = ["hedge_open"]
     if news_against:
         reason_bits.append("adverse news")
+        trace.append("news_against")
     if funding_flip:
         reason_bits.append("funding flipped")
+        trace.append("funding_flip")
     if oi_drop:
         reason_bits.append("oi drop")
+        trace.append("oi_drop")
     reason = "hedge trigger: " + ", ".join(reason_bits)
     return StrategyEvent(
         "hedge_open",
@@ -602,6 +671,7 @@ def _should_hedge(ctx: StrategyContext) -> StrategyEvent | None:
         reason=reason,
         size_pct=min(float(hedge_spec.get("size_pct", 0.5)), _size_for_regime(ctx, "counter")),
         confidence=0.6,
+        metadata=_with_trace(None, trace),
     )
 
 
@@ -614,9 +684,19 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
         if not entries:
             return None
         if ctx.news_bias == "uncertain":
-            return StrategyEvent("cancel_limit", reason="news uncertain", confidence=0.55)
+            return StrategyEvent(
+                "cancel_limit",
+                reason="news uncertain",
+                confidence=0.55,
+                metadata=_with_trace(None, ["cancel_limit", "news_uncertain"]),
+            )
         if ctx.trend_bias is None and ctx.countertrend_bias is None:
-            return StrategyEvent("cancel_limit", reason="trend flipped vs pending limit", confidence=0.55)
+            return StrategyEvent(
+                "cancel_limit",
+                reason="trend flipped vs pending limit",
+                confidence=0.55,
+                metadata=_with_trace(None, ["cancel_limit", "trend_flipped"]),
+            )
         gap = ctx.price_gap_to_entry
         if gap and gap >= limit_gap_pct:
             first_side = entries[0].get("side", "").lower()
@@ -626,7 +706,13 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
                 "new_price": new_price,
                 "order_ids": [order.get("id") for order in entries],
             }
-            return StrategyEvent("modify_limit", reason="price drifted >0.2%, refresh limit", confidence=0.65, metadata=meta)
+            meta = _with_trace(meta, ["modify_limit", "price_gap"])
+            return StrategyEvent(
+                "modify_limit",
+                reason="price drifted >0.2%, refresh limit",
+                confidence=0.65,
+                metadata=meta,
+            )
         return None
 
     # Manage existing position: place TP or update protection
@@ -638,6 +724,7 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
         metadata: dict[str, Any] = {"tp_price": tp_price}
         if TP_LADDER and math.isfinite(ctx.tf30.atr):
             metadata["tp_ladder"] = TP_LADDER
+        metadata = _with_trace(metadata, ["place_limit_TP", "rsi_long"])
         return StrategyEvent(
             "place_limit_TP",
             side="sell",
@@ -651,6 +738,7 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
         metadata = {"tp_price": tp_price}
         if TP_LADDER and math.isfinite(ctx.tf30.atr):
             metadata["tp_ladder"] = TP_LADDER
+        metadata = _with_trace(metadata, ["place_limit_TP", "rsi_short"])
         return StrategyEvent(
             "place_limit_TP",
             side="buy",
@@ -675,7 +763,10 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
                     order_type="market",
                     reason="trend strengthening, scale in long",
                     confidence=conf_value,
-                    metadata={"direction": "increase", "size_pct": size},
+                    metadata=_with_trace(
+                        {"direction": "increase", "size_pct": size},
+                        ["modify_position", "trend_strengthening"],
+                    ),
                 )
         elif side == "short":
             lower, upper = (modify_spec.get("rsi_short") or [35, 60])[:2]
@@ -687,16 +778,29 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
                     order_type="market",
                     reason="trend strengthening, scale in short",
                     confidence=conf_value,
-                    metadata={"direction": "increase", "size_pct": size},
+                    metadata=_with_trace(
+                        {"direction": "increase", "size_pct": size},
+                        ["modify_position", "trend_strengthening"],
+                    ),
                 )
     return None
 
 
 def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     if not _symbol_allowed(ctx.symbol):
-        return StrategyEvent("skip", reason="symbol not monitored", confidence=0.0)
+        return StrategyEvent(
+            "skip",
+            reason="symbol not monitored",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "symbol_not_monitored"]),
+        )
     if ctx.price is None or not math.isfinite(ctx.price):
-        return StrategyEvent("skip", reason="no price data", confidence=0.0)
+        return StrategyEvent(
+            "skip",
+            reason="no price data",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "no_price"]),
+        )
     if ctx.has_position:
         event = should_close(ctx)
         if event:
@@ -707,14 +811,24 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
         event = should_modify(ctx)
         if event:
             return event
-        return StrategyEvent("skip", reason="hold position", confidence=0.45)
+        return StrategyEvent(
+            "skip",
+            reason="hold position",
+            confidence=0.45,
+            metadata=_with_trace(None, ["skip", "hold_position"]),
+        )
     event = should_open(ctx)
     if event:
         return event
     event = should_modify(ctx)
     if event:
         return event
-    return StrategyEvent("skip", reason="no confluence", confidence=0.0)
+    return StrategyEvent(
+        "skip",
+        reason="no confluence",
+        confidence=0.0,
+        metadata=_with_trace(None, ["skip", "no_confluence"]),
+    )
 def _symbol_allowed(symbol: str) -> bool:
     if not symbol:
         return False

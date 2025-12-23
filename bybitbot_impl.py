@@ -40,6 +40,7 @@ import account_context
 import order_cleanup
 import protection_utils
 import trailing_utils
+import execution_utils
 import universe_builder
 STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get("env_vars", []) if isinstance(var, str)}
 STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
@@ -3668,7 +3669,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     executed_orders: list[str] = []
     if extra_orders:
         previous_position_snapshot = current_position
-        executed, actions_performed = execute_extra_orders(
+        executed, actions_performed = execution_utils.execute_orders(
             exchange,
             sym,
             extra_orders,
@@ -3676,6 +3677,9 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             current_position=current_position,
             open_orders=open_orders_symbol,
             max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
+            handler=execute_extra_orders,
+            log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
+            include_errors=False,
         )
         executed_orders = list(executed) if executed else []
         if executed:
@@ -4503,7 +4507,18 @@ def refresh_settings():
         fallback = str(news_spec_raw.get("fallback") or "").strip().lower()
         news_list = [p for p in (primary, fallback) if p]
     news_provider_env = os.getenv("CRYPTO_NEWS_PROVIDER") or os.getenv("NEWS_PROVIDER") or ""
-    NEWS_PROVIDER = (news_list[0] if news_list else "") or news_provider_env.strip().lower() or "hybrid"
+    news_env_list: list[str] = []
+    if news_provider_env and "," in news_provider_env:
+        news_env_list = [seg.strip().lower() for seg in news_provider_env.split(",") if seg.strip()]
+    if len(news_list) > 1 or len(news_env_list) > 1:
+        NEWS_PROVIDER = "hybrid"
+    else:
+        NEWS_PROVIDER = (
+            (news_list[0] if news_list else "")
+            or (news_env_list[0] if news_env_list else "")
+            or news_provider_env.strip().lower()
+            or "hybrid"
+        )
     NEWS_API_TOKEN = os.getenv("CRYPTO_NEWS_TOKEN") or os.getenv("NEWS_API_TOKEN")
     NEWS_ITEMS_LIMIT = env_int("CRYPTO_NEWS_LIMIT", 5)
     AI_INITIAL_NEWS_PROVIDER = os.getenv("AI_INITIAL_NEWS_PROVIDER") or NEWS_PROVIDER
@@ -11344,6 +11359,38 @@ def _format_protection_snapshot(orders, position_payload: dict | None = None) ->
     return f"stop={_format_list(stops)}; take={_format_list(takes)}"
 
 
+def _summarize_open_orders_for_log(orders, limit: int = 6) -> str:
+    if not orders:
+        return "[]"
+    summary: list[dict[str, Any]] = []
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        price = safe_float(order.get("price"))
+        stop = safe_float(order.get("stopPrice") or order.get("triggerPrice"))
+        qty = safe_float(order.get("amount") or order.get("qty") or order.get("size"))
+        summary.append(
+            {
+                "id": order.get("id"),
+                "side": order.get("side"),
+                "type": order.get("type"),
+                "price": price,
+                "stop": stop,
+                "qty": qty,
+                "reduceOnly": order.get("reduceOnly"),
+            }
+        )
+        if len(summary) >= limit:
+            break
+    suffix = ""
+    try:
+        if len(orders) > limit:
+            suffix = f" (+{len(orders) - limit} more)"
+    except Exception:
+        suffix = ""
+    return json.dumps(summary, ensure_ascii=True) + suffix
+
+
 def _format_position_snapshot(amount: float | None) -> str:
     if amount is None or not math.isfinite(amount) or abs(amount) < 1e-12:
         return "flat"
@@ -12868,6 +12915,11 @@ def _refresh_position_protection_if_possible(
     protection_df = _prepare_protection_dataframe(df_candidate, df_primary, symbol)
     if protection_df is None:
         return None, False
+    if symbol and symbol.upper().startswith("DOGE"):
+        log(
+            f"[MODULE][protection] {symbol}: input_orders={_summarize_open_orders_for_log(open_orders)}",
+            Fore.LIGHTBLACK_EX,
+        )
     updated_orders = trailing_utils.apply_trailing(
         exchange,
         symbol,
@@ -12878,6 +12930,11 @@ def _refresh_position_protection_if_possible(
         handler=ensure_position_protection,
         log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
     )
+    if symbol and symbol.upper().startswith("DOGE"):
+        log(
+            f"[MODULE][trailing] {symbol}: output_orders={_summarize_open_orders_for_log(updated_orders)}",
+            Fore.LIGHTBLACK_EX,
+        )
     has_stop = False
     has_take = False
     if updated_orders:
@@ -12894,6 +12951,11 @@ def _refresh_position_protection_if_possible(
             handler=ensure_position_protection,
             log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
         )
+        if symbol and symbol.upper().startswith("DOGE"):
+            log(
+                f"[MODULE][protection] {symbol}: retry_orders={_summarize_open_orders_for_log(updated_orders)}",
+                Fore.LIGHTBLACK_EX,
+            )
         _, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
         if not has_take:
             log(f"[WARN] {symbol}: still no take-profit after retry; monitor manually", Fore.YELLOW)
@@ -16041,6 +16103,11 @@ def run_cycle():
             side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
         px_text = f"{px_ref:.4f}" if isinstance(px_ref, (int, float)) and math.isfinite(px_ref or 0) else "n/a"
         open_orders_symbol_snapshot = open_orders_prefetch.get(sym) or []
+        if sym and sym.upper().startswith("DOGE"):
+            log(
+                f"[DEBUG] {sym}: open_orders(start)={_summarize_open_orders_for_log(open_orders_symbol_snapshot)}",
+                Fore.LIGHTBLACK_EX,
+            )
         prot_orders_snapshot = _extract_protection_orders(open_orders_symbol_snapshot)
         stop_levels: list[float] = []
         take_levels: list[float] = []
@@ -16250,6 +16317,12 @@ def run_cycle():
                         log_user(signal_msg, color=Fore.LIGHTBLACK_EX)
                         manual_decision = strategy_executor.apply_event(manual_event, manual_ctx)
                         log(f"[MODULE][executor] {sym}: event={manual_event.name} side={manual_event.side} -> decision={manual_decision}", Fore.LIGHTBLACK_EX)
+                        trace_items = None
+                        if isinstance(manual_event.metadata, dict):
+                            trace_items = manual_event.metadata.get("trace")
+                        if trace_items:
+                            trace_text = " | ".join(map(str, trace_items))
+                            log(f"[MANUAL][TRACE] {sym}: {trace_text}", Fore.LIGHTBLACK_EX)
                         manual_decision["ai_unavailable"] = True
                         manual_decision.setdefault("reason", manual_event.reason)
                 else:
@@ -17220,7 +17293,7 @@ def run_cycle():
                 extra_orders = []
 
             if extra_orders:
-                executed, actions_performed, order_errors = execute_extra_orders(
+                executed, actions_performed, order_errors = execution_utils.execute_orders(
                     ex,
                     sym,
                     extra_orders,
@@ -17230,6 +17303,9 @@ def run_cycle():
                     available_margin=available_margin,
                     symbol_leverage=symbol_leverage,
                     max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
+                    handler=execute_extra_orders,
+                    log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
+                    include_errors=True,
                 )
                 if executed:
                     orders_activity = True
@@ -17273,6 +17349,11 @@ def run_cycle():
                 symbols_with_position_seen.add(sym)
             final_protection_orders = _extract_protection_orders(open_orders_symbol)
             final_protection_signature = _protection_orders_signature(open_orders_symbol)
+            if sym and sym.upper().startswith("DOGE"):
+                log(
+                    f"[DEBUG] {sym}: open_orders(end)={_summarize_open_orders_for_log(open_orders_symbol)}",
+                    Fore.LIGHTBLACK_EX,
+                )
             protection_changed = initial_protection_signature != final_protection_signature
             amount_diff = abs(final_position_amount - initial_position_amount)
             amount_tolerance = max(abs(initial_position_amount), abs(final_position_amount)) * 1e-6 + 1e-8
