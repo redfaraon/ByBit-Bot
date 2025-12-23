@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Version: 12.4
+# Version: 12.5
 """
 Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 Сбалансированный интрадей-бот с поддержкой OpenAI GPT, Telegram и расширенным контекстом.
@@ -84,9 +84,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.6"
+BOT_VERSION = "1.3.7"
 BOT_CHANGELOG = (
-    "Execution/protection/trailing now live in module engines with protection audits logging DOGE open orders and guarded price hints."
+    "Fix module config sync on startup, enable early stdio log mirroring, and harden fallback script imports."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -1530,11 +1530,13 @@ def _sync_module_configs() -> None:
     infer_market_fn = globals().get("_infer_market_category")
     fetch_orders_fn = globals().get("fetch_open_orders_for_symbol")
     atr_fn = globals().get("atr")
+    margin_utilization = globals().get("ORDER_MARGIN_UTILIZATION", 0.95)
+    non_reduce_decimals = globals().get("NON_REDUCE_PRICE_DECIMALS", 4)
     exec_bindings = {
         "safe_float": safe_float,
         "log": log,
-        "ORDER_MARGIN_UTILIZATION": ORDER_MARGIN_UTILIZATION,
-        "NON_REDUCE_PRICE_DECIMALS": NON_REDUCE_PRICE_DECIMALS,
+        "ORDER_MARGIN_UTILIZATION": margin_utilization,
+        "NON_REDUCE_PRICE_DECIMALS": non_reduce_decimals,
     }
     if truthy_flag_fn:
         exec_bindings["_is_truthy_flag"] = truthy_flag_fn
@@ -3948,6 +3950,7 @@ def refresh_settings():
     global NEWS_PROVIDER, NEWS_API_TOKEN, NEWS_ITEMS_LIMIT
     global SPOT_ALLOCATION_PCT, DERIV_ALLOCATION_PCT, CURRENT_MARKET_ALLOCATIONS
     global POSITION_MODE, HEDGE_MODE, ACTIVE_POSITION_MODE, ACTIVE_HEDGE_MODE, POSITION_MODE_MISMATCH_STATE, ORDER_MARGIN_UTILIZATION
+    global MAX_NON_REDUCE_LIMITS_PER_SIDE, NON_REDUCE_PRICE_DECIMALS
     global USER_LOG_MAX_BYTES, USER_LOG_BACKUPS, DRAWDOWN_CONTROL_ENABLED, DRAWDOWN_WINDOW_HOURS
     global AI_LOG_MAX_BYTES, AI_LOG_BACKUPS
     global EXTRA_POSITION_SETTLES
@@ -4679,6 +4682,7 @@ try:
 except (TypeError, ValueError):
     MAX_POSITIONS_PER_BASE = max(0, MAX_POSITIONS_PER_BASE)
 
+enable_stdio_logging()
 refresh_settings()
 
 # --- Конфигурация ---

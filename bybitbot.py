@@ -1202,6 +1202,12 @@ def _run_script_candidate(
         env["BYBITBOT_SUPPRESS_ROUTINE_COUNTER"] = "1"
     else:
         env.pop("BYBITBOT_SUPPRESS_ROUTINE_COUNTER", None)
+    repo_path = str(REPO_ROOT)
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = repo_path + os.pathsep + existing_pythonpath
+    else:
+        env["PYTHONPATH"] = repo_path
     result = subprocess.run([sys.executable, str(script_path)], env=env)
     return result.returncode == 0
 
