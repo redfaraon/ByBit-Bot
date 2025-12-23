@@ -84,9 +84,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.8"
+BOT_VERSION = "1.3.9"
 BOT_CHANGELOG = (
-    "Worktree-based stable fallback snapshots, restored git sync, and unified launcher/bot logging."
+    "Track module versions and log updates/current versions each cycle."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -107,6 +107,7 @@ def _resolve_repo_root(script_dir: Path) -> Path:
 REPO_ROOT = _resolve_repo_root(SCRIPT_DIR)
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
 STATE_DIR = REPO_ROOT
+MODULE_VERSIONS_FILE = REPO_ROOT / "module_versions.json"
 db_logger.initialize()
 def _configure_state_paths() -> None:
     global STATE_DIR
@@ -115,6 +116,7 @@ def _configure_state_paths() -> None:
     global FALLBACK_HISTORY_FILE
     global RESULTS_STATE_FILE
     global RELEASE_STATE_FILE
+    global MODULE_VERSIONS_FILE
     global BYBIT_CREDENTIALS_FILE
     global SUPPORT_SANDBOX_ROOT
     global SUPPORT_SANDBOX_STATE_FILE
@@ -134,6 +136,7 @@ def _configure_state_paths() -> None:
     FALLBACK_HISTORY_FILE = STATE_DIR / "fallback_history.json"
     RESULTS_STATE_FILE = STATE_DIR / "results_state.json"
     RELEASE_STATE_FILE = STATE_DIR / "release_state.json"
+    MODULE_VERSIONS_FILE = STATE_DIR / "module_versions.json"
     BYBIT_CREDENTIALS_FILE = STATE_DIR / "bybit_credentials.json"
     SUPPORT_SANDBOX_ROOT = STATE_DIR / "support_sandboxes"
     SUPPORT_SANDBOX_STATE_FILE = STATE_DIR / "support_sandboxes.json"
@@ -6288,6 +6291,107 @@ def _save_release_state(state: dict) -> None:
         RELEASE_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         log(f"[RELEASE] Не удалось сохранить release_state.json: {exc}", Fore.YELLOW)
+
+
+def _load_module_versions() -> dict[str, str]:
+    try:
+        raw = MODULE_VERSIONS_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    if isinstance(payload, dict):
+        return {str(k): str(v) for k, v in payload.items() if v is not None}
+    return {}
+
+
+def _save_module_versions(versions: dict[str, str]) -> None:
+    try:
+        MODULE_VERSIONS_FILE.write_text(json.dumps(versions, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _current_module_version_label() -> str:
+    source_hash = (os.getenv("BYBITBOT_SOURCE_HASH") or "").strip()
+    source_ref = (os.getenv("BYBITBOT_SOURCE_REF") or "").strip()
+    version = (os.getenv("BYBITBOT_CHANGELOG_VERSION") or os.getenv("BYBITBOT_VERSION") or BOT_VERSION or "").strip()
+    if source_hash:
+        return f"{version} ({source_hash[:8]})" if version else source_hash[:8]
+    if source_ref:
+        return f"{version} ({source_ref})" if version else source_ref
+    return version or "unknown"
+
+
+def _module_version_targets() -> list[tuple[str, Any]]:
+    return [
+        ("bybitbot_impl", sys.modules.get(__name__)),
+        ("strategy", strategy),
+        ("strategy_context", strategy_context),
+        ("strategy_executor", strategy_executor),
+        ("trading_context", trading_context),
+        ("account_context", account_context),
+        ("universe_builder", universe_builder),
+        ("execution_engine", execution_engine),
+        ("protection_engine", protection_engine),
+        ("order_utils", order_utils),
+        ("order_cleanup", order_cleanup),
+        ("protection_utils", protection_utils),
+        ("trailing_utils", trailing_utils),
+        ("execution_utils", execution_utils),
+    ]
+
+
+def _resolve_module_version(module: Any) -> str:
+    for attr in ("MODULE_VERSION", "__version__", "VERSION", "BOT_VERSION"):
+        try:
+            value = getattr(module, attr)
+        except Exception:
+            value = None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _current_module_version_label()
+
+
+_LAST_MODULE_VERSION_LOG_CYCLE: int | None = None
+
+
+def _log_module_versions() -> None:
+    global _LAST_MODULE_VERSION_LOG_CYCLE
+    cycle_counter = safe_int(os.getenv("BYBITBOT_CYCLE_COUNTER")) or None
+    if cycle_counter is not None and _LAST_MODULE_VERSION_LOG_CYCLE == cycle_counter:
+        return
+    _LAST_MODULE_VERSION_LOG_CYCLE = cycle_counter
+    previous = _load_module_versions()
+    current: dict[str, str] = {}
+    updates: list[str] = []
+    stable: list[str] = []
+    for name, module in _module_version_targets():
+        if module is None:
+            continue
+        version = _resolve_module_version(module)
+        try:
+            if not getattr(module, "MODULE_VERSION", None):
+                setattr(module, "MODULE_VERSION", version)
+        except Exception:
+            pass
+        current[name] = version
+        prev_version = previous.get(name)
+        if prev_version and prev_version != version:
+            updates.append(f"{name} {prev_version} -> {version}")
+        else:
+            stable.append(f"{name} {version}")
+    if updates:
+        for idx in range(0, len(updates), 4):
+            log("[MODULE_VERSION] updated: " + " | ".join(updates[idx:idx + 4]), Fore.LIGHTBLUE_EX)
+    if stable:
+        for idx in range(0, len(stable), 4):
+            log("[MODULE_VERSION] current: " + " | ".join(stable[idx:idx + 4]), Fore.LIGHTBLACK_EX)
+    _save_module_versions(current)
 
 
 def _infer_market_category(symbol: str, market_info: dict | None) -> str | None:
@@ -13236,6 +13340,7 @@ def run_cycle():
     cycle_kind_display = cycle_kind or "normal"
     cycle_mode_display = cycle_mode or "last"
     log(f"[CYCLE] {cycle_number_display} ({cycle_kind_display}/{cycle_mode_display})", Fore.LIGHTBLACK_EX)
+    _log_module_versions()
     LATEST_STATUS.update({
         "cycle": next_cycle_number,
         "cycle_kind": cycle_kind_display,
