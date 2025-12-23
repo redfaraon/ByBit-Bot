@@ -15,6 +15,7 @@ assets/
 runtime/
 users/*/secrets.env
 users/*/secrets.local
+users/
 strategy_spec.json
 bybit.log
 assets/bybit.log
@@ -22,3 +23,8 @@ cycle_state.json
 equity_history.json
 ai_decisions.log
 error.log
+*.json
+*.json.*
+*.log
+*.log.*
+support_sandboxes/

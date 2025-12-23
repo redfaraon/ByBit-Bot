@@ -11,7 +11,6 @@ import pandas as pd
 from colorama import Fore
 
 import order_cleanup
-import protection_utils
 import trailing_utils
 from order_utils import get_position_idx, get_trigger_direction_for_side, _summarize_order_spec
 
@@ -41,6 +40,28 @@ IMMEDIATE_CLOSE_ON_BREACH = False
 PARTIAL_TP_SCHEME = [(0.33, 1.2), (0.33, 2.0), (0.34, 3.0)]
 MIN_NOTIONAL_USDT = 5.0
 TIMEFRAME = "30m"
+
+def ensure_protection(
+    exchange: Any,
+    symbol: str,
+    position: dict | None,
+    df_primary: Any,
+    open_orders: list[dict] | None,
+    *,
+    config: dict | None,
+    handler,
+    log_fn=None,
+):
+    """Thin wrapper to call protection logic with consistent logging."""
+    if log_fn:
+        log_fn(
+            f"[MODULE][protection] sym={symbol} pos={'yes' if position else 'no'} open_orders={len(open_orders or [])} config_keys={list((config or {}).keys()) if isinstance(config, dict) else []}"
+        )
+    result = handler(exchange, symbol, position, df_primary, open_orders, config)
+    if log_fn:
+        result_len = len(result or []) if isinstance(result, (list, tuple)) else "n/a"
+        log_fn(f"[MODULE][protection] sym={symbol} result_orders={result_len}")
+    return result
 
 REQUIRED_GLOBALS = {
     'safe_float',
@@ -1783,7 +1804,7 @@ def _refresh_position_protection_if_possible(
         has_stop, has_take, _ = _evaluate_position_protection(position, updated_orders or [])
     if not has_take:
         log(f"[WARN] {symbol}: protection refresh left position without take-profit, retrying once", Fore.YELLOW)
-        updated_orders = protection_utils.ensure_protection(
+        updated_orders = ensure_protection(
             exchange,
             symbol,
             position,

@@ -35,14 +35,11 @@ from dotenv import dotenv_values
 import db_logger
 import strategy
 import strategy_context
-import trading_context
-import strategy_executor
+import signal_intent_mapper
 import account_context
 import order_cleanup
-import protection_utils
 import trailing_utils
-import execution_utils
-import execution_engine
+import order_executor
 import order_utils
 import protection_engine
 import universe_builder
@@ -1553,7 +1550,7 @@ def _sync_module_configs() -> None:
         exec_bindings["_resolve_symbol_alias"] = resolve_symbol_fn
     if infer_market_fn:
         exec_bindings["_infer_market_category"] = infer_market_fn
-    execution_engine.configure(exec_bindings)
+    order_executor.configure(exec_bindings)
     protect_bindings = {
         "safe_float": safe_float,
         "safe_int": safe_int,
@@ -3895,21 +3892,20 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     executed_orders: list[str] = []
     if extra_orders:
         previous_position_snapshot = current_position
-        executed, actions_performed = execution_utils.execute_orders(
+        executed, actions_performed, _order_errors = order_executor.execute_extra_orders(
             exchange,
             sym,
             extra_orders,
             equity=equity,
             current_position=current_position,
             open_orders=open_orders_symbol,
+            available_margin=available_margin,
+            symbol_leverage=symbol_leverage,
             max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
-            handler=execution_engine.execute_extra_orders,
-            log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
-            include_errors=False,
         )
         executed_orders = list(executed) if executed else []
         if executed:
-            send_tg(f"{sym}: —?—?—?——? выполнил:\n- " + "\n- ".join(executed))
+            send_tg(f"{sym}: executed orders:\\n- " + "\\n- ".join(str(item) for item in executed))
         if actions_performed:
             positions_map, _ = fetch_positions_snapshot(exchange, symbols_filter=[sym])
             current_position = positions_map.get(sym)
@@ -6334,17 +6330,14 @@ def _module_version_targets() -> list[tuple[str, Any]]:
         ("bybitbot_impl", sys.modules.get(__name__)),
         ("strategy", sys.modules.get("strategy") or strategy),
         ("strategy_context", sys.modules.get("strategy_context") or strategy_context),
-        ("strategy_executor", sys.modules.get("strategy_executor") or strategy_executor),
-        ("trading_context", sys.modules.get("trading_context") or trading_context),
+        ("signal_intent_mapper", sys.modules.get("signal_intent_mapper") or signal_intent_mapper),
         ("account_context", sys.modules.get("account_context") or account_context),
         ("universe_builder", sys.modules.get("universe_builder") or universe_builder),
-        ("execution_engine", sys.modules.get("execution_engine") or execution_engine),
+        ("order_executor", sys.modules.get("order_executor") or order_executor),
         ("protection_engine", sys.modules.get("protection_engine") or protection_engine),
         ("order_utils", sys.modules.get("order_utils") or order_utils),
         ("order_cleanup", sys.modules.get("order_cleanup") or order_cleanup),
-        ("protection_utils", sys.modules.get("protection_utils") or protection_utils),
         ("trailing_utils", sys.modules.get("trailing_utils") or trailing_utils),
-        ("execution_utils", sys.modules.get("execution_utils") or execution_utils),
     ]
 
 
@@ -11641,7 +11634,7 @@ def execute_extra_orders(
     symbol_leverage: float | None = None,
     max_limits_per_side: int = 1,
 ):
-    return execution_engine.execute_extra_orders(
+    return order_executor.execute_extra_orders(
         exchange,
         symbol,
         orders,
@@ -14395,7 +14388,7 @@ def run_cycle():
                             if trace_items:
                                 manual_decision["trace"] = trace_items
                         else:
-                            manual_decision = strategy_executor.apply_event(manual_event, manual_ctx)
+                            manual_decision = signal_intent_mapper.apply_event(manual_event, manual_ctx)
                             log(
                                 f"[MODULE][executor] {sym}: event={manual_event.name} side={manual_event.side} -> decision={manual_decision}",
                                 Fore.LIGHTBLACK_EX,
@@ -15377,7 +15370,7 @@ def run_cycle():
                 extra_orders = []
 
             if extra_orders:
-                executed, actions_performed, order_errors = execution_utils.execute_orders(
+                executed, actions_performed, order_errors = order_executor.execute_extra_orders(
                     ex,
                     sym,
                     extra_orders,
@@ -15387,13 +15380,7 @@ def run_cycle():
                     available_margin=available_margin,
                     symbol_leverage=symbol_leverage,
                     max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
-                    handler=execution_engine.execute_extra_orders,
-                    log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
-                    include_errors=True,
                 )
-                if executed:
-                    orders_activity = True
-                    send_tg("🟢 " + sym + " доп. ордера:\n- " + "\n- ".join(executed))
                 if actions_performed:
                     orders_activity = True
                     positions_map, open_positions = fetch_positions_snapshot(ex, symbols_filter=available_pairs)
@@ -15948,7 +15935,7 @@ def run_cycle():
             open_orders_attempt = []
         if df_attempt is not None and position_payload:
             try:
-                updated_orders = protection_utils.ensure_protection(
+                updated_orders = protection_engine.ensure_protection(
                     ex,
                     sym_unprotected,
                     position_payload,
@@ -16774,7 +16761,7 @@ _format_decimal = order_utils._format_decimal
 _format_notional_pct = order_utils._format_notional_pct
 _summarize_order_spec = order_utils._summarize_order_spec
 
-execute_extra_orders = execution_engine.execute_extra_orders
+execute_extra_orders = order_executor.execute_extra_orders
 
 
 def main():

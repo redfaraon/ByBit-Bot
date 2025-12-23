@@ -59,7 +59,7 @@ These classify market regimes and gate entries for each side.
   "modify_position": { "rsi_long": [40, 65], "rsi_short": [35, 60], "confidence": 0.58, "scale": 0.5 }
 }
 ```
-Interpreter emits one of: `open_market`, `open_limit`, `hedge_open`, `place_limit_TP`, `modify_limit`, `cancel_limit`, `modify_position`, `close_position`, `skip`. `strategy_executor.py` turns these into concrete orders/decisions.
+Interpreter emits one of: `open_market`, `open_limit`, `hedge_open`, `place_limit_TP`, `modify_limit`, `cancel_limit`, `modify_position`, `close_position`, `skip`. `signal_intent_mapper.py` turns these into concrete orders/decisions.
 
 ### Account & Providers
 ```jsonc
@@ -92,7 +92,7 @@ These values configure order sizing, leverage, protection parameters, retry/fall
 1) `strategy_context.py` builds public context for `context.universe`, logging `[MANUAL][CONTEXT] ...`.  
 2) `account_context.py` logs private fields listed in `account.fields` with `[ACCOUNT] ...`.  
 3) `strategy.py` evaluates rules and emits `StrategyEvent`s for each symbol.  
-4) `strategy_executor.py` applies `execution` settings to produce actionable decisions.  
+4) `signal_intent_mapper.py` applies `execution` settings to produce actionable decisions.  
 5) `bybitbot_impl.py` runs the decisions; all per-symbol logs are tagged `[MANUAL]`.
 
 JSON beats `.env` for every trading parameter. Only secrets (API keys, tokens) and the env vars explicitly listed under `context.env_vars` are read from `.env`.

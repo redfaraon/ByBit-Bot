@@ -5,15 +5,13 @@
 - `bybitbot_impl.py` ? orchestrator: cycle loop, logging/telemetry, routing between modules, Telegram handlers.
 - `universe_builder.py` ? universe generator (json config + news + open positions).
 - `strategy.py` ? JSON-driven rule set that emits `StrategyEvent`s.
-- `strategy_context.py` ? builds manual-strategy context (bars/indicators/funding/OI/news) for the signal generator.
-- `trading_context.py` ? builds trading/execution context (bars/indicators/news/OI/funding/pending) for engines.
-- `strategy_executor.py` ? maps `StrategyEvent` to execution intents (side/type/size/ladder).
-- `execution_engine.py` ? executes intents on exchange (orders/TP-SL, margin checks) using `order_utils`.
-- `execution_utils.py` ? thin execution wrapper (logging + delegation).
+- `strategy_context.py` ? builds strategy/trading context (bars/indicators/funding/OI/news/pending) for both signal generator and engines.
+- `signal_intent_mapper.py` ? maps `StrategyEvent` to execution intents (side/type/size/ladder).
+- `order_executor.py` ? executes intents on exchange (orders/TP-SL, margin checks) using `order_utils`.
 - `order_utils.py` ? order math/helpers (side/type normalization, qty/amount, positionIdx, precision).
 - `order_cleanup.py` ? removes redundant/open orders (delegates to protection/cleanup handlers).
 - `protection_engine.py` ? protection/trailing engine (SL/TP/breakeven/trailing refresh).
-- `protection_utils.py` ? thin wrapper to call protection logic with consistent logging.
+- `protection_engine.py` ? protection/trailing engine (SL/TP/breakeven/trailing refresh) with built-in logging helper.
 - `trailing_utils.py` ? helper wrappers for trailing/protection steps.
 - `account_context.py` ? fetches equity/margin/positions/open orders per user.
 - `bybit_userbot.py` ? userbot: Telegram attach/detach, listens/responds, adapts master signals.
@@ -30,11 +28,11 @@
 ### Core Functions (selected)
 - `run_cycle()` (impl) — orchestrates a full trading cycle: context fetch → manual decision → execution → protection/cleanup → scheduling.
 - `strategy.get_signal_without_ai(ctx)` — regime detection + event selection (manual-only).
-- `strategy_executor.apply_event(event, ctx)` — produce executable decision dict.
-- `strategy_context.build_manual_strategy_context(...)` — assemble per-symbol manual context.
-- `execution_engine.execute_extra_orders(...)` — applies extra orders from decisions.
-- `protection_engine.ensure_position_protection(...)` — core SL/TP/trailing enforcement.
-- `protection_utils.ensure_protection(...)` / `trailing_utils.apply_trailing(...)` — delegate to protection engine logic.
+- `signal_intent_mapper.apply_event(event, ctx)` ??" produce executable decision dict.
+- `strategy_context.build_manual_strategy_context(...)` ??" assemble per-symbol manual/execution context.
+- `order_executor.execute_extra_orders(...)` ??" applies extra orders from decisions.
+- `protection_engine.ensure_position_protection(...)` ??" core SL/TP/trailing enforcement (plus `ensure_protection` wrapper).
+- `trailing_utils.apply_trailing(...)` ??" delegate to protection engine logic.
 - `order_cleanup.cleanup_excess_non_reduce_limits(...)` / `cleanup_redundant_stops(...)` — delegate to protection engine cleanup logic.
 - Telegram handlers: `handle_telegram_command`, `_handle_schedule_command`, `_handle_logs_command`, `_handle_tokens_command`, `_handle_bybit_key_command`, `_handle_add_user_command`, `_handle_config_command`, `_handle_sandbox_command`.
 
@@ -75,8 +73,8 @@
 2. Collect user account context (equity/margin/positions/orders) via `account_context`; log `[ACCOUNT] ...`.
 3. Build universe via `universe_builder` (fixed/news per JSON, always includes open positions).
 4. For each symbol:
-   - Build trading context (bars/indicators/news/funding/oi) via `trading_context`/`strategy_context`.
+   - Build trading context (bars/indicators/news/funding/oi) via `strategy_context`.
    - Run strategy → signals/events; log `[MANUAL][SIGNAL]`.
-   - Execute via `strategy_executor` (order/place/cancel/modify) and log `[MANUAL][EXEC]`.
+   - Execute via `signal_intent_mapper` + `order_executor` (order/place/cancel/modify) and log `[MANUAL][EXEC]`.
    - Cleanup stale limits, apply trailing, enforce protection; if protection fails to place, close the position and surface an error.
 5. Summarize cycle, compute next start time, and wait until the scheduled run.
