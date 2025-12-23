@@ -75,6 +75,8 @@ Set `TELEGRAM_FORWARD_LOGS=1` to mirror console logs into Telegram. The bot batc
 Use `manage_update.py` to stop the bot, run your update commands, and restart it at the planned trading time.
 If `runtime_status.json` contains `next_run_utc`, the manager aligns the restart to that timestamp; otherwise it falls back to the nearest HH:01 / HH:31 slot.
 
+Note: `bybitbot.py` has its own runtime fallback mechanism. If the latest HEAD fails to start, it can run a full-repo snapshot of `stable`/tags/commits via `git worktree` so all modules stay consistent during fallback.
+
 ### Cron-based autostart
 
 The previous production setup ran via cron. A helper script is provided in `scripts/manage_update_cron.sh`; it:

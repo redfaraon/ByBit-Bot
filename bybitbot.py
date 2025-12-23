@@ -32,7 +32,225 @@ def _resolve_repo_root(script_path: Path) -> Path:
 
 
 REPO_ROOT = _resolve_repo_root(Path(__file__).resolve().parent)
-CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
+CHANGELOG_FILE = REPO_ROOT / "changelog.txt"
+if not CHANGELOG_FILE.exists():
+    CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
+
+
+def _resolve_main_log_path() -> Path:
+    raw = os.getenv("BYBIT_MAIN_LOG")
+    if raw:
+        try:
+            candidate = Path(raw).expanduser()
+        except Exception:
+            candidate = Path(raw)
+        if not candidate.is_absolute():
+            return (REPO_ROOT / candidate).resolve()
+        try:
+            return candidate.resolve()
+        except Exception:
+            return candidate
+    return (REPO_ROOT / "assets" / "bybit.log").resolve()
+
+
+def _boot_log_line(message: str) -> None:
+    try:
+        log_path = _resolve_main_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fp:
+            fp.write(message.rstrip("\n") + "\n")
+    except Exception:
+        pass
+
+
+def _boot_print(message: str, *, stream=None) -> None:
+    target_stream = stream if stream is not None else sys.stderr
+    try:
+        print(message, file=target_stream)
+    except Exception:
+        pass
+    _boot_log_line(message)
+
+
+def _boot_log_exception(prefix: str | None = None) -> None:
+    exc_text = traceback.format_exc()
+    if prefix:
+        _boot_print(prefix, stream=sys.stderr)
+    for line in (exc_text or "").splitlines():
+        if line.strip():
+            _boot_print(line, stream=sys.stderr)
+
+
+def _ensure_launcher_log_env() -> None:
+    os.environ.setdefault("BYBIT_MAIN_LOG", str((REPO_ROOT / "assets" / "bybit.log").resolve()))
+    os.environ.setdefault("BYBIT_ERROR_LOG", str((REPO_ROOT / "assets" / "error.log").resolve()))
+
+
+def _resolve_repo_root_from_path(start: Path) -> Path:
+    try:
+        resolved = start.resolve()
+    except Exception:
+        resolved = start
+    return _resolve_repo_root(resolved)
+
+
+def _safe_ref_label(text: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in str(text))
+    cleaned = cleaned.strip("._-")
+    return cleaned or "snapshot"
+
+
+def _worktrees_dir() -> Path:
+    root = REPO_ROOT / "backups" / "worktrees"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return root
+
+
+def _ensure_worktree_detached(*, name: str, commit_ref: str) -> Path | None:
+    worktree_root = _worktrees_dir() / _safe_ref_label(name)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", commit_ref],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_ROOT,
+        )
+        resolved_commit = result.stdout.strip()
+    except Exception:
+        return None
+    if not resolved_commit:
+        return None
+
+    if worktree_root.exists() and not (worktree_root / ".git").exists():
+        try:
+            shutil.rmtree(worktree_root, ignore_errors=True)
+        except Exception:
+            pass
+
+    if (worktree_root / ".git").exists():
+        try:
+            subprocess.run(
+                ["git", "reset", "--hard", resolved_commit],
+                check=True,
+                cwd=worktree_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(worktree_root)],
+                    check=True,
+                    cwd=REPO_ROOT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                try:
+                    shutil.rmtree(worktree_root, ignore_errors=True)
+                except Exception:
+                    pass
+    if not (worktree_root / ".git").exists():
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "-f", "-q", "--detach", str(worktree_root), resolved_commit],
+                check=True,
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return None
+    _sync_backup_resources(worktree_root)
+    return worktree_root
+
+
+def _ensure_worktree_tracking(*, name: str, remote_ref: str, local_branch: str) -> Path | None:
+    worktree_root = _worktrees_dir() / _safe_ref_label(name)
+    raw_ref = (remote_ref or "").strip()
+    if not raw_ref:
+        return None
+    if raw_ref.startswith("origin/"):
+        remote_branch = raw_ref[len("origin/") :]
+        upstream_ref = raw_ref
+    else:
+        remote_branch = raw_ref
+        upstream_ref = f"origin/{raw_ref}"
+    if worktree_root.exists() and not (worktree_root / ".git").exists():
+        try:
+            shutil.rmtree(worktree_root, ignore_errors=True)
+        except Exception:
+            pass
+
+    try:
+        subprocess.run(
+            ["git", "fetch", "-q", "origin", remote_branch],
+            check=False,
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    if (worktree_root / ".git").exists():
+        try:
+            subprocess.run(
+                ["git", "checkout", "-B", local_branch, upstream_ref],
+                check=True,
+                cwd=worktree_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "reset", "--hard", upstream_ref],
+                check=True,
+                cwd=worktree_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(worktree_root)],
+                    check=True,
+                    cwd=REPO_ROOT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                try:
+                    shutil.rmtree(worktree_root, ignore_errors=True)
+                except Exception:
+                    pass
+    if not (worktree_root / ".git").exists():
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-f",
+                    "-q",
+                    "-B",
+                    local_branch,
+                    "--track",
+                    str(worktree_root),
+                    upstream_ref,
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return None
+    _sync_backup_resources(worktree_root)
+    return worktree_root
 
 
 def _detect_version_from_changelog() -> str:
@@ -198,10 +416,10 @@ def _load_user_registry() -> dict[str, UserProfile]:
     try:
         payload = json.loads(USERS_CONFIG_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        print(f"[USERS] Failed to parse {USERS_CONFIG_FILE}: {exc}", file=sys.stderr)
+        _boot_print(f"[USERS] Failed to parse {USERS_CONFIG_FILE}: {exc}", stream=sys.stderr)
         return {}
     if not isinstance(payload, dict):
-        print(f"[USERS] Invalid registry format in {USERS_CONFIG_FILE}", file=sys.stderr)
+        _boot_print(f"[USERS] Invalid registry format in {USERS_CONFIG_FILE}", stream=sys.stderr)
         return {}
     registry: dict[str, UserProfile] = {}
     users_iter = payload.get("users") if isinstance(payload.get("users"), list) else []
@@ -245,7 +463,7 @@ def _apply_user_profile(profile: UserProfile) -> None:
     try:
         profile.state_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        print(f"[USERS] Failed to create state dir {profile.state_dir}: {exc}", file=sys.stderr)
+        _boot_print(f"[USERS] Failed to create state dir {profile.state_dir}: {exc}", stream=sys.stderr)
     os.environ["BYBITBOT_MULTIUSER"] = "1"
     os.environ["BYBITBOT_USER_ID"] = profile.user_id
     os.environ["BYBITBOT_USER_LABEL"] = profile.label
@@ -256,7 +474,7 @@ def _apply_user_profile(profile: UserProfile) -> None:
         try:
             values = dotenv_values(env_path)
         except Exception as exc:
-            print(f"[USERS] Cannot load {env_path}: {exc}", file=sys.stderr)
+            _boot_print(f"[USERS] Cannot load {env_path}: {exc}", stream=sys.stderr)
             continue
         if not values:
             continue
@@ -288,7 +506,7 @@ def _start_background_engine() -> None:
     if existing_pid and _pid_is_running(existing_pid):
         cmdline = _pid_cmdline(existing_pid)
         if "bybit_engine.py" in cmdline:
-            print(f"[ENGINE] Terminating previous autostart engine (pid={existing_pid})", file=sys.stderr)
+            _boot_print(f"[ENGINE] Terminating previous autostart engine (pid={existing_pid})", stream=sys.stderr)
             _terminate_pid(existing_pid)
         try:
             pid_path.unlink(missing_ok=True)
@@ -299,7 +517,7 @@ def _start_background_engine() -> None:
     try:
         log_file = log_path.open("a", encoding="utf-8")
     except Exception as exc:
-        print(f"[ENGINE] Failed to open {log_path}: {exc}", file=sys.stderr)
+        _boot_print(f"[ENGINE] Failed to open {log_path}: {exc}", stream=sys.stderr)
         log_file = None
     else:
         log_file.write(f"\n=== Engine autostart @ {timestamp} ===\n")
@@ -325,7 +543,7 @@ def _start_background_engine() -> None:
             log_file.write(f"[ENGINE] Failed to start: {exc}\n")
             log_file.flush()
             log_file.close()
-        print(f"[ENGINE] Autostart failed: {exc}", file=sys.stderr)
+        _boot_print(f"[ENGINE] Autostart failed: {exc}", stream=sys.stderr)
         return
     _ENGINE_AUTOSTART_PROCESS = proc
     _ENGINE_AUTOSTART_LOG = log_file
@@ -627,28 +845,13 @@ def _materialize_commit_script(commit_hash: str) -> Path | None:
     target = commit_hash.strip()
     if not target:
         return None
-    cmd = ["git", "show", f"{target}:bybitbot_impl.py"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=REPO_ROOT,
-        )
-    except Exception:
+    label = f"commit_{target[:12]}"
+    worktree_root = _ensure_worktree_detached(name=label, commit_ref=target)
+    if not worktree_root:
         return None
-    content = result.stdout
-    if not content:
+    script_path = worktree_root / "bybitbot_impl.py"
+    if not script_path.exists():
         return None
-    backups_dir = REPO_ROOT / "backups"
-    backups_dir.mkdir(exist_ok=True)
-    script_path = backups_dir / f"bybitbot_impl_commit_{target}.py"
-    try:
-        script_path.write_text(content, encoding="utf-8")
-    except Exception:
-        return None
-    _sync_backup_resources(backups_dir)
     return script_path
 
 
@@ -678,81 +881,20 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
     target = branch_name.strip()
     if not target:
         return None
-
-    def try_show(ref: str) -> Path | None:
-        cmd = ["git", "show", f"{ref}:bybitbot_impl.py"]
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=REPO_ROOT,
-            )
-        except Exception:
-            return None
-        content = result.stdout
-        if not content:
-            return None
-        backups_dir = REPO_ROOT / "backups"
-        backups_dir.mkdir(exist_ok=True)
-        safe_target = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in ref)
-        script_path = backups_dir / f"bybitbot_impl_branch_{safe_target}.py"
-        try:
-            script_path.write_text(content, encoding="utf-8")
-        except Exception:
-            return None
-        _sync_backup_resources(backups_dir)
-        return script_path
-
-    candidate_refs: list[str] = []
-
-    if "/" in target:
-        candidate_refs.append(target)
-    else:
-        # Prefer remote tracking ref first so stable comes from origin/stable
-        # even when a local branch with the same name exists.
-        candidate_refs.append(f"origin/{target}")
-        candidate_refs.append(target)
-
-    for ref in candidate_refs:
-        path = try_show(ref)
-        if path:
-            return path
-
-    if "/" not in target:
-        try:
-            subprocess.run(
-                ["git", "fetch", "--quiet", "origin", target],
-                check=True,
-                cwd=REPO_ROOT,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-        else:
-            for ref in (target, f"origin/{target}"):
-                path = try_show(ref)
-                if path:
-                    return path
-
-    for ref in candidate_refs:
-        try:
-            subprocess.run(
-                ["git", "fetch", "--quiet", "origin", ref],
-                check=True,
-                cwd=REPO_ROOT,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-        else:
-            path = try_show(ref)
-            if path:
-                return path
-
+    remote_ref = target if target.startswith("origin/") else f"origin/{target}"
+    safe_target = _safe_ref_label(target.replace("/", "_"))
+    local_branch = f"fallback/{safe_target}" if safe_target else "fallback/stable"
+    worktree_root = _ensure_worktree_tracking(name=f"branch_{safe_target}", remote_ref=remote_ref, local_branch=local_branch)
+    if worktree_root:
+        script_path = worktree_root / "bybitbot_impl.py"
+        if script_path.exists():
+            return script_path
+    # Fallback: local branch/tag ref (offline mode)
+    fallback_root = _ensure_worktree_detached(name=f"ref_{safe_target}", commit_ref=target)
+    if fallback_root:
+        script_path = fallback_root / "bybitbot_impl.py"
+        if script_path.exists():
+            return script_path
     return None
 
 
@@ -845,6 +987,8 @@ def _build_backup_candidates(
             _save_fallback_history(history)
             return
         commit_hash, commit_message, commit_timestamp = _resolve_commit_metadata(name)
+        if not commit_hash and not name.startswith("origin/"):
+            commit_hash, commit_message, commit_timestamp = _resolve_commit_metadata(f"origin/{name}")
         if not commit_hash:
             branch_history[name] = "missing"
             _save_fallback_history(history)
@@ -1069,9 +1213,9 @@ def _sync_backup_resources(target_dir: Path) -> None:
 
 
 def _run_routine_backup(history: dict, routine_counter: int) -> bool:
-    print(
+    _boot_print(
         f"[BOOT] Skipping routine backup cycle {routine_counter}; staying on current HEAD.",
-        file=sys.stderr,
+        stream=sys.stderr,
     )
     return False
 
@@ -1081,7 +1225,7 @@ def _log_fallback_event(source_desc: str, source_ref: str, target_desc: str, tar
         f"[BOOT] Fallback executed ({context}): "
         f"{source_desc} {source_ref} -> {target_desc} {target_ref}"
     )
-    print(message, file=sys.stderr)
+    _boot_print(message, stream=sys.stderr)
 
 
 def _env_truthy(name: str) -> bool:
@@ -1125,7 +1269,10 @@ def _update_current_branch() -> tuple[str | None, bool]:
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
-        print(f"[BOOT] Failed to fast-forward branch {branch}; continuing with local HEAD.", file=sys.stderr)
+        _boot_print(
+            f"[BOOT] Failed to fast-forward branch {branch}; continuing with local HEAD.",
+            stream=sys.stderr,
+        )
     except Exception:
         pass
     after_head = _current_head()
@@ -1150,7 +1297,7 @@ def _run_script_candidate(
     _, fb_header, fb_lines = _build_commit_changelog()
     fallback_changelog = "\n".join([fb_header] + fb_lines if fb_header else fb_lines)
     message_prefix = "[BOOT] Falling back" if cycle_kind != "normal" else "[BOOT] Routine launch"
-    print(f"{message_prefix} to {source} due to {reason}", file=sys.stderr)
+    _boot_print(f"{message_prefix} to {source} due to {reason}", stream=sys.stderr)
     if fallback_context:
         _log_fallback_event("HEAD", _current_head() or "unknown", source, version_label, fallback_context)
     env = os.environ.copy()
@@ -1202,13 +1349,16 @@ def _run_script_candidate(
         env["BYBITBOT_SUPPRESS_ROUTINE_COUNTER"] = "1"
     else:
         env.pop("BYBITBOT_SUPPRESS_ROUTINE_COUNTER", None)
-    repo_path = str(REPO_ROOT)
+    candidate_root = _resolve_repo_root_from_path(script_path.parent)
+    if not candidate_root.exists():
+        candidate_root = REPO_ROOT
+    repo_path = str(candidate_root)
     existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
         env["PYTHONPATH"] = repo_path + os.pathsep + existing_pythonpath
     else:
         env["PYTHONPATH"] = repo_path
-    result = subprocess.run([sys.executable, str(script_path)], env=env)
+    result = subprocess.run([sys.executable, str(script_path)], env=env, cwd=str(candidate_root))
     return result.returncode == 0
 
 
@@ -1248,7 +1398,7 @@ def _run_current():
     try:
         module = importlib.import_module("bybitbot_impl")
         module_path = Path(getattr(module, "__file__", "<unknown>")).resolve() if hasattr(module, "__file__") else Path("bybitbot_impl.py").resolve()
-        print(f"[BOOT] Using implementation from {module_path}", file=sys.stderr)
+        _boot_print(f"[BOOT] Using implementation from {module_path}", stream=sys.stderr)
         if hasattr(module, "apply_metadata"):
             module.apply_metadata(BOT_VERSION, CURRENT_CHANGELOG, LATEST_VERSION)
         else:
@@ -1265,7 +1415,7 @@ def _run_current():
             try:
                 module.shutdown_telegram_services()
             except Exception as exc:
-                print(f"[BOOT] Failed to shutdown Telegram services: {exc}", file=sys.stderr)
+                _boot_print(f"[BOOT] Failed to shutdown Telegram services: {exc}", stream=sys.stderr)
         _stop_background_engine()
 
 
@@ -1282,7 +1432,7 @@ def _run_backups(reason: str) -> bool:
         record_fallback=True,
     )
     if not candidates:
-        print("[BOOT] No backup candidates available.", file=sys.stderr)
+        _boot_print("[BOOT] No backup candidates available.", stream=sys.stderr)
         return False
     candidate = random.choice(candidates)
     failure_hash = failure_message = failure_timestamp = None
@@ -1322,6 +1472,7 @@ def _run_backups(reason: str) -> bool:
 
 
 def main():
+    _ensure_launcher_log_env()
     args = _parse_args()
     registry = _load_user_registry()
     if args.list_users:
@@ -1356,7 +1507,7 @@ def main():
         profile = registry.get(active_user_id) if registry else None
         if profile:
             if not profile.enabled:
-                print(f"[USERS] Profile '{active_user_id}' is disabled.", file=sys.stderr)
+                _boot_print(f"[USERS] Profile '{active_user_id}' is disabled.", stream=sys.stderr)
                 return
             print(f"[USERS] Activating profile '{profile.user_id}' as '{profile.label}'")
             _apply_user_profile(profile)
@@ -1370,7 +1521,10 @@ def main():
                 state_dir=(REPO_ROOT / "runtime" / active_user_id).resolve(),
             )
             if args.user and USERS_CONFIG_FILE.exists():
-                print(f"[USERS] Profile '{active_user_id}' not found in {USERS_CONFIG_FILE}, using implicit configuration.", file=sys.stderr)
+                _boot_print(
+                    f"[USERS] Profile '{active_user_id}' not found in {USERS_CONFIG_FILE}, using implicit configuration.",
+                    stream=sys.stderr,
+                )
             _apply_user_profile(implicit_profile)
     else:
         _refresh_state_paths()
@@ -1379,7 +1533,7 @@ def main():
     if head_updated:
         new_head = _current_head()
         if new_head:
-            print(f"[BOOT] Pulled latest {branch_name or 'HEAD'} -> {new_head[:8]}", file=sys.stderr)
+            _boot_print(f"[BOOT] Pulled latest {branch_name or 'HEAD'} -> {new_head[:8]}", stream=sys.stderr)
     history = _load_fallback_history()
     history.setdefault("branches", {})
     cycle_state = _load_cycle_state()
@@ -1399,7 +1553,10 @@ def main():
     if target_version:
         target_script = _locate_target_version_script(target_version)
         if not target_script:
-            print(f"[BOOT] TARGET_VERSION={target_version} не найден, используем текущую версию.", file=sys.stderr)
+            _boot_print(
+                f"[BOOT] TARGET_VERSION={target_version} не найден, используем текущую версию.",
+                stream=sys.stderr,
+            )
         else:
             target_counter = env_cycle_counter if env_cycle_counter is not None else completed_cycles
             _run_script_candidate(
@@ -1426,7 +1583,7 @@ def main():
             history["fallback_target"] = None
             history["fallback_failed_head"] = None
             _save_fallback_history(history)
-            print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", file=sys.stderr)
+            _boot_print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", stream=sys.stderr)
             # Run the freshly pulled current version once, then continue normal flow
             _run_current()
             return
@@ -1519,10 +1676,9 @@ def main():
     # give the new commit a clean run even if the previous HEAD failed.
     failed_head = history.get("fallback_failed_head")
     if head_hash and failed_head and head_hash != failed_head:
-        print(
-            f"[BOOT] New HEAD {head_hash[:8]} detected (previous failed {failed_head[:8]}), "
-            "leaving backup mode.",
-            file=sys.stderr,
+        _boot_print(
+            f"[BOOT] New HEAD {head_hash[:8]} detected (previous failed {failed_head[:8]}), leaving backup mode.",
+            stream=sys.stderr,
         )
         history.setdefault("commits", {})[head_hash] = None
         history["fallback_active"] = False
@@ -1544,13 +1700,13 @@ def main():
             if not _run_backups(reason):
                 raise RuntimeError("No viable fallback available")
             return
-        print(f"[BOOT] Retrying failed HEAD {head_hash[:8]} before falling back.", file=sys.stderr)
+        _boot_print(f"[BOOT] Retrying failed HEAD {head_hash[:8]} before falling back.", stream=sys.stderr)
         retry_state[head_hash] = now
         _save_fallback_history(history)
         try:
             _run_current()
         except Exception as exc:
-            traceback.print_exc()
+            _boot_log_exception()
             history.setdefault("commits", {})[head_hash] = "failed"
             _save_fallback_history(history)
             if not _run_backups(str(exc)):
@@ -1570,7 +1726,7 @@ def main():
     try:
         _run_current()
     except Exception as exc:
-        traceback.print_exc()
+        _boot_log_exception()
         if head_hash:
             history.setdefault("commits", {})[head_hash] = "failed"
             _save_fallback_history(history)

@@ -1,6 +1,7 @@
 ## Project Overview (ByBit Bot)
 
 ### Modules & Roles
+- `bybitbot.py` — launcher: pulls latest HEAD, runs `bybitbot_impl`, and on failures falls back to stable/tag/commit via full-repo `git worktree` snapshots (so all modules stay consistent).
 - `bybitbot_impl.py` — orchestrator: loads settings, fetches public/private context, routes manual strategy decisions to execution, delegates execution/protection/trailing to module engines, Telegram handlers, persistence (state/log files).
 - `universe_builder.py` — builds the manual universe from JSON (`context.universe_mode`) and injects symbols with open positions.
 - `strategy.py` — JSON-driven manual strategy (no AI): builds `StrategyContext`, detects regimes, emits `StrategyEvent`s, holds sizing/thresholds from `strategy_spec.json`.
@@ -69,7 +70,7 @@
 - Order cleanup: non-reduce entry limits pruned to `MAX_NON_REDUCE_LIMITS_PER_SIDE`; redundant reduce-only stops trimmed after fresh protection is placed.
 
 ### Flow (impl orchestrator, manual-only)
-1. Verify HEAD; if running backup and a new HEAD exists, leave backup and reload modules.
+1. `bybitbot.py` updates HEAD and manages full-repo fallback snapshots (stable/tag/commit) via `git worktree`; on new HEAD it exits backup mode and resumes the latest code.
 2. Collect user account context (equity/margin/positions/orders) via `account_context`; log `[ACCOUNT] ...`.
 3. Build universe via `universe_builder` (fixed/news per JSON, always includes open positions).
 4. For each symbol:

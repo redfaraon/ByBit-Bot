@@ -84,9 +84,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.7"
+BOT_VERSION = "1.3.8"
 BOT_CHANGELOG = (
-    "Fix module config sync on startup, enable early stdio log mirroring, and harden fallback script imports."
+    "Worktree-based stable fallback snapshots, restored git sync, and unified launcher/bot logging."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -340,9 +340,9 @@ if _main_log_path_raw:
     try:
         MAIN_LOG_PATH = Path(_main_log_path_raw).expanduser()
     except Exception:
-        MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+        MAIN_LOG_PATH = REPO_ROOT / "assets" / "bybit.log"
 else:
-    MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+    MAIN_LOG_PATH = REPO_ROOT / "assets" / "bybit.log"
 MAIN_LOG_MAX_BYTES = _bytes_from_env("BYBIT_MAIN_LOG_MAX_MB", DEFAULT_MAIN_LOG_MAX_MB)
 MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", "5")))
 MAIN_LOG_ENABLED = str(os.getenv("BYBIT_MAIN_LOG_DISABLE", "0")).lower() not in {"1", "true", "yes"}
@@ -1719,6 +1719,131 @@ def get_current_branch_name() -> str | None:
     if not branch or branch == "HEAD":
         return None
     return branch
+
+
+_GIT_SYNC_LOCK = threading.Lock()
+_LAST_GIT_SYNC_TS = 0.0
+
+
+def _sync_with_remote(*, min_interval_sec: float = 60.0) -> None:
+    """Fetch/pull the current branch from origin (ff-only)."""
+    global _LAST_GIT_SYNC_TS
+    if str(os.getenv("BYBITBOT_GIT_SYNC_DISABLE", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+        return
+    if not (REPO_ROOT / ".git").exists():
+        return
+    branch = get_current_branch_name()
+    if not branch:
+        return
+    now = time.time()
+    if min_interval_sec > 0 and now - _LAST_GIT_SYNC_TS < min_interval_sec:
+        return
+    if not _GIT_SYNC_LOCK.acquire(blocking=False):
+        return
+    try:
+        _LAST_GIT_SYNC_TS = now
+        try:
+            before_head = _current_git_head()
+        except Exception:
+            before_head = None
+        dirty = False
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                cwd=str(SCRIPT_DIR),
+                check=False,
+            )
+            dirty = bool((status.stdout or "").strip())
+        except Exception:
+            dirty = False
+
+        log("[GIT] fetch: Fetching origin", Fore.LIGHTBLACK_EX)
+        try:
+            fetch_proc = subprocess.run(
+                ["git", "fetch", "--prune", "origin"],
+                capture_output=True,
+                text=True,
+                cwd=str(SCRIPT_DIR),
+                check=False,
+            )
+        except Exception as exc:
+            log(f"[GIT] fetch failed: {exc}", Fore.YELLOW)
+            return
+        for line in (fetch_proc.stdout or "").splitlines():
+            line = line.strip()
+            if line:
+                log(f"[GIT] fetch: {line}", Fore.LIGHTBLACK_EX)
+        for line in (fetch_proc.stderr or "").splitlines():
+            line = line.strip()
+            if line:
+                log(f"[GIT] fetch: {line}", Fore.LIGHTBLACK_EX)
+
+        stash_created = False
+        if dirty:
+            log("[GIT] Working tree dirty, stashing before pull.", Fore.LIGHTBLACK_EX)
+            try:
+                stash_proc = subprocess.run(
+                    ["git", "stash", "push", "-u", "-m", "bybitbot autostash"],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(SCRIPT_DIR),
+                    check=False,
+                )
+                combined = (stash_proc.stdout or "") + "\n" + (stash_proc.stderr or "")
+                stash_created = stash_proc.returncode == 0 and "No local changes" not in combined
+            except Exception:
+                stash_created = False
+
+        log(f"[GIT] pull: Pulling origin/{branch}", Fore.LIGHTBLACK_EX)
+        try:
+            pull_proc = subprocess.run(
+                ["git", "pull", "--ff-only", "origin", branch],
+                capture_output=True,
+                text=True,
+                cwd=str(SCRIPT_DIR),
+                check=False,
+            )
+        except Exception as exc:
+            log(f"[GIT] pull failed: {exc}", Fore.YELLOW)
+            pull_proc = None
+        if pull_proc is not None:
+            combined = (pull_proc.stdout or "") + "\n" + (pull_proc.stderr or "")
+            for line in combined.splitlines():
+                line = line.rstrip()
+                if line.strip():
+                    log(f"[GIT] pull: {line.strip()}", Fore.LIGHTBLACK_EX)
+
+        if stash_created:
+            log("[GIT] Restoring autostash.", Fore.LIGHTBLACK_EX)
+            try:
+                pop_proc = subprocess.run(
+                    ["git", "stash", "pop"],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(SCRIPT_DIR),
+                    check=False,
+                )
+                combined = (pop_proc.stdout or "") + "\n" + (pop_proc.stderr or "")
+                for line in combined.splitlines():
+                    line = line.rstrip()
+                    if line.strip():
+                        log(f"[GIT] stash: {line.strip()}", Fore.LIGHTBLACK_EX)
+            except Exception as exc:
+                log(f"[GIT] stash pop failed: {exc}", Fore.YELLOW)
+
+        try:
+            after_head = _current_git_head()
+        except Exception:
+            after_head = None
+        if before_head and after_head and before_head != after_head:
+            log(f"[GIT] HEAD updated {before_head[:8]} -> {after_head[:8]}", Fore.LIGHTBLUE_EX)
+    finally:
+        try:
+            _GIT_SYNC_LOCK.release()
+        except Exception:
+            pass
 
 
 def _format_commit_timestamp(iso_text: str | None) -> str | None:
