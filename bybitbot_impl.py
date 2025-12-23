@@ -41,6 +41,9 @@ import order_cleanup
 import protection_utils
 import trailing_utils
 import execution_utils
+import execution_engine
+import order_utils
+import protection_engine
 import universe_builder
 STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get("env_vars", []) if isinstance(var, str)}
 STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
@@ -1510,6 +1513,80 @@ def safe_int(val):
     except (ValueError, TypeError):
         return None
     return None
+
+
+def _sync_module_configs() -> None:
+    truthy_flag_fn = globals().get("_is_truthy_flag")
+    order_bindings = {
+        "safe_float": safe_float,
+        "ACTIVE_HEDGE_MODE": ACTIVE_HEDGE_MODE,
+    }
+    if truthy_flag_fn:
+        order_bindings["_is_truthy_flag"] = truthy_flag_fn
+    order_utils.configure(order_bindings)
+    send_tg_fn = globals().get("send_tg")
+    cancel_order_fn = globals().get("cancel_order_by_id")
+    resolve_symbol_fn = globals().get("_resolve_symbol_alias")
+    infer_market_fn = globals().get("_infer_market_category")
+    fetch_orders_fn = globals().get("fetch_open_orders_for_symbol")
+    atr_fn = globals().get("atr")
+    exec_bindings = {
+        "safe_float": safe_float,
+        "log": log,
+        "ORDER_MARGIN_UTILIZATION": ORDER_MARGIN_UTILIZATION,
+        "NON_REDUCE_PRICE_DECIMALS": NON_REDUCE_PRICE_DECIMALS,
+    }
+    if truthy_flag_fn:
+        exec_bindings["_is_truthy_flag"] = truthy_flag_fn
+    if send_tg_fn:
+        exec_bindings["send_tg"] = send_tg_fn
+    if cancel_order_fn:
+        exec_bindings["cancel_order_by_id"] = cancel_order_fn
+    if resolve_symbol_fn:
+        exec_bindings["_resolve_symbol_alias"] = resolve_symbol_fn
+    if infer_market_fn:
+        exec_bindings["_infer_market_category"] = infer_market_fn
+    execution_engine.configure(exec_bindings)
+    protect_bindings = {
+        "safe_float": safe_float,
+        "safe_int": safe_int,
+        "log": log,
+        "TIMEFRAME": TIMEFRAME,
+        "SL_ATR": SL_ATR,
+        "TP_ATR": TP_ATR,
+        "TRAILING_ATR_MULT": TRAILING_ATR_MULT,
+        "TRAILING_DYNAMIC_TRIGGER_ATR": TRAILING_DYNAMIC_TRIGGER_ATR,
+        "TRAILING_DYNAMIC_FACTOR": TRAILING_DYNAMIC_FACTOR,
+        "TRAILING_DYNAMIC_MIN_ATR": TRAILING_DYNAMIC_MIN_ATR,
+        "PSEUDOTRAIL_MIN_IMPROVE_ATR": PSEUDOTRAIL_MIN_IMPROVE_ATR,
+        "PSEUDOTRAIL_STOP_LOCK_FACTOR": PSEUDOTRAIL_STOP_LOCK_FACTOR,
+        "PSEUDOTRAIL_TP_EXTEND_FACTOR": PSEUDOTRAIL_TP_EXTEND_FACTOR,
+        "PSEUDOTRAIL_MAX_TAKE_EXTENDS": PSEUDOTRAIL_MAX_TAKE_EXTENDS,
+        "PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT": PSEUDOTRAIL_MAX_TAKE_SHIFT_ATR_MULT,
+        "PSEUDOTRAIL_POSITION_STALE_PCT": PSEUDOTRAIL_POSITION_STALE_PCT,
+        "PSEUDOTRAIL_POSITION_SIZE_STALE_RATIO": PSEUDOTRAIL_POSITION_SIZE_STALE_RATIO,
+        "PROTECTION_MAX_PRICE_RATIO": PROTECTION_MAX_PRICE_RATIO,
+        "PROTECTION_MIN_PRICE_RATIO": PROTECTION_MIN_PRICE_RATIO,
+        "BREAKEVEN_ENABLED": BREAKEVEN_ENABLED,
+        "BREAKEVEN_ATR_MULT": BREAKEVEN_ATR_MULT,
+        "BREAKEVEN_BUFFER_ATR": BREAKEVEN_BUFFER_ATR,
+        "IMMEDIATE_CLOSE_ON_BREACH": IMMEDIATE_CLOSE_ON_BREACH,
+        "PARTIAL_TP_SCHEME": PARTIAL_TP_SCHEME,
+        "MIN_NOTIONAL_USDT": MIN_NOTIONAL_USDT,
+    }
+    if send_tg_fn:
+        protect_bindings["send_tg"] = send_tg_fn
+    if truthy_flag_fn:
+        protect_bindings["_is_truthy_flag"] = truthy_flag_fn
+    if resolve_symbol_fn:
+        protect_bindings["_resolve_symbol_alias"] = resolve_symbol_fn
+    if infer_market_fn:
+        protect_bindings["_infer_market_category"] = infer_market_fn
+    if fetch_orders_fn:
+        protect_bindings["fetch_open_orders_for_symbol"] = fetch_orders_fn
+    if atr_fn:
+        protect_bindings["atr"] = atr_fn
+    protection_engine.configure(protect_bindings)
 
 
 def _round_qty_up(value: float, step: float) -> float:
@@ -3677,7 +3754,7 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
             current_position=current_position,
             open_orders=open_orders_symbol,
             max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
-            handler=execute_extra_orders,
+            handler=execution_engine.execute_extra_orders,
             log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
             include_errors=False,
         )
@@ -3892,7 +3969,7 @@ def refresh_settings():
     global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
-    global IMMEDIATE_CLOSE_ON_BREACH, _TRAIL_PROTECTION
+    global IMMEDIATE_CLOSE_ON_BREACH
     _configure_state_paths()
     USER_ID = os.getenv("BYBITBOT_USER_ID") or USER_ID or "shared"
     USER_LABEL = os.getenv("BYBITBOT_USER_LABEL") or USER_LABEL or "redfaraon"
@@ -4045,8 +4122,8 @@ def refresh_settings():
     BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or 25.0
     BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or 55.0
     IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
-    if not isinstance(_TRAIL_PROTECTION, dict):
-        _TRAIL_PROTECTION = {}
+    if not isinstance(protection_engine._TRAIL_PROTECTION, dict):
+        protection_engine._TRAIL_PROTECTION = {}
     TELEGRAM_FORWARD_LOGS = env_int("TELEGRAM_FORWARD_LOGS", int(TELEGRAM_FORWARD_LOGS)) != 0
     TELEGRAM_LOG_BATCH_SIZE = max(1, env_int("TELEGRAM_LOG_BATCH_SIZE", TELEGRAM_LOG_BATCH_SIZE))
     try:
@@ -4574,6 +4651,7 @@ def refresh_settings():
     else:
         LOG_TZINFO = parsed_tz
         _LOG_TZ_WARNING_EMITTED = False
+    _sync_module_configs()
 
 RSS_FEEDS = [
     "https://cointelegraph.com/rss",
@@ -4816,7 +4894,7 @@ def _switch_ai_provider_to_fallback(reason: str) -> None:
 def _emit_ai_offline_notice(reason: str) -> None:
     """Log/notify once per cycle when we enter AI-offline fallback mode."""
     global _AI_OFFLINE_NOTICE_EMITTED_CYCLE, _AI_OFFLINE_ACTIVE_CYCLE
-    cycle_no = safe_int(globals().get("_CURRENT_CYCLE_NUMBER")) or 0
+    cycle_no = safe_int(protection_engine._CURRENT_CYCLE_NUMBER) or 0
     if cycle_no:
         _AI_OFFLINE_ACTIVE_CYCLE = cycle_no
     if cycle_no and _AI_OFFLINE_NOTICE_EMITTED_CYCLE == cycle_no:
@@ -12927,7 +13005,7 @@ def _refresh_position_protection_if_possible(
         protection_df,
         open_orders,
         config=symbol_meta,
-        handler=ensure_position_protection,
+        handler=protection_engine.ensure_position_protection,
         log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
     )
     if symbol and symbol.upper().startswith("DOGE"):
@@ -12948,7 +13026,7 @@ def _refresh_position_protection_if_possible(
             protection_df,
             updated_orders,
             config=symbol_meta,
-            handler=ensure_position_protection,
+            handler=protection_engine.ensure_position_protection,
             log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
         )
         if symbol and symbol.upper().startswith("DOGE"):
@@ -15024,7 +15102,6 @@ def run_cycle():
     global AUTO_MARGIN_SCALE
     global AUTO_MARGIN_SCALE_RATIO
     global AUTO_MARGIN_CONFIDENCE_MULT
-    global _PREV_UNREALIZED_PNL, _TRAIL_PROTECTION, _CURRENT_CYCLE_NUMBER
     cycle_start_utc = datetime.datetime.now(datetime.timezone.utc)
     enable_stdio_logging()
     active_user_id = os.getenv("BYBITBOT_USER_ID") or "default"
@@ -15227,6 +15304,7 @@ def run_cycle():
                 pass
     except Exception:
         pass
+    _sync_module_configs()
     source_label = (os.getenv("BYBITBOT_SOURCE_LABEL") or "").strip()
     if source_label == "HEAD":
         os.environ["BYBITBOT_CYCLE_KIND"] = "normal"
@@ -15245,16 +15323,18 @@ def run_cycle():
     # Preserve previous per-symbol unrealized PnL for pseudo-trailing decisions this cycle.
     prev_unreal_map = cycle_state.get("positions_unrealized") if isinstance(cycle_state, dict) else {}
     try:
-        _PREV_UNREALIZED_PNL = {str(k): float(v) for k, v in (prev_unreal_map or {}).items() if v is not None}
+        protection_engine._PREV_UNREALIZED_PNL = {
+            str(k): float(v) for k, v in (prev_unreal_map or {}).items() if v is not None
+        }
     except Exception:
-        _PREV_UNREALIZED_PNL = {}
+        protection_engine._PREV_UNREALIZED_PNL = {}
     # Preserve last trailing-protection levels (stop/take) across cycles.
     # Only load trailing state for symbols that were actually open in the previous cycle,
     # otherwise a symbol that was flat can incorrectly keep "active" trailing state for many cycles.
     prev_trail_map = cycle_state.get("positions_trailing") if isinstance(cycle_state, dict) else {}
     try:
         prev_unreal_keys = set((prev_unreal_map or {}).keys()) if isinstance(prev_unreal_map, dict) else set()
-        _TRAIL_PROTECTION = {
+        protection_engine._TRAIL_PROTECTION = {
             str(sym): {
                 "stop": float(vals.get("stop")) if isinstance(vals, dict) and vals.get("stop") is not None else None,
                 "take": float(vals.get("take")) if isinstance(vals, dict) and vals.get("take") is not None else None,
@@ -15274,12 +15354,12 @@ def run_cycle():
             if str(sym) in prev_unreal_keys
         }
     except Exception:
-        _TRAIL_PROTECTION = {}
+        protection_engine._TRAIL_PROTECTION = {}
     real_cycles_completed = safe_int(cycle_state.get("total_cycles")) or 0
     next_cycle_number = real_cycles_completed + 1
     cycle_counter = str(next_cycle_number)
     os.environ["BYBITBOT_CYCLE_COUNTER"] = cycle_counter
-    _CURRENT_CYCLE_NUMBER = next_cycle_number
+    protection_engine._CURRENT_CYCLE_NUMBER = next_cycle_number
 
     session_dt = _current_log_time()
     session_stamp = session_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -15616,7 +15696,7 @@ def run_cycle():
         OFFLINE_TRADING_ENABLED
         and updated_universe is None
         and _AI_OFFLINE_ACTIVE_CYCLE is not None
-        and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(_CURRENT_CYCLE_NUMBER)
+        and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == safe_int(protection_engine._CURRENT_CYCLE_NUMBER)
     ):
         required_symbols = set(position_symbols) | set(order_symbols) | set(order_symbols_non_reduce)
         offline_pairs = _offline_select_pairs(
@@ -16747,7 +16827,7 @@ def run_cycle():
                 log(f"🔷 Удерживаем {sym} ({reason})", Fore.BLUE)
                 send_tg_decision(f"ℹ️ {sym}: удерживаем позицию — {reason or 'причина не указана'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
-                    updated_orders, refreshed = _refresh_position_protection_if_possible(
+                    updated_orders, refreshed = protection_engine._refresh_position_protection_if_possible(
                         ex,
                         sym,
                         current_position,
@@ -16765,7 +16845,7 @@ def run_cycle():
                 log(f"🔧 Управляем {sym} ({reason})", Fore.BLUE)
                 send_tg_decision(f"ℹ️ {sym}: управление позицией — {reason or 'причина не указана'}")
                 if current_position and abs(float(current_position.get('amount') or 0)) > 0:
-                    updated_orders, refreshed = _refresh_position_protection_if_possible(
+                    updated_orders, refreshed = protection_engine._refresh_position_protection_if_possible(
                         ex,
                         sym,
                         current_position,
@@ -16799,7 +16879,7 @@ def run_cycle():
                 if current_position and abs(float(current_position.get("amount") or 0)) > 0:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
                     send_tg_decision(f"ℹ️ {sym}: позиция уже открыта, сигнал open пропущен")
-                    updated_orders, refreshed = _refresh_position_protection_if_possible(
+                    updated_orders, refreshed = protection_engine._refresh_position_protection_if_possible(
                         ex,
                         sym,
                         current_position,
@@ -17303,7 +17383,7 @@ def run_cycle():
                     available_margin=available_margin,
                     symbol_leverage=symbol_leverage,
                     max_limits_per_side=MAX_NON_REDUCE_LIMITS_PER_SIDE,
-                    handler=execute_extra_orders,
+                    handler=execution_engine.execute_extra_orders,
                     log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
                     include_errors=True,
                 )
@@ -17321,7 +17401,7 @@ def run_cycle():
                 and current_position
                 and abs(float(current_position.get("amount") or 0)) > 0
             ):
-                updated_orders, refreshed = _refresh_position_protection_if_possible(
+                updated_orders, refreshed = protection_engine._refresh_position_protection_if_possible(
                     ex,
                     sym,
                     current_position,
@@ -17853,7 +17933,7 @@ def run_cycle():
                     df_attempt,
                     open_orders_attempt,
                     config=None,
-                    handler=ensure_position_protection,
+                    handler=protection_engine.ensure_position_protection,
                     log_fn=lambda msg: log(msg, Fore.LIGHTBLACK_EX),
                 )
                 if isinstance(updated_orders, list):
@@ -17964,7 +18044,7 @@ def run_cycle():
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
     prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
-    current_cycle_no = safe_int(_CURRENT_CYCLE_NUMBER)
+    current_cycle_no = safe_int(protection_engine._CURRENT_CYCLE_NUMBER)
     ai_offline_active = (
         OFFLINE_TRADING_ENABLED
         and current_cycle_no is not None
@@ -18608,7 +18688,7 @@ def run_cycle():
                     "position_qty": float(vals.get("position_qty")) if isinstance(vals, dict) and vals.get("position_qty") is not None else None,
                     "activated_cycle": safe_int(vals.get("activated_cycle")) if isinstance(vals, dict) else None,
                 }
-                for sym, vals in (_TRAIL_PROTECTION or {}).items()
+                for sym, vals in (protection_engine._TRAIL_PROTECTION or {}).items()
                 if str(sym) in open_trailing_syms
             }
         except Exception:
@@ -18624,6 +18704,51 @@ def run_cycle():
         commit_timestamp=cycle_commit_timestamp,
     )
     return next_delay_minutes
+
+
+# Finalize module bindings after all helpers are available.
+_sync_module_configs()
+
+# Bind execution/protection helpers to module implementations.
+ProtectionMissingError = protection_engine.ProtectionMissingError
+_has_stop_flag = protection_engine._has_stop_flag
+_has_trailing_flag = protection_engine._has_trailing_flag
+_safe_round = protection_engine._safe_round
+_extract_protection_orders = protection_engine._extract_protection_orders
+_categorize_protection_orders = protection_engine._categorize_protection_orders
+_evaluate_position_protection = protection_engine._evaluate_position_protection
+_describe_protection_changes = protection_engine._describe_protection_changes
+_format_protection_snapshot = protection_engine._format_protection_snapshot
+_summarize_open_orders_for_log = protection_engine._summarize_open_orders_for_log
+_select_best_protection_levels = protection_engine._select_best_protection_levels
+_format_progress_to_levels = protection_engine._format_progress_to_levels
+_format_close_reason = protection_engine._format_close_reason
+_get_position_reference_price = protection_engine._get_position_reference_price
+_protection_orders_signature = protection_engine._protection_orders_signature
+_cleanup_redundant_stop_orders = protection_engine._cleanup_redundant_stop_orders
+_close_position_now = protection_engine._close_position_now
+_trail_state_matches_position = protection_engine._trail_state_matches_position
+ensure_position_protection = protection_engine.ensure_position_protection
+_prepare_protection_dataframe = protection_engine._prepare_protection_dataframe
+_refresh_position_protection_if_possible = protection_engine._refresh_position_protection_if_possible
+
+ORDER_TYPE_MAP = order_utils.ORDER_TYPE_MAP
+ORDER_TYPE_ALIASES = order_utils.ORDER_TYPE_ALIASES
+VALID_ORDER_TYPES = order_utils.VALID_ORDER_TYPES
+_normalize_order_side = order_utils._normalize_order_side
+get_position_idx = order_utils.get_position_idx
+_sanitize_order_params_for_category = order_utils._sanitize_order_params_for_category
+_spot_funds_sufficient = order_utils._spot_funds_sufficient
+compute_order_amount = order_utils.compute_order_amount
+normalize_order_type_key = order_utils.normalize_order_type_key
+get_trigger_direction_for_side = order_utils.get_trigger_direction_for_side
+_order_allows_increase = order_utils._order_allows_increase
+_format_decimal = order_utils._format_decimal
+_format_notional_pct = order_utils._format_notional_pct
+_summarize_order_spec = order_utils._summarize_order_spec
+
+execute_extra_orders = execution_engine.execute_extra_orders
+
 
 def main():
     ensure_version_backup()
