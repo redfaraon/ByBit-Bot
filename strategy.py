@@ -462,7 +462,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 base_reason.append("news positive bias")
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
-                reason = "; ".join(base_reason) or "trend long confluence"
+            reason = "; ".join(base_reason) or "trend long confluence"
             metadata: dict[str, Any] = {"regime": "trend"}
             if order_type == "limit" and ENTRY_LADDER:
                 metadata["ladder_orders"] = ENTRY_LADDER
@@ -502,7 +502,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 base_reason.append("news negative bias")
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
-                reason = "; ".join(base_reason) or "trend short confluence"
+            reason = "; ".join(base_reason) or "trend short confluence"
             metadata: dict[str, Any] = {"regime": "trend"}
             if order_type == "limit" and ENTRY_LADDER:
                 metadata["ladder_orders"] = ENTRY_LADDER
