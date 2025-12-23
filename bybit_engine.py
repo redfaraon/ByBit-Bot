@@ -1,8 +1,11 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
+
 """
 Standalone engine runner that reuses EngineCore without importing the main bot.
 """
 from __future__ import annotations
+
+MODULE_VERSION = "1.3.10"
 
 import argparse
 import datetime

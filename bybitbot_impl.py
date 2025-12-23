@@ -84,9 +84,10 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.9"
+BOT_VERSION = "1.3.10"
+MODULE_VERSION = BOT_VERSION
 BOT_CHANGELOG = (
-    "Track module versions and log updates/current versions each cycle."
+    "Add module version markers and log per-module updates/current versions each cycle."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 

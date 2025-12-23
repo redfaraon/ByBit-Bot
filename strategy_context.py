@@ -1,4 +1,6 @@
 from __future__ import annotations
+MODULE_VERSION = "1.3.10"
+
 
 import math
 from typing import Any, Sequence

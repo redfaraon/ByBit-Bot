@@ -1,4 +1,6 @@
 from __future__ import annotations
+MODULE_VERSION = "1.3.10"
+
 
 from typing import Any, Callable, Sequence
 

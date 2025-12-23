@@ -1,7 +1,7 @@
 Changelog (newest first)
 
-1.3.9 (2025-12-23, commit pending)
-- Track module versions (impl/strategy/execution/protection/etc.) and log updates with from→to; log current versions when unchanged.
+1.3.10 (2025-12-23, commit pending)
+- Add explicit MODULE_VERSION to all core modules (impl/strategy/execution/protection/etc.) and log per-module updates/current versions each cycle.
 
 1.3.8 (2025-12-23, commit pending)
 - Switch fallback execution to full-repo snapshots via `git worktree` so stable/commit fallbacks include all modules (not just `bybitbot_impl.py`).
