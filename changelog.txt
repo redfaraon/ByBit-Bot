@@ -1,6 +1,10 @@
-Changelog (newest first)
-
-1.3.10 (2025-12-23, commit pending)
+-Changelog (newest first)
+-
+-1.4.0 (2025-12-24, commit pending)
+-- Add a dedicated backtest stack (`backtest/*`) and document how it reuses the live helpers via emulated execution/exchange flows.
+-- Move runtime state/logs to `state/`, migrate users to `state/users/`, and tighten git-sync/autopull resilience.
+-- Bump all module versions to 1.4.0 so per-module logging reflects the new release.
+-1.3.10 (2025-12-23, commit pending)
 - Add explicit MODULE_VERSION to all core modules (impl/strategy/execution/protection/etc.) and log per-module updates/current versions each cycle.
 - Manual strategy: enrich skip traces (rules checked, context snapshot) and avoid executor calls for skip-only events.
 - Execution: allow hedge/oneway opens when an opposite position exists (no silent skips) while refreshing protection instead of blocking.
@@ -519,6 +523,11 @@ Recent commits (last 8)
 
 1.3.8
 Recent commits (last 8)
+- 2025-12-23 3d0351b Log per-module versions and updates
+- 2025-12-23 8efc7fd Fix trend reason construction to avoid UnboundLocalError
+- 2025-12-23 b03cebe Remove duplicate log definition to restore main log writes
+- 2025-12-23 a93a165 Add gitattributes to enforce LF and avoid merge noise
+- 2025-12-23 147624d Fix commit info NameError and tee fallback output
 - 2025-12-23 8e8ef8b Worktree snapshot fallback and restore git sync
 - 2025-12-23 463cb62 Fix startup logging and fallback imports
 - 2025-12-23 3874f1d Refactor protection/execution into engines

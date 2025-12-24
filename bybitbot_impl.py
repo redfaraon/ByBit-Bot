@@ -82,7 +82,7 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.10"
+BOT_VERSION = "1.4.0"
 MODULE_VERSION = BOT_VERSION
 BOT_CHANGELOG = (
     "Add module version markers and log per-module updates/current versions each cycle."
@@ -4294,6 +4294,7 @@ def refresh_settings():
     TP_ATR = float(tp_spec) if tp_spec is not None else float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(trailing_spec) if trailing_spec is not None else float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
+    trailing_utils.configure_from_spec(STRATEGY_EXECUTION_SPEC)
     try:
         TRAILING_DYNAMIC_TRIGGER_ATR = float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
     except (TypeError, ValueError):

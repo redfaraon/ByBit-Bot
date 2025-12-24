@@ -10,10 +10,13 @@
 - `order_executor.py` ? executes intents on exchange (orders/TP-SL, margin checks) using `order_utils`.
 - `order_utils.py` ? order math/helpers (side/type normalization, qty/amount, positionIdx, precision).
 - `order_cleanup.py` ? removes redundant/open orders (delegates to protection/cleanup handlers).
-- `protection_engine.py` ? protection/trailing engine (SL/TP/breakeven/trailing refresh).
 - `protection_engine.py` ? protection/trailing engine (SL/TP/breakeven/trailing refresh) with built-in logging helper.
 - `trailing_utils.py` ? helper wrappers for trailing/protection steps.
 - `account_context.py` ? fetches equity/margin/positions/open orders per user.
+- `backtest/session.py` ? coordinates historical simulation, sequentially replaying data through the same stack.
+- `backtest/execution_emulator.py` ? emulates order placement/cancellation against a virtual account instead of the live executor.
+- `backtest/exchange_emulator.py` ? simulates minute-by-minute fills for active orders and updates virtual PnL/equity.
+- `backtest/stats.py` ? accumulates PnL/equity snapshots for post-run reporting and graphing.
 - `bybit_userbot.py` ? userbot: Telegram attach/detach, listens/responds, adapts master signals.
 - `strategy_spec.json` / `strategy_spec.md` ? canonical strategy/config contract.
 - Logs: `state/logs/bybit.log` ? main combined log (stdout/stderr tee).
@@ -56,13 +59,12 @@
 - `/ai payload` — inspect last AI payload (legacy; manual flow suppresses AI).
 
 ### Data & State Files
-- `state/logs/bybit.log` — main rotating log (stdout/stderr tee).
-- `assets/error.log` — error mirror (if enabled).
+- `state/logs/bybit.log` ? main rotating log (stdout/stderr tee).
+- `state/data/bot_data.db` ? SQLite used by `db_logger` for analytics and AI traces.
 - `state/*.json` (cycle/results/equity/fallback/release) ? runtime/state snapshots.
 - `state/bybit_credentials.json` ? stored API keys per user (secrets).
 - `state/users/*.json` ? multi-user profiles (user IDs, preferences, secrets paths).
-- `strategy_spec.json` — active strategy config (universe, risk, execution, providers, events).
-
+- `strategy_spec.json` ? active strategy config (universe, risk, execution, providers, events).
 ### Laddering / Orders
 - Opens: ladder driven by `events.entry_ladder` in `strategy_spec.json` (share, ATR offset). Defaults `(0.6@0 ATR, 0.4@0.6 ATR)`. Limit drift refresh uses `events.limit_gap_pct`.
 - Takes/scale-outs: `events.tp_ladder` defines reduce-only TP ladder (share, ATR multiple). Protection refresh enforces SL/TP/trailing per `execution` ATR multipliers.
@@ -78,3 +80,10 @@
    - Execute via `signal_intent_mapper` + `order_executor` (order/place/cancel/modify) and log `[MANUAL][EXEC]`.
    - Cleanup stale limits, apply trailing, enforce protection; if protection fails to place, close the position and surface an error.
 5. Summarize cycle, compute next start time, and wait until the scheduled run.
+6. When `BYBITBOT_BACKTEST_MODE=bot`, the same loop runs inside `backtest/session.py`: historical data feeds the context, decisions go through `backtest/execution_emulator.py`, and `backtest/exchange_emulator.py` “fills” orders between timestamps; `backtest/stats.py` collects per-point PnL/equity for reporting.
+### Backtest execution
+- `backtest.session.BacktestSession` loops historical `HistoricPoint`s (bars, indicators, news, prices), rebuilds universe/context per timestamp, routes decisions through `signal_intent_mapper`, and sends them to `backtest.execution_emulator.ExecutionEmulator`.
+- The emulator keeps a virtual account, records orders/positions, and emits snapshots that `backtest.stats.BacktestStats` buffers for equity/PNL curves.
+- Between manual ticks `backtest.exchange_emulator.ExchangeEmulator` runs minute-by-minute, matches active virtual orders against the historical price, and updates PnL/equity before the next signal point.
+- Launch the session with `python -m backtest.session --strategy strategy.json --from 2025-01-01T00:00:00Z --to 2025-01-31T23:59:00Z --balance 1000` and feed your historical bars/news via `--data-feed` or by subclassing `BacktestParams`.
+
