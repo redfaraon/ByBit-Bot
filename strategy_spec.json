@@ -29,9 +29,9 @@
       "MAX_DYNAMIC_RISK_PCT"
     ],
     "universe_mode": {
-      "source": "news",                // fixed | news
-      "max_symbols": 8,                 // cap, includes symbols with open positions
-      "include_positions": true,         // ensure open-position symbols are always in universe
+      "source": "news",                
+      "max_symbols": 8,               
+      "include_positions": true,       
       "news_priority": {
         "min_items": 1
       }
