@@ -23,9 +23,6 @@ cycle_state.json
 equity_history.json
 ai_decisions.log
 error.log
-*.json
-*.json.*
-*.log
 *.log.*
 support_sandboxes/
 state/
