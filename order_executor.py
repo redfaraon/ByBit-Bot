@@ -3,16 +3,24 @@ MODULE_VERSION = "1.3.10"
 
 def _infer_market_category(symbol: str, market_info: dict | None = None) -> str:
     """
-    Force Bybit perpetual futures (linear) for USDT-pair symbols.
+    Local inference used by order_executor.
+    Force 'linear' for USDT-derivative symbols and otherwise
+    fall back to exchange-reported info.
     """
     try:
-        sym = str(symbol).upper()
+        sym = str(symbol or "").upper()
+        # If symbol contains derivative suffix or looks like perp, treat as linear
         if ":USDT" in sym or sym.endswith("/USDT"):
             return "linear"
     except Exception:
         pass
+
     if isinstance(market_info, dict):
-        return str(market_info.get("type") or market_info.get("category") or "").lower() or "linear"
+        # prefer explicit fields from market_info
+        t = str(market_info.get("type") or market_info.get("category") or "").lower()
+        if t:
+            return t
+    # safe default
     return "linear"
 
 
@@ -42,7 +50,6 @@ REQUIRED_GLOBALS = {
     'send_tg',
     'cancel_order_by_id',
     '_resolve_symbol_alias',
-    '_infer_market_category',
     '_is_truthy_flag',
     'ORDER_MARGIN_UTILIZATION',
     'NON_REDUCE_PRICE_DECIMALS',
@@ -53,6 +60,14 @@ def configure(bindings: dict[str, Any]) -> None:
         if name in bindings:
             globals()[name] = bindings[name]
 
+try:
+    _cat_fn = globals().get('_infer_market_category')
+    if _cat_fn is not None:
+        log(f"[DEBUG] active _infer_market_category = {_cat_fn.__module__}.{_cat_fn.__name__}")
+    else:
+        log("[DEBUG] _infer_market_category not present in globals; using local function")
+except Exception:
+    pass
 
 def execute_extra_orders(
     exchange,
