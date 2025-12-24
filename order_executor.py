@@ -1,6 +1,20 @@
 from __future__ import annotations
 MODULE_VERSION = "1.3.10"
 
+def _infer_market_category(symbol: str, market_info: dict | None = None) -> str:
+    """
+    Force Bybit perpetual futures (linear) for USDT-pair symbols.
+    """
+    try:
+        sym = str(symbol).upper()
+        if ":USDT" in sym or sym.endswith("/USDT"):
+            return "linear"
+    except Exception:
+        pass
+    if isinstance(market_info, dict):
+        return str(market_info.get("type") or market_info.get("category") or "").lower() or "linear"
+    return "linear"
+
 
 import math
 from typing import Any

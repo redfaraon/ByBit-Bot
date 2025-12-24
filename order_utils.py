@@ -107,6 +107,13 @@ def _sanitize_order_params_for_category(params: dict[str, Any] | None, category:
     return p
 
 def _spot_funds_sufficient(exchange, symbol: str, side: str, amount: float | None, price: float | None) -> tuple[bool, str | None]:
+    # PATCH: если символ деривативный (содержит ':'), не применять спотовые проверки
+    try:
+        if ':' in str(symbol):
+            return True, None
+    except Exception:
+        pass
+
     try:
         balance = exchange.fetch_balance()
     except Exception as exc:
