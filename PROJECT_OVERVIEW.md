@@ -65,6 +65,10 @@
 - `state/bybit_credentials.json` ? stored API keys per user (secrets).
 - `state/users/*.json` ? multi-user profiles (user IDs, preferences, secrets paths).
 - `strategy_spec.json` ? active strategy config (universe, risk, execution, providers, events).
+- `assets/console.log` ? streaming log mirror for consoles/launcher; `assets/bybit.log` ? main runtime log and rotated history; duplicates have been trimmed so only the active log files and rotated archives remain, plus `assets/graphs` for generated equity/signal charts.
+### Config deployment
+- Keep `.env` and `strategy_spec.json` checked in at the repo root so the launcher/orchestrator can pick them up.
+- When syncing to the live server, copy the same files to `~/bot/ByBit-Bot/.env` and `~/bot/ByBit-Bot/strategy_spec.json` (they control API keys, strategy rules, news filters, trailing/non-trailing knobs, etc.). The new `wsl scp /mnt/c/Users/roket/Documents/PROJ/'ByBit Bot'/.env ulta:~/bot/ByBit-Bot/.` command proves the Windows-to-WSL transfer works; repeat with `strategy_spec.json` before restarting the service if the configuration changes.
 ### Laddering / Orders
 - Opens: ladder driven by `events.entry_ladder` in `strategy_spec.json` (share, ATR offset). Defaults `(0.6@0 ATR, 0.4@0.6 ATR)`. Limit drift refresh uses `events.limit_gap_pct`.
 - Takes/scale-outs: `events.tp_ladder` defines reduce-only TP ladder (share, ATR multiple). Protection refresh enforces SL/TP/trailing per `execution` ATR multipliers.
