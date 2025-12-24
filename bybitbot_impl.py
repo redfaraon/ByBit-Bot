@@ -840,7 +840,7 @@ AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
-MIN_NOTIONAL_USDT: float = 5.0
+MIN_NOTIONAL_USDT: float = 0.7
 AUTO_DIRECTION_ADJUST_ENABLED: bool = str(os.getenv("AUTO_DIRECTION_ADJUST_ENABLED", "1")).strip().lower() not in {"0", "false", "no"}
 AUTO_DIRECTION_REDUCE_FACTOR: float = max(
     0.0, min(1.0, _float_from_env("AUTO_DIRECTION_REDUCE_FACTOR", 0.5))
@@ -4350,7 +4350,6 @@ def refresh_settings():
     os.environ["MAX_TRAILING_LOSS_PCT"] = str(MAX_TRAILING_LOSS_PCT)
     os.environ["MIN_POSITION_SIZE"] = str(MIN_POSITION_SIZE)
     os.environ["NEWS_WEIGHT"] = str(NEWS_WEIGHT)
-    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
     try:
         PSEUDOTRAIL_MIN_IMPROVE_ATR = float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
     except (TypeError, ValueError):
@@ -4520,11 +4519,23 @@ def refresh_settings():
     AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
     AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
     min_notional_spec = STRATEGY_EXECUTION_SPEC.get("min_notional_usdt")
+    min_notional_env_raw = os.getenv("MIN_NOTIONAL_USDT")
+    min_notional_source = "code_default"
     if min_notional_spec is not None:
         MIN_NOTIONAL_USDT = float(min_notional_spec)
+        min_notional_source = "strategy_spec.json"
+    elif min_notional_env_raw is not None and str(min_notional_env_raw).strip() != "":
+        MIN_NOTIONAL_USDT = float(min_notional_env_raw)
+        min_notional_source = ".env"
     else:
-        MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+        MIN_NOTIONAL_USDT = 0.7
+        log(
+            "[WARN] MIN_NOTIONAL_USDT not set in strategy_spec.json or .env; using code default 0.7",
+            Fore.YELLOW,
+        )
     MIN_NOTIONAL_USDT = max(0.0, MIN_NOTIONAL_USDT)
+    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
+    log(f"[CONFIG] MIN_NOTIONAL_USDT={MIN_NOTIONAL_USDT} source={min_notional_source}", Fore.LIGHTBLACK_EX)
     EXTRA_POSITION_SETTLES = _parse_settle_list(os.getenv("BYBIT_EXTRA_POSITION_SETTLES"), DEFAULT_EXTRA_POSITION_SETTLES)
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -13694,21 +13705,44 @@ def run_cycle():
     selection_result = None
     universe_state = dict(universe_cache)
     news_requests: list[Any] = []
-    updated_universe = ai_update_universe(
-        exchange=ex,
-        symbols=sorted(candidate_pairs_set),
-        positions_map=positions_map,
-        equity=equity,
-        available_margin=available_margin,
-        universe_cache=universe_cache,
-        news_digest=news_headlines,
-    )
-    if updated_universe:
-        selection_result, universe_state, news_requests = updated_universe
-        universe_state = universe_state or {}
+    manual_only_cycle = bool(STRATEGY_EXECUTION_SPEC.get("manual_only")) or bool(MANUAL_STRATEGY_FORCE)
+    if manual_only_cycle:
+        universe_pairs, universe_meta = universe_builder.build_universe_with_metadata(
+            strategy.CONTEXT_SPEC,
+            position_symbols,
+            news_digest=news_headlines,
+        )
+        universe_state = dict(universe_state or {})
+        universe_state["pairs"] = universe_pairs
         universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        universe_state["ai_offline"] = False
         save_universe_cache(universe_state)
-        universe_origin = (selection_result or {}).get("source") or "ai_update"
+        universe_origin = "manual_universe_builder"
+        log(
+            f"[MANUAL] Universe rebuilt: requested={universe_meta.get('requested_source')} "
+            f"used_news={universe_meta.get('used_news')} used_fixed={universe_meta.get('used_fixed')} "
+            f"used_positions={universe_meta.get('used_positions')} max={universe_meta.get('max_symbols')} "
+            f"min_news_items={universe_meta.get('min_news_items')} news_symbols={universe_meta.get('news_symbols_total')} "
+            f"result={', '.join(universe_pairs) if universe_pairs else 'none'}",
+            Fore.LIGHTBLACK_EX,
+        )
+        updated_universe = None
+    else:
+        updated_universe = ai_update_universe(
+            exchange=ex,
+            symbols=sorted(candidate_pairs_set),
+            positions_map=positions_map,
+            equity=equity,
+            available_margin=available_margin,
+            universe_cache=universe_cache,
+            news_digest=news_headlines,
+        )
+        if updated_universe:
+            selection_result, universe_state, news_requests = updated_universe
+            universe_state = universe_state or {}
+            universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            save_universe_cache(universe_state)
+            universe_origin = (selection_result or {}).get("source") or "ai_update"
     if universe_state.get("pairs"):
         for pair in universe_state.get("pairs", []):
             resolved_pair = normalize_symbol(pair, record_missing=False)
@@ -15267,7 +15301,8 @@ def run_cycle():
                             qty = _apply_qty_rules(target_qty, min_qty=min_qty_rule, qty_step=qty_step_rule)
                             notional = qty * price
                             log_user(
-                                f"OPEN ADJUST {sym}: increasing qty to meet min notional {min_notional_required:.2f} USDT -> qty={qty:.6f}, notional={notional:.2f}"
+                                f"OPEN ADJUST {sym}: increasing qty to meet min notional {min_notional_required:.2f} USDT "
+                                f"(exchange={exchange_min_notional:.2f}, env={env_min_notional:.2f}) -> qty={qty:.6f}, notional={notional:.2f}"
                             )
                         else:
                             log_open_skip(
