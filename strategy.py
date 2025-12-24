@@ -4,6 +4,7 @@ MODULE_VERSION = "1.3.10"
 
 import math
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean
@@ -89,12 +90,16 @@ def _default_spec() -> dict[str, Any]:
 def _load_spec() -> dict[str, Any]:
     default_spec = _default_spec()
     spec_path = Path(__file__).with_name("strategy_spec.json")
+    if spec_path.exists():
+        print(f"[INFO] strategy spec loaded from {spec_path}", file=sys.stderr)
+    else:
+        print(f"[WARN] strategy spec not found at {spec_path}, using defaults", file=sys.stderr)
     try:
         payload = json.loads(spec_path.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             return payload
     except Exception:
-        pass
+        print(f"[WARN] Failed to read strategy spec {spec_path}: {sys.exc_info()[1]}", file=sys.stderr)
     return default_spec
 
 
@@ -104,6 +109,7 @@ THRESHOLDS = SPEC.get("thresholds", {})
 RULES_SPEC = SPEC.get("rules", {})
 SIZE_SPEC = SPEC.get("sizing", {})
 EVENTS_SPEC = SPEC.get("events", {})
+EXECUTION_SPEC = SPEC.get("execution", {})
 ENTRY_LADDER = EVENTS_SPEC.get("entry_ladder") or []
 TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
 
@@ -118,6 +124,52 @@ WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "AVAX/USDT",
 ]
 WATCHLIST = WATCHLIST_BASE[:]
+
+
+def load_spec_from_dict(spec: dict[str, Any]) -> None:
+    """
+    Reload global strategy settings from an in-memory spec (used by tests/backtests).
+    """
+    global SPEC, CONTEXT_SPEC, THRESHOLDS, RULES_SPEC, SIZE_SPEC, EVENTS_SPEC, EXECUTION_SPEC
+    global ENTRY_LADDER, TP_LADDER, WATCHLIST_BASE, WATCHLIST
+    global NEWS_THRESHOLDS, NEWS_POSITIVE, NEWS_NEGATIVE, NEWS_NEUTRAL_BAND
+    global ATR_SIGMA_HOT, ATR_LIMIT_MULT, ATR_RANGE_RATIO, ATR_EXTREME_RATIO, OI_CHANGE_THRESHOLD
+    global SIZING_MULTIPLIERS, SIZE_MIN, SIZE_MAX, NEWS_WEIGHT
+
+    SPEC = spec
+    CONTEXT_SPEC = SPEC.get("context", {})
+    THRESHOLDS = SPEC.get("thresholds", {})
+    RULES_SPEC = SPEC.get("rules", {})
+    SIZE_SPEC = SPEC.get("sizing", {})
+    EVENTS_SPEC = SPEC.get("events", {})
+    EXECUTION_SPEC = SPEC.get("execution", {})
+    ENTRY_LADDER = EVENTS_SPEC.get("entry_ladder") or []
+    TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
+    WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or []
+    WATCHLIST = WATCHLIST_BASE[:]
+
+    NEWS_THRESHOLDS = SPEC.get("context", {}).get("news", {})
+    NEWS_POSITIVE = float(NEWS_THRESHOLDS.get("positive", 0.55))
+    NEWS_NEGATIVE = float(NEWS_THRESHOLDS.get("negative", -0.55))
+    NEWS_NEUTRAL_BAND = float(NEWS_THRESHOLDS.get("neutral_band", 0.15))
+
+    ATR_SIGMA_HOT = float(THRESHOLDS.get("atr_sigma_hot", 2.5))
+    ATR_LIMIT_MULT = float(THRESHOLDS.get("atr_limit_multiplier", 1.7))
+    ATR_RANGE_RATIO = float(THRESHOLDS.get("atr_range_ratio", 0.008))
+    ATR_EXTREME_RATIO = float(THRESHOLDS.get("atr_extreme_ratio", 0.025))
+    OI_CHANGE_THRESHOLD = float(THRESHOLDS.get("oi_change_pct", 0.012))
+
+    SIZING_MULTIPLIERS = SIZE_SPEC.get(
+        "risk_multiplier",
+        {"trend": 1.15, "counter": 0.55, "flat": 0.4},
+    )
+    SIZE_MIN = float(SIZE_SPEC.get("min_pct", 0.0025))
+    SIZE_MAX = float(SIZE_SPEC.get("max_pct", 0.05))
+    try:
+        NEWS_WEIGHT = float(EXECUTION_SPEC.get("news_weight", 1.0))
+    except Exception:
+        NEWS_WEIGHT = 1.0
+    NEWS_WEIGHT = max(0.0, NEWS_WEIGHT)
 
 INDICATORS = [
     "ema20",
@@ -145,6 +197,11 @@ SIZING_MULTIPLIERS = SIZE_SPEC.get(
 )
 SIZE_MIN = float(SIZE_SPEC.get("min_pct", 0.0025))
 SIZE_MAX = float(SIZE_SPEC.get("max_pct", 0.05))
+try:
+    NEWS_WEIGHT = float(EXECUTION_SPEC.get("news_weight", 1.0))
+except Exception:
+    NEWS_WEIGHT = 1.0
+NEWS_WEIGHT = max(0.0, NEWS_WEIGHT)
 
 
 def _normalize_side(side: str | None) -> str | None:
@@ -177,11 +234,12 @@ def _is_reduce_only(order: dict[str, Any]) -> bool:
 def _news_bias(score: float | None) -> str:
     if score is None or not math.isfinite(score):
         return "neutral"
-    if score >= NEWS_POSITIVE:
+    weighted = score * NEWS_WEIGHT
+    if weighted >= NEWS_POSITIVE:
         return "positive"
-    if score <= NEWS_NEGATIVE:
+    if weighted <= NEWS_NEGATIVE:
         return "negative"
-    if abs(score) <= NEWS_NEUTRAL_BAND:
+    if abs(weighted) <= NEWS_NEUTRAL_BAND:
         return "neutral"
     return "uncertain"
 

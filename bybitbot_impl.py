@@ -840,6 +840,7 @@ AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
+MIN_NOTIONAL_USDT: float = 5.0
 AUTO_DIRECTION_ADJUST_ENABLED: bool = str(os.getenv("AUTO_DIRECTION_ADJUST_ENABLED", "1")).strip().lower() not in {"0", "false", "no"}
 AUTO_DIRECTION_REDUCE_FACTOR: float = max(
     0.0, min(1.0, _float_from_env("AUTO_DIRECTION_REDUCE_FACTOR", 0.5))
@@ -864,6 +865,9 @@ MAX_DYNAMIC_RISK_PCT: float = 0.0
 BREAKEVEN_ENABLED: bool = True
 BREAKEVEN_ATR_MULT: float = 0.6
 BREAKEVEN_BUFFER_ATR: float = 0.15
+MAX_TRAILING_LOSS_PCT: float = 0.0
+MIN_POSITION_SIZE: float = 0.0
+NEWS_WEIGHT: float = 1.0
 TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
 TRAILING_DYNAMIC_FACTOR: float = 0.65
 TRAILING_DYNAMIC_MIN_ATR: float = 0.35
@@ -4163,6 +4167,7 @@ def refresh_settings():
     global MIN_NOTIONAL_USDT, AI_AFTER_NEEDS_BIAS, MAX_OPEN_POSITIONS, MAX_POSITIONS_PER_BASE
     global CURRENT_RISK_PCT, DYNAMIC_RISK_ENABLED, MIN_DYNAMIC_RISK_PCT, MAX_DYNAMIC_RISK_PCT
     global BREAKEVEN_ENABLED, BREAKEVEN_ATR_MULT, BREAKEVEN_BUFFER_ATR
+    global MAX_TRAILING_LOSS_PCT, MIN_POSITION_SIZE, NEWS_WEIGHT
     global MIN_CONTEXT_30M, MIN_CONTEXT_4H, DEFAULT_CONTEXT_30M, DEFAULT_CONTEXT_4H
     global CONTEXT_STEP_30M, CONTEXT_STEP_4H
     global AI_INITIAL_TIMEFRAMES, AI_INITIAL_TF_DEPTHS, AI_INITIAL_INDICATOR_POOL
@@ -4296,20 +4301,56 @@ def refresh_settings():
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
     trailing_utils.configure_from_spec(STRATEGY_EXECUTION_SPEC)
     try:
-        TRAILING_DYNAMIC_TRIGGER_ATR = float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
+        dyn_trigger_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_trigger_atr")
+        TRAILING_DYNAMIC_TRIGGER_ATR = float(dyn_trigger_spec) if dyn_trigger_spec is not None else float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
     except (TypeError, ValueError):
         TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
     try:
-        TRAILING_DYNAMIC_FACTOR = float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
+        dyn_factor_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_factor")
+        TRAILING_DYNAMIC_FACTOR = float(dyn_factor_spec) if dyn_factor_spec is not None else float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
     except (TypeError, ValueError):
         TRAILING_DYNAMIC_FACTOR = 0.65
     try:
-        TRAILING_DYNAMIC_MIN_ATR = float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
+        dyn_min_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_min_atr")
+        TRAILING_DYNAMIC_MIN_ATR = float(dyn_min_spec) if dyn_min_spec is not None else float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
     except (TypeError, ValueError):
         TRAILING_DYNAMIC_MIN_ATR = 0.35
     TRAILING_DYNAMIC_TRIGGER_ATR = max(0.0, TRAILING_DYNAMIC_TRIGGER_ATR)
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
+    try:
+        max_trailing_spec = STRATEGY_EXECUTION_SPEC.get("max_trailing_loss_pct")
+        MAX_TRAILING_LOSS_PCT = float(max_trailing_spec) if max_trailing_spec is not None else float(os.getenv("MAX_TRAILING_LOSS_PCT", str(MAX_TRAILING_LOSS_PCT)))
+    except (TypeError, ValueError):
+        MAX_TRAILING_LOSS_PCT = 0.0
+    MAX_TRAILING_LOSS_PCT = max(0.0, MAX_TRAILING_LOSS_PCT)
+    try:
+        min_pos_spec = STRATEGY_EXECUTION_SPEC.get("min_position_size")
+        MIN_POSITION_SIZE = float(min_pos_spec) if min_pos_spec is not None else float(os.getenv("MIN_POSITION_SIZE", str(MIN_POSITION_SIZE)))
+    except (TypeError, ValueError):
+        MIN_POSITION_SIZE = 0.0
+    MIN_POSITION_SIZE = max(0.0, MIN_POSITION_SIZE)
+    try:
+        news_weight_spec = STRATEGY_EXECUTION_SPEC.get("news_weight")
+        NEWS_WEIGHT = float(news_weight_spec) if news_weight_spec is not None else float(os.getenv("NEWS_WEIGHT", str(NEWS_WEIGHT)))
+    except (TypeError, ValueError):
+        NEWS_WEIGHT = 1.0
+    NEWS_WEIGHT = max(0.0, NEWS_WEIGHT)
+
+    # Keep ENV in sync with JSON so that fallback code (older versions) keeps the same knobs.
+    os.environ["SL_ATR"] = str(SL_ATR)
+    os.environ["SL_ATR_MULT"] = str(SL_ATR)
+    os.environ["TP_ATR"] = str(TP_ATR)
+    os.environ["TP_ATR_MULT"] = str(TP_ATR)
+    os.environ["TRAILING_ATR_MULT"] = str(TRAILING_ATR_MULT)
+    os.environ["TRAILING_ATR"] = str(TRAILING_ATR_MULT)
+    os.environ["TRAILING_DYNAMIC_TRIGGER_ATR"] = str(TRAILING_DYNAMIC_TRIGGER_ATR)
+    os.environ["TRAILING_DYNAMIC_FACTOR"] = str(TRAILING_DYNAMIC_FACTOR)
+    os.environ["TRAILING_DYNAMIC_MIN_ATR"] = str(TRAILING_DYNAMIC_MIN_ATR)
+    os.environ["MAX_TRAILING_LOSS_PCT"] = str(MAX_TRAILING_LOSS_PCT)
+    os.environ["MIN_POSITION_SIZE"] = str(MIN_POSITION_SIZE)
+    os.environ["NEWS_WEIGHT"] = str(NEWS_WEIGHT)
+    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
     try:
         PSEUDOTRAIL_MIN_IMPROVE_ATR = float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
     except (TypeError, ValueError):
@@ -4478,7 +4519,12 @@ def refresh_settings():
         AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
     AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
     AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
-    MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    min_notional_spec = STRATEGY_EXECUTION_SPEC.get("min_notional_usdt")
+    if min_notional_spec is not None:
+        MIN_NOTIONAL_USDT = float(min_notional_spec)
+    else:
+        MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    MIN_NOTIONAL_USDT = max(0.0, MIN_NOTIONAL_USDT)
     EXTRA_POSITION_SETTLES = _parse_settle_list(os.getenv("BYBIT_EXTRA_POSITION_SETTLES"), DEFAULT_EXTRA_POSITION_SETTLES)
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -11507,6 +11553,58 @@ def _summarize_open_orders_for_log(orders, limit: int = 6) -> str:
     return protection_engine._summarize_open_orders_for_log(orders, limit=limit)
 
 
+def _format_protection_trace_params_for_log(symbol: str | None = None) -> str:
+    parts: list[str] = []
+    sl_atr = globals().get("SL_ATR", None)
+    tp_atr = globals().get("TP_ATR", None)
+    require_tp = globals().get("REQUIRE_TAKE_PROFIT", None)
+    hedge_mode = globals().get("HEDGE_MODE", None)
+
+    try:
+        parts.append(f"sl_atr={float(sl_atr):.4g}")
+    except Exception:
+        parts.append(f"sl_atr={sl_atr}")
+    try:
+        parts.append(f"tp_atr={float(tp_atr):.4g}")
+    except Exception:
+        parts.append(f"tp_atr={tp_atr}")
+    if require_tp is not None:
+        parts.append(f"require_tp={bool(require_tp)}")
+    else:
+        parts.append("require_tp=?")
+    if hedge_mode is not None:
+        parts.append(f"hedge_mode={bool(hedge_mode)}")
+    else:
+        parts.append("hedge_mode=?")
+
+    try:
+        trailing_cfg = trailing_utils.resolve_trailing_config(symbol) if symbol else dict(getattr(trailing_utils, "TRAILING_CONFIG", {}) or {})
+    except Exception:
+        trailing_cfg = dict(getattr(trailing_utils, "TRAILING_CONFIG", {}) or {})
+    if isinstance(trailing_cfg, dict):
+        keys = (
+            "trailing_atr_mult",
+            "trailing_dynamic_trigger_atr",
+            "trailing_dynamic_factor",
+            "trailing_dynamic_min_atr",
+        )
+        for key in keys:
+            if key not in trailing_cfg:
+                continue
+            val = trailing_cfg.get(key)
+            try:
+                parts.append(f"{key}={float(val):.4g}")
+            except Exception:
+                parts.append(f"{key}={val}")
+
+    for env_key in ("MAX_TRAILING_LOSS_PCT", "MIN_POSITION_SIZE", "NEWS_WEIGHT"):
+        env_val = os.getenv(env_key)
+        if env_val is not None and str(env_val).strip() != "":
+            parts.append(f"{env_key}={env_val}")
+
+    return ", ".join(parts)
+
+
 def _format_position_snapshot(amount: float | None) -> str:
     if amount is None or not math.isfinite(amount) or abs(amount) < 1e-12:
         return "flat"
@@ -14203,7 +14301,11 @@ def run_cycle():
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
     # Rebuild manual universe to include open positions and JSON constraints.
-    manual_universe_built = universe_builder.build_universe(strategy.CONTEXT_SPEC, position_symbols)
+    manual_universe_built = universe_builder.build_universe(
+        strategy.CONTEXT_SPEC,
+        position_symbols,
+        news_digest=news_cache,
+    )
     try:
         MANUAL_STRATEGY_SYMBOLS.clear()
         MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})
@@ -15917,11 +16019,14 @@ def run_cycle():
         orders_snapshot = global_open_orders.get(sym_active) if 'global_open_orders' in locals() else None
         if orders_snapshot is None:
             orders_snapshot = fetch_open_orders_for_symbol(ex, sym_active)
-        if str(sym_active).upper().startswith("DOGE"):
-            log(
-                f"[PROTECT][DOGE] {sym_active}: open_orders_in={_summarize_open_orders_for_log(orders_snapshot)}",
-                Fore.LIGHTBLACK_EX,
-            )
+        log(
+            f"[PROTECT][TRACE] {sym_active}: params={_format_protection_trace_params_for_log(sym_active)}",
+            Fore.LIGHTBLACK_EX,
+        )
+        log(
+            f"[PROTECT][TRACE] {sym_active}: open_orders_in={_summarize_open_orders_for_log(orders_snapshot)}",
+            Fore.LIGHTBLACK_EX,
+        )
         mark_price = safe_float(payload.get("markPrice") or (payload.get("raw") or {}).get("markPrice"))
         last_price = safe_float(payload.get("lastPrice") or (payload.get("raw") or {}).get("lastPrice"))
         px_val = mark_price if mark_price is not None and math.isfinite(mark_price) else last_price
@@ -16041,11 +16146,10 @@ def run_cycle():
         except Exception as exc_refresh_orders:
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
-        if str(sym_unprotected).upper().startswith("DOGE"):
-            log(
-                f"[PROTECT][DOGE] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
-                Fore.LIGHTBLACK_EX,
-            )
+        log(
+            f"[PROTECT][TRACE] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
+            Fore.LIGHTBLACK_EX,
+        )
         protective_orders_after = _extract_protection_orders(refreshed_orders)
         has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
             position_payload,

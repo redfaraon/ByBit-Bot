@@ -182,7 +182,14 @@ def _parse_iso(value: str) -> datetime.datetime:
 
 def _load_points(path: str) -> list[HistoricPoint]:
     if not path:
+        print("[BACKTEST] dataset path not provided; no points loaded", file=sys.stderr)
         return []
+    data_path = Path(path)
+    print(f"[BACKTEST] loading dataset from {data_path}", file=sys.stderr)
+    if not data_path.exists():
+        if path != "-":
+            print(f"[BACKTEST] dataset file not found: {data_path}", file=sys.stderr)
+            return []
     if path == "-":
         raw = sys.stdin.read()
     else:
