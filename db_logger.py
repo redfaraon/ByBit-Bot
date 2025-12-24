@@ -1,11 +1,13 @@
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_DB_PATH = Path(__file__).resolve().parent / "assets" / "bot_data.db"
+_STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", Path(__file__).resolve().parent / "state"))
+_DB_PATH = _STATE_DIR / "data" / "bot_data.db"
 _LOCK = threading.RLock()
 _SCHEMA_CREATED = False
 

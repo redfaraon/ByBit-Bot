@@ -105,7 +105,7 @@ def _resolve_repo_root(script_dir: Path) -> Path:
 
 REPO_ROOT = _resolve_repo_root(SCRIPT_DIR)
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.txt"
-STATE_DIR = REPO_ROOT
+STATE_DIR = REPO_ROOT / "state"
 MODULE_VERSIONS_FILE = REPO_ROOT / "module_versions.json"
 db_logger.initialize()
 def _configure_state_paths() -> None:
@@ -121,9 +121,13 @@ def _configure_state_paths() -> None:
     global SUPPORT_SANDBOX_STATE_FILE
     global COMMANDS_HELP_STATE_FILE
     global MASTER_DECISIONS_FILE
+    global DATA_DIR
+    global UNIVERSE_CACHE_FILE
+    global RUNTIME_STATUS_FILE
+    global CHANGELOG_STATE_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
-        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else REPO_ROOT)
+        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else (REPO_ROOT / "state"))
     except Exception:
         STATE_DIR = SCRIPT_DIR
     try:
@@ -137,12 +141,19 @@ def _configure_state_paths() -> None:
     RELEASE_STATE_FILE = STATE_DIR / "release_state.json"
     MODULE_VERSIONS_FILE = STATE_DIR / "module_versions.json"
     BYBIT_CREDENTIALS_FILE = STATE_DIR / "bybit_credentials.json"
+    logs_dir = STATE_DIR / "logs"
+    DATA_DIR = STATE_DIR / "data"
+    UNIVERSE_CACHE_FILE = DATA_DIR / "universe_cache.json"
+    RUNTIME_STATUS_FILE = STATE_DIR / "runtime_status.json"
+    CHANGELOG_STATE_FILE = STATE_DIR / "changelog_state.json"
     SUPPORT_SANDBOX_ROOT = STATE_DIR / "support_sandboxes"
     SUPPORT_SANDBOX_STATE_FILE = STATE_DIR / "support_sandboxes.json"
     COMMANDS_HELP_STATE_FILE = STATE_DIR / "commands_help_state.json"
     MASTER_DECISIONS_FILE = STATE_DIR / "master_decisions.json"
     try:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
@@ -342,9 +353,9 @@ if _main_log_path_raw:
     try:
         MAIN_LOG_PATH = Path(_main_log_path_raw).expanduser()
     except Exception:
-        MAIN_LOG_PATH = REPO_ROOT / "assets" / "bybit.log"
+        MAIN_LOG_PATH = STATE_DIR / "logs" / "bybit.log"
 else:
-    MAIN_LOG_PATH = REPO_ROOT / "assets" / "bybit.log"
+    MAIN_LOG_PATH = STATE_DIR / "logs" / "bybit.log"
 MAIN_LOG_MAX_BYTES = _bytes_from_env("BYBIT_MAIN_LOG_MAX_MB", DEFAULT_MAIN_LOG_MAX_MB)
 MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", "5")))
 MAIN_LOG_ENABLED = str(os.getenv("BYBIT_MAIN_LOG_DISABLE", "0")).lower() not in {"1", "true", "yes"}
@@ -962,8 +973,35 @@ SUPPORT_CONTEXT_SKIP_DIRS: set[str] = {
 }
 INPROGRESS_WIP_ENABLED: bool = False
 _LAST_INPROGRESS_MESSAGE: str | None = None
-USERS_DIR = REPO_ROOT / "users"
+def _resolve_users_dir() -> Path:
+    override = os.getenv("BYBITBOT_USERS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return STATE_DIR / "users"
+
+
+USERS_DIR = _resolve_users_dir()
 USERS_CONFIG_FILE = USERS_DIR / "users.json"
+
+
+def _migrate_users_dir() -> None:
+    legacy = REPO_ROOT / "users"
+    if USERS_DIR == legacy:
+        return
+    if USERS_DIR.exists():
+        try:
+            if any(USERS_DIR.iterdir()):
+                return
+        except Exception:
+            pass
+    if legacy.exists():
+        try:
+            shutil.copytree(legacy, USERS_DIR, dirs_exist_ok=True)
+        except Exception:
+            pass
+
+
+_migrate_users_dir()
 USERS_DEFAULT_SECRET = "secrets.env"
 USERS_PUBLIC_ENV_FILE = "public.env"
 MAIN_OWNER_CHAT_ID = 775747028
@@ -1421,9 +1459,10 @@ LOG_TIMEZONE = ""
 _LOG_TZ_WARNING_EMITTED = False
 
 DEFAULT_NEXT_RUN_MINUTES = 28.0
-RUNTIME_STATUS_FILE = Path(__file__).with_name("runtime_status.json")
-CHANGELOG_STATE_FILE = Path(__file__).with_name("changelog_state.json")
-UNIVERSE_CACHE_FILE = Path(__file__).with_name("universe_cache.json")
+DATA_DIR = STATE_DIR / "data"
+RUNTIME_STATUS_FILE = STATE_DIR / "runtime_status.json"
+CHANGELOG_STATE_FILE = STATE_DIR / "changelog_state.json"
+UNIVERSE_CACHE_FILE = DATA_DIR / "universe_cache.json"
 
 
 class ProtectionMissingError(RuntimeError):
@@ -1720,6 +1759,10 @@ def get_current_branch_name() -> str | None:
         return None
     if not branch or branch == "HEAD":
         return None
+    if branch.startswith("refs/heads/"):
+        branch = branch[len("refs/heads/") :]
+    if branch.startswith("refs/"):
+        branch = branch.replace("refs/", "", 1)
     return branch
 
 
@@ -1753,7 +1796,12 @@ def _sync_with_remote(*, min_interval_sec: float = 60.0) -> None:
     branch = get_current_branch_name()
     if not branch:
         return
-    remote_branch = branch.split("/", 1)[1] if branch.startswith("fallback/") and "/" in branch else branch
+    if branch.startswith("origin/"):
+        remote_branch = branch.split("/", 1)[1]
+    elif branch.startswith("fallback/") and "/" in branch:
+        remote_branch = branch.split("/", 1)[1]
+    else:
+        remote_branch = branch
     now = time.time()
     if min_interval_sec > 0 and now - _LAST_GIT_SYNC_TS < min_interval_sec:
         return
@@ -1815,6 +1863,44 @@ def _sync_with_remote(*, min_interval_sec: float = 60.0) -> None:
             except Exception:
                 stash_created = False
 
+        try:
+            ref_check = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/remotes/origin/{remote_branch}"],
+                capture_output=True,
+                text=True,
+                cwd=str(SCRIPT_DIR),
+                check=False,
+            )
+            if ref_check.returncode != 0:
+                log(f"[GIT] pull skipped: remote branch origin/{remote_branch} not found", Fore.YELLOW)
+                return
+        except Exception:
+            log(f"[GIT] pull skipped: failed to verify origin/{remote_branch}", Fore.YELLOW)
+            return
+        try:
+            divergence = subprocess.run(
+                ["git", "rev-list", "--left-right", "--count", f"HEAD...origin/{remote_branch}"],
+                capture_output=True,
+                text=True,
+                cwd=str(SCRIPT_DIR),
+                check=False,
+            )
+            if divergence.returncode == 0:
+                parts = (divergence.stdout or "").strip().split()
+                if len(parts) == 2:
+                    ahead = int(parts[0])
+                    behind = int(parts[1])
+                    if ahead > 0 and behind > 0:
+                        log(
+                            f"[GIT] pull skipped: branch diverged (ahead {ahead}, behind {behind})",
+                            Fore.YELLOW,
+                        )
+                        return
+                    if ahead > 0 and behind == 0:
+                        log(f"[GIT] pull skipped: local ahead by {ahead} commits", Fore.YELLOW)
+                        return
+        except Exception:
+            pass
         log(f"[GIT] pull: Pulling origin/{remote_branch}", Fore.LIGHTBLACK_EX)
         try:
             pull_proc = subprocess.run(
@@ -4352,9 +4438,9 @@ def refresh_settings():
         try:
             MAIN_LOG_PATH = Path(main_log_override).expanduser()
         except Exception:
-            MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+            MAIN_LOG_PATH = STATE_DIR / "logs" / "bybit.log"
     else:
-        MAIN_LOG_PATH = REPO_ROOT / "bybit.log"
+        MAIN_LOG_PATH = STATE_DIR / "logs" / "bybit.log"
     MAIN_LOG_MAX_BYTES = _bytes_from_env("BYBIT_MAIN_LOG_MAX_MB", DEFAULT_MAIN_LOG_MAX_MB)
     MAIN_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_MAIN_LOG_BACKUPS", str(MAIN_LOG_BACKUPS))))
     MAIN_LOG_ENABLED = not env_bool("BYBIT_MAIN_LOG_DISABLE", False)
@@ -4835,9 +4921,9 @@ DEFAULT_CONTEXT_30M = max(MIN_CONTEXT_30M, env_int("AI_CONTEXT_30M", 40))
 DEFAULT_CONTEXT_4H = max(MIN_CONTEXT_4H, env_int("AI_CONTEXT_4H", 40))
 CONTEXT_STEP_30M = max(1, env_int("AI_CONTEXT_30M_STEP", 4))
 CONTEXT_STEP_4H = max(1, env_int("AI_CONTEXT_4H_STEP", 2))
-AI_LOG_FILE = "ai_decisions.log"
-AI_ARCHIVE_FILE = "ai_decisions_archive.log"
-AI_REQUESTS_LOG = "ai_requests.log"
+AI_LOG_FILE = str(STATE_DIR / "logs" / "ai_decisions.log")
+AI_ARCHIVE_FILE = str(STATE_DIR / "logs" / "ai_decisions_archive.log")
+AI_REQUESTS_LOG = str(STATE_DIR / "logs" / "ai_requests.log")
 if "ORDER_MARGIN_UTILIZATION" not in globals():
     ORDER_MARGIN_UTILIZATION = 0.95
 ORDER_MARGIN_UTILIZATION = max(0.1, min(ORDER_MARGIN_UTILIZATION, 1.0))

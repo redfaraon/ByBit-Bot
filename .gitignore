@@ -28,3 +28,17 @@ error.log
 *.log
 *.log.*
 support_sandboxes/
+state/
+assets/bybit.log*
+assets/bot_data.db
+run.stdout.log
+ai_decision_summary.json
+ai_requests.log*
+commands_help_state.json
+fallback_history.json.bu
+master_decisions.json
+support_sandboxes.json
+support_sandboxes/
+universe_cache.json
+users/*
+!users/users.example.json

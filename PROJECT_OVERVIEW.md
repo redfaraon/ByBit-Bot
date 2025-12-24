@@ -16,7 +16,7 @@
 - `account_context.py` ? fetches equity/margin/positions/open orders per user.
 - `bybit_userbot.py` ? userbot: Telegram attach/detach, listens/responds, adapts master signals.
 - `strategy_spec.json` / `strategy_spec.md` ? canonical strategy/config contract.
-- Logs: `assets/bybit.log` ? main combined log (stdout/stderr tee).
+- Logs: `state/logs/bybit.log` ? main combined log (stdout/stderr tee).
 ### Key Constants (set in impl via JSON where provided)
 - `BOT_VERSION` — release marker.
 - `LEVERAGE`, `ORDER_MARGIN_UTILIZATION`, `SL_ATR`, `TP_ATR`, `TRAILING_ATR_MULT` — execution knobs (from `execution` block).
@@ -56,11 +56,11 @@
 - `/ai payload` — inspect last AI payload (legacy; manual flow suppresses AI).
 
 ### Data & State Files
-- `assets/bybit.log` — main rotating log (stdout/stderr tee).
+- `state/logs/bybit.log` — main rotating log (stdout/stderr tee).
 - `assets/error.log` — error mirror (if enabled).
-- `cycle_state.json`, `results_state.json`, `equity_history.json`, `fallback_history.json`, `release_state.json` — runtime/state snapshots.
-- `bybit_credentials.json` — stored API keys per user (secrets).
-- `users/*.json` — multi-user profiles (user IDs, preferences, secrets paths).
+- `state/*.json` (cycle/results/equity/fallback/release) ? runtime/state snapshots.
+- `state/bybit_credentials.json` ? stored API keys per user (secrets).
+- `state/users/*.json` ? multi-user profiles (user IDs, preferences, secrets paths).
 - `strategy_spec.json` — active strategy config (universe, risk, execution, providers, events).
 
 ### Laddering / Orders

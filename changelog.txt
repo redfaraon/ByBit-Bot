@@ -6,6 +6,7 @@ Changelog (newest first)
 - Execution: allow hedge/oneway opens when an opposite position exists (no silent skips) while refreshing protection instead of blocking.
 - Universe: log source of the pair list (config/cache/AI/offline) with news priority; fix module version logging import guard.
 - Consolidate contexts (single `strategy_context` for signals/execution), rename strategy/execution modules (`signal_intent_mapper`, `order_executor`), drop thin wrappers (`execution_utils`, `protection_utils`).
+- Move runtime state/logs to `state/` (logs under `state/logs`), migrate users from repo `users/`, and prevent autoupdate conflicts; harden git sync for missing branches/divergence.
 
 1.3.8 (2025-12-23, commit pending)
 - Switch fallback execution to full-repo snapshots via `git worktree` so stable/commit fallbacks include all modules (not just `bybitbot_impl.py`).

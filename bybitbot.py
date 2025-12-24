@@ -50,7 +50,8 @@ def _resolve_main_log_path() -> Path:
             return candidate.resolve()
         except Exception:
             return candidate
-    return (REPO_ROOT / "assets" / "bybit.log").resolve()
+    state_root = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "state"))
+    return (state_root / "logs" / "bybit.log").resolve()
 
 
 def _boot_log_line(message: str) -> None:
@@ -82,7 +83,7 @@ def _boot_log_exception(prefix: str | None = None) -> None:
 
 
 def _ensure_launcher_log_env() -> None:
-    os.environ.setdefault("BYBIT_MAIN_LOG", str((REPO_ROOT / "assets" / "bybit.log").resolve()))
+    os.environ.setdefault("BYBIT_MAIN_LOG", str(_resolve_main_log_path()))
     os.environ.setdefault("BYBIT_ERROR_LOG", str((REPO_ROOT / "assets" / "error.log").resolve()))
 
 
@@ -273,26 +274,57 @@ def _detect_version_from_changelog() -> str:
 
 
 BOT_VERSION = _detect_version_from_changelog()
-STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT))
+STATE_DIR = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "state"))
 
 def _refresh_state_paths() -> None:
     global STATE_DIR, FALLBACK_HISTORY_FILE, CYCLE_STATE_FILE
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
-        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else REPO_ROOT)
+        STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else (REPO_ROOT / "state"))
     except Exception:
-        STATE_DIR = REPO_ROOT
+        STATE_DIR = REPO_ROOT / "state"
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
     FALLBACK_HISTORY_FILE = STATE_DIR / "fallback_history.json"
     CYCLE_STATE_FILE = STATE_DIR / "cycle_state.json"
+    try:
+        (STATE_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 _refresh_state_paths()
 
-USERS_DIR = REPO_ROOT / "users"
+def _resolve_users_dir() -> Path:
+    override = os.getenv("BYBITBOT_USERS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return STATE_DIR / "users"
+
+
+USERS_DIR = _resolve_users_dir()
 USERS_CONFIG_FILE = USERS_DIR / "users.json"
+
+
+def _migrate_users_dir() -> None:
+    legacy = REPO_ROOT / "users"
+    if USERS_DIR == legacy:
+        return
+    if USERS_DIR.exists():
+        try:
+            if any(USERS_DIR.iterdir()):
+                return
+        except Exception:
+            pass
+    if legacy.exists():
+        try:
+            shutil.copytree(legacy, USERS_DIR, dirs_exist_ok=True)
+        except Exception:
+            pass
+
+
+_migrate_users_dir()
 USERS_DEFAULT_SECRET = "secrets.env"
 
 _ENGINE_AUTOSTART_PROCESS = None
@@ -300,7 +332,7 @@ _ENGINE_AUTOSTART_LOG = None
 
 
 def _engine_runtime_dir() -> Path:
-    runtime_root = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "runtime"))
+    runtime_root = Path(os.getenv("BYBITBOT_STATE_DIR", REPO_ROOT / "state"))
     log_dir = runtime_root / "engine"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -630,7 +662,7 @@ def _parse_args():
 
 def _list_user_profiles(registry: dict[str, UserProfile]) -> None:
     if not registry:
-        print("No user profiles configured. Create users/users.json based on users/users.example.json.")
+        print("No user profiles configured. Create state/users/users.json based on users/users.example.json.")
         return
     print("Configured user profiles:")
     for profile in registry.values():
@@ -698,7 +730,20 @@ _commit_limit, CHANGELOG_HEADER, CHANGELOG_LINES = _build_commit_changelog()
 CURRENT_CHANGELOG = "\n".join(
     [CHANGELOG_HEADER] + CHANGELOG_LINES if CHANGELOG_HEADER else CHANGELOG_LINES
 )
-_update_changelog_file(BOT_VERSION, CHANGELOG_HEADER, CHANGELOG_LINES)
+_changelog_write_enabled = str(os.getenv("BYBITBOT_CHANGELOG_WRITE", "0")).strip().lower() in {"1", "true", "yes"}
+if _changelog_write_enabled:
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            check=False,
+        )
+        if not (status.stdout or "").strip():
+            _update_changelog_file(BOT_VERSION, CHANGELOG_HEADER, CHANGELOG_LINES)
+    except Exception:
+        pass
 LATEST_VERSION = BOT_VERSION
 
 
