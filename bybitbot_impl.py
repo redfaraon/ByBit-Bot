@@ -8286,6 +8286,14 @@ def _restart_with_latest_code(reason: str) -> None:
     python_exec = sys.executable or "python"
     args = [python_exec, *sys.argv]
     try:
+        script_path = Path(__file__).resolve()
+        if "backups" in script_path.parts:
+            launcher = REPO_ROOT / "bybitbot.py"
+            if launcher.exists():
+                args = [python_exec, str(launcher), *sys.argv[1:]]
+    except Exception:
+        pass
+    try:
         os.execv(python_exec, args)
     except Exception as exc:
         err_msg = f"ℹ️ Не удалось перезапустить процесс автоматически: {exc}"
