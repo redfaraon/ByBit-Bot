@@ -15874,54 +15874,72 @@ def run_cycle():
         except Exception as exc_refresh_orders:
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
+        current_orders = refreshed_orders
+        recheck_attempted = False
+        has_any_level = False
+        stop_vals_dbg: list[float] = []
+        take_vals_dbg: list[float] = []
+        has_stop_after = False
+        has_take_after = False
+        categorized_after: dict[str, list[tuple[float | None, float | None]]] = {}
+        while True:
+            protective_orders_after = _extract_protection_orders(current_orders)
+            has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
+                position_payload,
+                protective_orders_after,
+                price_hint=px_val,
+            )
+            stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
+            take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
+            has_any_level = bool(stop_vals_dbg or take_vals_dbg)
+            if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
+                stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
+                take_hint = f"{take_vals_dbg[0]:.2f}" if take_vals_dbg else "n/a"
+                parts_text = f"stop={stop_hint},take={take_hint}"
+                log(
+                    f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
+                    Fore.CYAN,
+                )
+                restored = True
+                break
+            if has_stop_after and REQUIRE_TAKE_PROFIT and not has_take_after:
+                stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
+                log(
+                    f"[WARN] {sym_unprotected}: take-profit still missing after restore "
+                    f"(stop={stop_hint}, takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – keeping position with stop-only",
+                    Fore.YELLOW,
+                )
+                restored = True
+                break
+            if has_any_level:
+                log(
+                    f"[WARN] {sym_unprotected}: ambiguous protection after restore "
+                    f"(has_stop={has_stop_after}, has_take={has_take_after}, "
+                    f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
+                    f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – skipping auto-close",
+                    Fore.YELLOW,
+                )
+                unresolved_unprotected.append(sym_unprotected)
+                break
+            if recheck_attempted:
+                break
+            recheck_attempted = True
+            time.sleep(0.5)
+            try:
+                current_orders = fetch_open_orders_for_symbol(ex, sym_unprotected)
+            except Exception as exc_refresh_orders:
+                log(f"[WARN] Recheck: failed to refresh orders for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
+                current_orders = current_orders
+            continue
+        refreshed_orders = current_orders
         if str(sym_unprotected).upper().startswith("DOGE"):
             log(
                 f"[PROTECT][DOGE] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
                 Fore.LIGHTBLACK_EX,
             )
-        protective_orders_after = _extract_protection_orders(refreshed_orders)
-        has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
-            position_payload,
-            protective_orders_after,
-            price_hint=px_val,
-        )
-        stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
-        take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
-        has_any_level = bool(stop_vals_dbg or take_vals_dbg)
-
-        if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
-            # Полная защита восстановлена.
-            stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
-            take_hint = f"{take_vals_dbg[0]:.2f}" if take_vals_dbg else "n/a"
-            parts_text = f"stop={stop_hint},take={take_hint}"
-            log(
-                f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
-                Fore.CYAN,
-            )
-            restored = True
+        if restored:
             continue
-
-        if has_stop_after and REQUIRE_TAKE_PROFIT and not has_take_after:
-            # Есть стоп, но нет тейка – считаем позицию защищённой стопом и не закрываем её.
-            stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
-            log(
-                f"[WARN] {sym_unprotected}: take-profit still missing after restore "
-                f"(stop={stop_hint}, takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – keeping position with stop-only",
-                Fore.YELLOW,
-            )
-            restored = True
-            continue
-
         if has_any_level:
-            # Есть какие‑то защитные уровни, но классификация считает их невалидными — не закрываем автоматически.
-            log(
-                f"[WARN] {sym_unprotected}: ambiguous protection after restore "
-                f"(has_stop={has_stop_after}, has_take={has_take_after}, "
-                f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
-                f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – skipping auto-close",
-                Fore.YELLOW,
-            )
-            unresolved_unprotected.append(sym_unprotected)
             continue
 
         # Действительно нет ни стопа, ни тейка – закрываем позицию как раньше.
