@@ -191,7 +191,7 @@
     "min_position_size": 0.0,
     "min_notional_usdt": 0.1,
     "news_weight": 1.0,
-    "max_open_positions": 2,
+    "max_open_positions": 4,
     "max_positions_per_base": 1,
     "default_next_run_minutes": 10,
     "max_retries": 1,
