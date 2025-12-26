@@ -15932,11 +15932,10 @@ def run_cycle():
                 current_orders = current_orders
             continue
         refreshed_orders = current_orders
-        if str(sym_unprotected).upper().startswith("DOGE"):
-            log(
-                f"[PROTECT][DOGE] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
-                Fore.LIGHTBLACK_EX,
-            )
+        log(
+            f"[PROTECT] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
+            Fore.LIGHTBLACK_EX,
+        )
         if restored:
             continue
         if has_any_level:
@@ -16703,6 +16702,13 @@ execute_extra_orders = execution_engine.execute_extra_orders
 
 
 def main():
+    # If we are running from a backup script but the repo is reachable, jump back to the latest code.
+    try:
+        script_path = Path(__file__).resolve()
+        if "backups" in script_path.parts and (REPO_ROOT / ".git").exists():
+            _restart_with_latest_code("[RECOVER] Running from backup, switching to latest HEAD")
+    except Exception:
+        pass
     ensure_version_backup()
     refresh_settings()
     base_margin_utilization = ORDER_MARGIN_UTILIZATION
