@@ -902,6 +902,8 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("config", "Настройки бота и окружения"),
     ("sandbox", "Управление песочницами"),
     ("version", "Текущая версия и changelog"),
+    ("stable", "Переключиться на stable/backup"),
+    ("head", "Переключиться на последний коммит текущей ветки"),
     ("update", "Переключиться на последнюю версию"),
     ("ai", "Диагностика AI payload"),
 ]
@@ -8031,6 +8033,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_sandbox_command(args, user_id=user_id)
         if reply is None:
             return
+    elif command in {"stable", "backup"}:
+        reply = _set_target_and_restart("branch:stable", "[RESTART] /stable -> switching to stable/backup", chat_id=chat_id, thread_id=response_thread)
+    elif command in {"head", "normal"}:
+        reply = _set_target_and_restart(None, "[RESTART] /head -> switching to latest HEAD", chat_id=chat_id, thread_id=response_thread)
     elif command == "update":
         reply = _handle_version_command(["latest"], user_id=user_id, chat_id=chat_id, thread_id=response_thread)
         if reply is None:
@@ -8258,6 +8264,16 @@ def _handle_version_command(args: list[str], *, user_id: Optional[int], chat_id:
         return f"Переключаюсь на {ver} и перезапускаюсь…"
 
     return "Использование: /version list | /version latest | /version set <YYYY.MM.DD[.N]>"
+
+
+def _set_target_and_restart(target: str | None, reason: str, *, chat_id: int, thread_id: Optional[int]) -> str:
+    target_path = _get_bot_config_path(USER_ID, REPO_ROOT)
+    payload = {"TARGET_VERSION": target if target else None}
+    updated = _persist_env_file(target_path, payload)
+    if not updated:
+        return "Не удалось обновить TARGET_VERSION."
+    _restart_with_latest_code(reason)
+    return f"{reason}…"
 def _restart_with_latest_code(reason: str) -> None:
     log(reason, Fore.LIGHTBLUE_EX)
     send_tg(reason)
