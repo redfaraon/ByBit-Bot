@@ -902,6 +902,7 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("config", "Настройки бота и окружения"),
     ("sandbox", "Управление песочницами"),
     ("version", "Текущая версия и changelog"),
+    ("update", "Переключиться на последнюю версию"),
     ("ai", "Диагностика AI payload"),
 ]
 COMMANDS_HELP_SECTIONS = [
@@ -6627,7 +6628,13 @@ def start_telegram_long_polling() -> None:
     if TELEGRAM_WEBHOOK_URL:
         return
     if _TELEGRAM_LONG_POLL_THREAD is not None:
-        return
+        if _TELEGRAM_LONG_POLL_THREAD.is_alive():
+            return
+        stop_event = _TELEGRAM_LONG_POLL_STOP
+        if stop_event:
+            stop_event.set()
+        _TELEGRAM_LONG_POLL_THREAD = None
+        _TELEGRAM_LONG_POLL_STOP = None
     if not TG_TOKEN:
         return
     stop_event = threading.Event()
@@ -8024,6 +8031,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_sandbox_command(args, user_id=user_id)
         if reply is None:
             return
+    elif command == "update":
+        reply = _handle_version_command(["latest"], user_id=user_id, chat_id=chat_id, thread_id=response_thread)
+        if reply is None:
+            reply = "Переключаюсь на последнюю версию..."
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
         _tmp = _handle_version_command(args, user_id=user_id, chat_id=chat_id, thread_id=response_thread)
