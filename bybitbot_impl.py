@@ -284,7 +284,7 @@ AI_PROVIDER_CURRENT = "openai"
 DEEPSEEK_API_KEY: str | None = None
 DEEPSEEK_API_BASE: str | None = None
 DEEPSEEK_MODEL: str | None = None
-AI_OFFLINE_CANCEL_ENTRIES = True
+AI_OFFLINE_CANCEL_ENTRIES = False
 _AI_OFFLINE_NOTICE_EMITTED_CYCLE: int | None = None
 _AI_OFFLINE_ACTIVE_CYCLE: int | None = None
 OFFLINE_TRADING_ENABLED = False
@@ -4508,7 +4508,7 @@ def refresh_settings():
         DEEPSEEK_MODEL = deepseek_model_env.strip()
     else:
         DEEPSEEK_MODEL = None
-    AI_OFFLINE_CANCEL_ENTRIES = str(os.getenv("AI_OFFLINE_CANCEL_ENTRIES", "1")).strip().lower() in {
+    AI_OFFLINE_CANCEL_ENTRIES = str(os.getenv("AI_OFFLINE_CANCEL_ENTRIES", "0")).strip().lower() in {
         "1",
         "true",
         "yes",

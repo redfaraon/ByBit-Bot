@@ -19,6 +19,50 @@ from typing import Callable
 from dotenv import dotenv_values
 
 
+def _kill_stale_backup_processes() -> None:
+    """Terminate leftover backup/legacy python processes to avoid duplicate polling/execution."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,cmd"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return
+    current_pid = os.getpid()
+    killed: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("PID "):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmd = parts[1]
+        if pid == current_pid:
+            continue
+        if "backups/bybitbot_impl" not in cmd and "bybitbot_impl_branch" not in cmd:
+            continue
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+                time.sleep(0.2)
+                if sig == signal.SIGTERM:
+                    continue
+            except ProcessLookupError:
+                break
+            except Exception:
+                continue
+        killed.append(f"{pid}:{cmd[:120]}")
+    if killed:
+        print(f"[BOOT] Killed stale backup processes: {', '.join(killed)}", file=sys.stderr)
+
+
 def _resolve_repo_root(script_path: Path) -> Path:
     current = script_path
     for _ in range(6):
@@ -1374,6 +1418,8 @@ def main():
             _apply_user_profile(implicit_profile)
     else:
         _refresh_state_paths()
+
+    _kill_stale_backup_processes()
 
     branch_name, head_updated = _update_current_branch()
     if head_updated:
