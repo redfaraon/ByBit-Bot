@@ -1721,6 +1721,73 @@ def get_current_branch_name() -> str | None:
     return branch
 
 
+def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--pretty=format:%H%n%s%n%cI"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return None, None, None
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    commit_hash = lines[0] if len(lines) > 0 else None
+    commit_message = lines[1] if len(lines) > 1 else None
+    commit_timestamp = lines[2] if len(lines) > 2 else None
+    return commit_hash or None, commit_message or None, commit_timestamp or None
+
+
+def _sync_with_remote() -> None:
+    git_dir = REPO_ROOT / ".git"
+    if not git_dir.exists():
+        return
+    try:
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        working_tree_dirty = bool(status_proc.stdout.strip())
+    except Exception as exc:
+        log(f"[WARN] Git status failed before sync: {exc}", Fore.YELLOW)
+        return
+    try:
+        fetch_proc = subprocess.run(
+            ["git", "fetch", "--all", "--prune"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        fetch_output = (fetch_proc.stdout or "").strip()
+        if fetch_output:
+            log(f"[GIT] fetch: {fetch_output}", Fore.LIGHTBLACK_EX)
+    except subprocess.CalledProcessError as exc:
+        log(f"[WARN] Git fetch failed: {exc.stderr or exc.stdout or exc}", Fore.YELLOW)
+        return
+    if working_tree_dirty:
+        log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
+        return
+    try:
+        pull_proc = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pull_output = (pull_proc.stdout or pull_proc.stderr or "").strip()
+        if pull_output:
+            log(f"[GIT] pull: {pull_output}", Fore.LIGHTBLACK_EX)
+    except subprocess.CalledProcessError as exc:
+        details = exc.stderr or exc.stdout or str(exc)
+        log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
+
+
 def _format_commit_timestamp(iso_text: str | None) -> str | None:
     if not iso_text:
         return None
