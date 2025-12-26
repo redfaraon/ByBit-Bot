@@ -1273,6 +1273,13 @@ def _run_script_candidate(
         env["PYTHONPATH"] = repo_path + os.pathsep + existing_pythonpath
     else:
         env["PYTHONPATH"] = repo_path
+    try:
+        parts = script_path.resolve().parts
+    except Exception:
+        parts = ()
+    if parts and "backups" in parts and "snapshots" in parts:
+        snapshot_dir = script_path.parent
+        print(f"[BOOT] Using snapshot dir: {snapshot_dir}", file=sys.stderr)
     result = subprocess.run([sys.executable, str(script_path)], env=env)
     return result.returncode == 0
 
