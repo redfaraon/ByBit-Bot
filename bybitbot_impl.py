@@ -1727,6 +1727,24 @@ def get_current_branch_name() -> str | None:
     return branch
 
 
+def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--pretty=format:%H%n%s%n%cI"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return None, None, None
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    commit_hash = lines[0] if len(lines) > 0 else None
+    commit_message = lines[1] if len(lines) > 1 else None
+    commit_timestamp = lines[2] if len(lines) > 2 else None
+    return commit_hash or None, commit_message or None, commit_timestamp or None
+
+
 def _sync_with_remote() -> None:
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
