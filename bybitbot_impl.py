@@ -840,7 +840,7 @@ AUTO_MIN_NOTIONAL: bool = DEFAULT_AUTO_MIN_NOTIONAL
 AUTO_MARGIN_SCALE: bool = DEFAULT_AUTO_MARGIN_SCALE
 AUTO_MARGIN_SCALE_RATIO: float = DEFAULT_AUTO_MARGIN_SCALE_RATIO
 AUTO_MARGIN_CONFIDENCE_MULT: float = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
-MIN_NOTIONAL_USDT: float = 5.0
+MIN_NOTIONAL_USDT: float = 0.7
 AUTO_DIRECTION_ADJUST_ENABLED: bool = str(os.getenv("AUTO_DIRECTION_ADJUST_ENABLED", "1")).strip().lower() not in {"0", "false", "no"}
 AUTO_DIRECTION_REDUCE_FACTOR: float = max(
     0.0, min(1.0, _float_from_env("AUTO_DIRECTION_REDUCE_FACTOR", 0.5))
@@ -872,6 +872,7 @@ TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
 TRAILING_DYNAMIC_FACTOR: float = 0.65
 TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
+PSEUDOTRAIL_MIN_STOP_GAP_ATR: float = 0.6
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 5.0
@@ -1606,6 +1607,7 @@ def _sync_module_configs() -> None:
         "TRAILING_DYNAMIC_FACTOR": TRAILING_DYNAMIC_FACTOR,
         "TRAILING_DYNAMIC_MIN_ATR": TRAILING_DYNAMIC_MIN_ATR,
         "PSEUDOTRAIL_MIN_IMPROVE_ATR": PSEUDOTRAIL_MIN_IMPROVE_ATR,
+        "PSEUDOTRAIL_MIN_STOP_GAP_ATR": PSEUDOTRAIL_MIN_STOP_GAP_ATR,
         "PSEUDOTRAIL_STOP_LOCK_FACTOR": PSEUDOTRAIL_STOP_LOCK_FACTOR,
         "PSEUDOTRAIL_TP_EXTEND_FACTOR": PSEUDOTRAIL_TP_EXTEND_FACTOR,
         "PSEUDOTRAIL_MAX_TAKE_EXTENDS": PSEUDOTRAIL_MAX_TAKE_EXTENDS,
@@ -4203,7 +4205,7 @@ def refresh_settings():
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
-    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
+    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_MIN_STOP_GAP_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
     global IMMEDIATE_CLOSE_ON_BREACH
@@ -4350,22 +4352,50 @@ def refresh_settings():
     os.environ["MAX_TRAILING_LOSS_PCT"] = str(MAX_TRAILING_LOSS_PCT)
     os.environ["MIN_POSITION_SIZE"] = str(MIN_POSITION_SIZE)
     os.environ["NEWS_WEIGHT"] = str(NEWS_WEIGHT)
-    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
     try:
-        PSEUDOTRAIL_MIN_IMPROVE_ATR = float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+        pseudo_min_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_min_improve_atr")
+        PSEUDOTRAIL_MIN_IMPROVE_ATR = (
+            float(pseudo_min_spec)
+            if pseudo_min_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_MIN_IMPROVE_ATR = 0.35
     try:
-        PSEUDOTRAIL_STOP_LOCK_FACTOR = float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+        pseudo_gap_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_min_stop_gap_atr")
+        PSEUDOTRAIL_MIN_STOP_GAP_ATR = (
+            float(pseudo_gap_spec)
+            if pseudo_gap_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_MIN_STOP_GAP_ATR", str(PSEUDOTRAIL_MIN_STOP_GAP_ATR)))
+        )
+    except (TypeError, ValueError):
+        PSEUDOTRAIL_MIN_STOP_GAP_ATR = 0.6
+    try:
+        pseudo_lock_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_stop_lock_factor")
+        PSEUDOTRAIL_STOP_LOCK_FACTOR = (
+            float(pseudo_lock_spec)
+            if pseudo_lock_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_STOP_LOCK_FACTOR = 0.35
     try:
-        PSEUDOTRAIL_TP_EXTEND_FACTOR = float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+        pseudo_tp_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_tp_extend_factor")
+        PSEUDOTRAIL_TP_EXTEND_FACTOR = (
+            float(pseudo_tp_spec)
+            if pseudo_tp_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_TP_EXTEND_FACTOR = 0.25
     PSEUDOTRAIL_MIN_IMPROVE_ATR = max(0.0, PSEUDOTRAIL_MIN_IMPROVE_ATR)
+    PSEUDOTRAIL_MIN_STOP_GAP_ATR = max(0.0, PSEUDOTRAIL_MIN_STOP_GAP_ATR)
     PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
     PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
+    os.environ["PSEUDOTRAIL_MIN_IMPROVE_ATR"] = str(PSEUDOTRAIL_MIN_IMPROVE_ATR)
+    os.environ["PSEUDOTRAIL_MIN_STOP_GAP_ATR"] = str(PSEUDOTRAIL_MIN_STOP_GAP_ATR)
+    os.environ["PSEUDOTRAIL_STOP_LOCK_FACTOR"] = str(PSEUDOTRAIL_STOP_LOCK_FACTOR)
+    os.environ["PSEUDOTRAIL_TP_EXTEND_FACTOR"] = str(PSEUDOTRAIL_TP_EXTEND_FACTOR)
     # Scheduling bounds (online/offline) from .env
     global MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES
     global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
@@ -4520,11 +4550,40 @@ def refresh_settings():
     AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
     AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
     min_notional_spec = STRATEGY_EXECUTION_SPEC.get("min_notional_usdt")
+    min_notional_env_raw = os.getenv("MIN_NOTIONAL_USDT")
+    min_notional_source = "code_default"
     if min_notional_spec is not None:
-        MIN_NOTIONAL_USDT = float(min_notional_spec)
+        try:
+            MIN_NOTIONAL_USDT = float(min_notional_spec)
+            min_notional_source = "strategy_spec.json"
+        except (TypeError, ValueError):
+            MIN_NOTIONAL_USDT = 0.7
+            log(
+                f"[WARN] Invalid execution.min_notional_usdt={min_notional_spec!r} in strategy_spec.json; using 0.7",
+                Fore.YELLOW,
+            )
+            min_notional_source = "code_default"
+    elif min_notional_env_raw is not None and str(min_notional_env_raw).strip() != "":
+        try:
+            MIN_NOTIONAL_USDT = float(min_notional_env_raw)
+            min_notional_source = ".env"
+        except (TypeError, ValueError):
+            MIN_NOTIONAL_USDT = 0.7
+            log(
+                f"[WARN] Invalid MIN_NOTIONAL_USDT={min_notional_env_raw!r} in .env; using 0.7",
+                Fore.YELLOW,
+            )
+            min_notional_source = "code_default"
     else:
-        MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+        MIN_NOTIONAL_USDT = 0.7
+        log(
+            "[WARN] MIN_NOTIONAL_USDT not set in strategy_spec.json or .env; using code default 0.7",
+            Fore.YELLOW,
+        )
+        min_notional_source = "code_default"
     MIN_NOTIONAL_USDT = max(0.0, MIN_NOTIONAL_USDT)
+    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
+    log(f"[CONFIG] MIN_NOTIONAL_USDT={MIN_NOTIONAL_USDT} source={min_notional_source}", Fore.LIGHTBLACK_EX)
     EXTRA_POSITION_SETTLES = _parse_settle_list(os.getenv("BYBIT_EXTRA_POSITION_SETTLES"), DEFAULT_EXTRA_POSITION_SETTLES)
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -13694,21 +13753,53 @@ def run_cycle():
     selection_result = None
     universe_state = dict(universe_cache)
     news_requests: list[Any] = []
-    updated_universe = ai_update_universe(
-        exchange=ex,
-        symbols=sorted(candidate_pairs_set),
-        positions_map=positions_map,
-        equity=equity,
-        available_margin=available_margin,
-        universe_cache=universe_cache,
-        news_digest=news_headlines,
-    )
-    if updated_universe:
-        selection_result, universe_state, news_requests = updated_universe
-        universe_state = universe_state or {}
+    if bool(STRATEGY_EXECUTION_SPEC.get("manual_only")):
+        built_pairs = universe_builder.build_universe(
+            strategy.CONTEXT_SPEC,
+            position_symbols,
+            news_digest=news_headlines,
+        )
+        universe_state = dict(universe_state or {})
+        universe_state["pairs"] = built_pairs
         universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        universe_state["ai_offline"] = False
         save_universe_cache(universe_state)
-        universe_origin = (selection_result or {}).get("source") or "ai_update"
+        universe_origin = "manual_universe_builder"
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        src = str(mode.get("source") or "fixed").strip().lower() or "fixed"
+        max_symbols = int(mode.get("max_symbols") or 8)
+        min_items = 0
+        try:
+            news_pr = mode.get("news_priority") if isinstance(mode.get("news_priority"), dict) else {}
+            min_items = int(news_pr.get("min_items") or 0)
+        except Exception:
+            min_items = 0
+        log(
+            f"[MANUAL] Universe source={src} news_symbols={len(news_headlines or {})} min_items={min_items} "
+            f"max_symbols={max_symbols} include_positions={bool(mode.get('include_positions', True))} "
+            f"pairs={', '.join(built_pairs) if built_pairs else 'none'}",
+            Fore.LIGHTBLACK_EX,
+        )
+    else:
+        updated_universe = ai_update_universe(
+            exchange=ex,
+            symbols=sorted(candidate_pairs_set),
+            positions_map=positions_map,
+            equity=equity,
+            available_margin=available_margin,
+            universe_cache=universe_cache,
+            news_digest=news_headlines,
+        )
+        if updated_universe:
+            selection_result, universe_state, news_requests = updated_universe
+            universe_state = universe_state or {}
+            universe_state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            save_universe_cache(universe_state)
+            universe_origin = (selection_result or {}).get("source") or "ai_update"
     if universe_state.get("pairs"):
         for pair in universe_state.get("pairs", []):
             resolved_pair = normalize_symbol(pair, record_missing=False)

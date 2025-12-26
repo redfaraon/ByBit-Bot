@@ -65,6 +65,7 @@
 - `state/bybit_credentials.json` ? stored API keys per user (secrets).
 - `state/users/*.json` ? multi-user profiles (user IDs, preferences, secrets paths).
 - `strategy_spec.json` ? active strategy config (universe, risk, execution, providers, events).
+- `strategy_spec.last_good.json` ? auto-maintained fallback spec used when `strategy_spec.json` becomes invalid (JSON parse error).
 - `assets/console.log` ? streaming log mirror for consoles/launcher; `assets/bybit.log` ? main runtime log and rotated history; duplicates have been trimmed so only the active log files and rotated archives remain, plus `assets/graphs` for generated equity/signal charts.
 ### Config deployment
 - Keep `.env` and `strategy_spec.json` checked in at the repo root so the launcher/orchestrator can pick them up.
@@ -90,4 +91,3 @@
 - The emulator keeps a virtual account, records orders/positions, and emits snapshots that `backtest.stats.BacktestStats` buffers for equity/PNL curves.
 - Between manual ticks `backtest.exchange_emulator.ExchangeEmulator` runs minute-by-minute, matches active virtual orders against the historical price, and updates PnL/equity before the next signal point.
 - Launch the session with `python -m backtest.session --strategy strategy.json --from 2025-01-01T00:00:00Z --to 2025-01-31T23:59:00Z --balance 1000` and feed your historical bars/news via `--data-feed` or by subclassing `BacktestParams`.
-
