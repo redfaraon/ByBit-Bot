@@ -29,9 +29,12 @@
       "MAX_DYNAMIC_RISK_PCT"
     ],
     "universe_mode": {
-      "source": "fixed",                // fixed | news
-      "max_symbols": 8,                 // cap, includes symbols with open positions
-      "include_positions": true         // ensure open-position symbols are always in universe
+      "source": "news",
+      "max_symbols": 8,
+      "include_positions": true,
+      "news_priority": {
+        "min_items": 1
+      }
     }
   },
   "risk": {
@@ -160,11 +163,22 @@
   },
   "execution": {
     "manual_only": true,
-    "leverage": 10,
+    "leverage": 27,
     "order_margin_utilization": 0.95,
     "sl_atr": 1.6,
     "tp_atr": 2.8,
     "trailing_atr_mult": 1.0,
+    "trailing_dynamic_trigger_atr": 1.4,
+    "trailing_dynamic_factor": 0.65,
+    "trailing_dynamic_min_atr": 0.35,
+    "pseudotrail_min_improve_atr": 0.35,
+    "pseudotrail_min_stop_gap_atr": 0.6,
+    "pseudotrail_stop_lock_factor": 0.35,
+    "pseudotrail_tp_extend_factor": 0.25,
+    "max_trailing_loss_pct": 0.0,
+    "min_position_size": 0.0,
+    "min_notional_usdt": 0.7,
+    "news_weight": 1.0,
     "max_open_positions": 4,
     "max_positions_per_base": 1,
     "default_next_run_minutes": 10,

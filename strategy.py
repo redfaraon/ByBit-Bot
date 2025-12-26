@@ -87,12 +87,23 @@ def _default_spec() -> dict[str, Any]:
 def _load_spec() -> dict[str, Any]:
     default_spec = _default_spec()
     spec_path = Path(__file__).with_name("strategy_spec.json")
+    last_good_path = spec_path.with_suffix(".last_good.json")
     try:
         payload = json.loads(spec_path.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
+            try:
+                last_good_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
             return payload
     except Exception:
-        pass
+        if last_good_path.exists():
+            try:
+                payload = json.loads(last_good_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
     return default_spec
 
 

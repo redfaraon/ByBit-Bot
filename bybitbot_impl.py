@@ -839,6 +839,7 @@ AUTO_DIRECTION_MIN_CONFIDENCE: float = max(
 )
 DEFAULT_OPEN_MIN_CONFIDENCE: float = 0.7
 OPEN_MIN_CONFIDENCE: float = DEFAULT_OPEN_MIN_CONFIDENCE
+MIN_NOTIONAL_USDT: float = 0.7
 
 TELEGRAM_DECISIONS_VERBOSE = False
 _LAST_COMMIT_HASH: Optional[str] = None
@@ -855,6 +856,7 @@ TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
 TRAILING_DYNAMIC_FACTOR: float = 0.65
 TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
+PSEUDOTRAIL_MIN_STOP_GAP_ATR: float = 0.6
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 5.0
@@ -1561,6 +1563,7 @@ def _sync_module_configs() -> None:
         "TRAILING_DYNAMIC_FACTOR": TRAILING_DYNAMIC_FACTOR,
         "TRAILING_DYNAMIC_MIN_ATR": TRAILING_DYNAMIC_MIN_ATR,
         "PSEUDOTRAIL_MIN_IMPROVE_ATR": PSEUDOTRAIL_MIN_IMPROVE_ATR,
+        "PSEUDOTRAIL_MIN_STOP_GAP_ATR": PSEUDOTRAIL_MIN_STOP_GAP_ATR,
         "PSEUDOTRAIL_STOP_LOCK_FACTOR": PSEUDOTRAIL_STOP_LOCK_FACTOR,
         "PSEUDOTRAIL_TP_EXTEND_FACTOR": PSEUDOTRAIL_TP_EXTEND_FACTOR,
         "PSEUDOTRAIL_MAX_TAKE_EXTENDS": PSEUDOTRAIL_MAX_TAKE_EXTENDS,
@@ -3969,7 +3972,7 @@ def refresh_settings():
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
-    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
+    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_MIN_STOP_GAP_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
     global IMMEDIATE_CLOSE_ON_BREACH
@@ -4081,20 +4084,59 @@ def refresh_settings():
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
     try:
-        PSEUDOTRAIL_MIN_IMPROVE_ATR = float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+        pseudo_min_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_min_improve_atr")
+        PSEUDOTRAIL_MIN_IMPROVE_ATR = (
+            float(pseudo_min_spec)
+            if pseudo_min_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_MIN_IMPROVE_ATR = 0.35
     try:
-        PSEUDOTRAIL_STOP_LOCK_FACTOR = float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+        pseudo_gap_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_min_stop_gap_atr")
+        PSEUDOTRAIL_MIN_STOP_GAP_ATR = (
+            float(pseudo_gap_spec)
+            if pseudo_gap_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_MIN_STOP_GAP_ATR", str(PSEUDOTRAIL_MIN_STOP_GAP_ATR)))
+        )
+    except (TypeError, ValueError):
+        PSEUDOTRAIL_MIN_STOP_GAP_ATR = 0.6
+    try:
+        pseudo_lock_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_stop_lock_factor")
+        PSEUDOTRAIL_STOP_LOCK_FACTOR = (
+            float(pseudo_lock_spec)
+            if pseudo_lock_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_STOP_LOCK_FACTOR = 0.35
     try:
-        PSEUDOTRAIL_TP_EXTEND_FACTOR = float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+        pseudo_tp_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_tp_extend_factor")
+        PSEUDOTRAIL_TP_EXTEND_FACTOR = (
+            float(pseudo_tp_spec)
+            if pseudo_tp_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_TP_EXTEND_FACTOR = 0.25
     PSEUDOTRAIL_MIN_IMPROVE_ATR = max(0.0, PSEUDOTRAIL_MIN_IMPROVE_ATR)
+    PSEUDOTRAIL_MIN_STOP_GAP_ATR = max(0.0, PSEUDOTRAIL_MIN_STOP_GAP_ATR)
     PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
     PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
+    log(
+        "[CONFIG][TRAIL] trailing_atr_mult={:.2f} dyn_trigger={:.2f} dyn_factor={:.2f} dyn_min={:.2f} "
+        "pseudo_min_improve={:.2f} pseudo_min_gap_atr={:.2f} pseudo_lock_factor={:.2f} pseudo_tp_extend={:.2f}".format(
+            TRAILING_ATR_MULT,
+            TRAILING_DYNAMIC_TRIGGER_ATR,
+            TRAILING_DYNAMIC_FACTOR,
+            TRAILING_DYNAMIC_MIN_ATR,
+            PSEUDOTRAIL_MIN_IMPROVE_ATR,
+            PSEUDOTRAIL_MIN_STOP_GAP_ATR,
+            PSEUDOTRAIL_STOP_LOCK_FACTOR,
+            PSEUDOTRAIL_TP_EXTEND_FACTOR,
+        ),
+        Fore.LIGHTBLACK_EX,
+    )
     # Scheduling bounds (online/offline) from .env
     global MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES
     global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
@@ -4248,7 +4290,41 @@ def refresh_settings():
         AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
     AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
     AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
-    MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    min_notional_spec = STRATEGY_EXECUTION_SPEC.get("min_notional_usdt")
+    min_notional_env_raw = os.getenv("MIN_NOTIONAL_USDT")
+    min_notional_source = "code_default"
+    if min_notional_spec is not None:
+        try:
+            MIN_NOTIONAL_USDT = float(min_notional_spec)
+            min_notional_source = "strategy_spec.json"
+        except (TypeError, ValueError):
+            MIN_NOTIONAL_USDT = 0.7
+            log(
+                f"[WARN] Invalid execution.min_notional_usdt={min_notional_spec!r} in strategy_spec.json; using 0.7",
+                Fore.YELLOW,
+            )
+            min_notional_source = "code_default"
+    elif min_notional_env_raw is not None and str(min_notional_env_raw).strip() != "":
+        try:
+            MIN_NOTIONAL_USDT = float(min_notional_env_raw)
+            min_notional_source = ".env"
+        except (TypeError, ValueError):
+            MIN_NOTIONAL_USDT = 0.7
+            log(
+                f"[WARN] Invalid MIN_NOTIONAL_USDT={min_notional_env_raw!r} in .env; using 0.7",
+                Fore.YELLOW,
+            )
+            min_notional_source = "code_default"
+    else:
+        MIN_NOTIONAL_USDT = 0.7
+        log(
+            "[WARN] MIN_NOTIONAL_USDT not set in strategy_spec.json or .env; using code default 0.7",
+            Fore.YELLOW,
+        )
+        min_notional_source = "code_default"
+    MIN_NOTIONAL_USDT = max(0.0, MIN_NOTIONAL_USDT)
+    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
+    log(f"[CONFIG] MIN_NOTIONAL_USDT={MIN_NOTIONAL_USDT} source={min_notional_source}", Fore.LIGHTBLACK_EX)
     EXTRA_POSITION_SETTLES = _parse_settle_list(os.getenv("BYBIT_EXTRA_POSITION_SETTLES"), DEFAULT_EXTRA_POSITION_SETTLES)
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -13891,7 +13967,29 @@ def run_cycle():
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
     # Rebuild manual universe to include open positions and JSON constraints.
-    manual_universe_built = universe_builder.build_universe(strategy.CONTEXT_SPEC, position_symbols)
+    manual_universe_built = universe_builder.build_universe(
+        strategy.CONTEXT_SPEC,
+        position_symbols,
+        news_digest=news_headlines,
+    )
+    try:
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        src = str(mode.get("source") or "fixed").strip().lower() or "fixed"
+        max_symbols = int(mode.get("max_symbols") or 8)
+        news_pr = mode.get("news_priority") if isinstance(mode.get("news_priority"), dict) else {}
+        min_items = int(news_pr.get("min_items") or 0)
+        log(
+            f"[MANUAL] Universe source={src} news_symbols={len(news_headlines or {})} min_items={min_items} "
+            f"max_symbols={max_symbols} include_positions={bool(mode.get('include_positions', True))} "
+            f"pairs={', '.join(manual_universe_built) if manual_universe_built else 'none'}",
+            Fore.LIGHTBLACK_EX,
+        )
+    except Exception:
+        pass
     try:
         MANUAL_STRATEGY_SYMBOLS.clear()
         MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})

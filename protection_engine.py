@@ -24,6 +24,7 @@ TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
 TRAILING_DYNAMIC_FACTOR = 0.65
 TRAILING_DYNAMIC_MIN_ATR = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR = 0.35
+PSEUDOTRAIL_MIN_STOP_GAP_ATR = 0.6
 PSEUDOTRAIL_STOP_LOCK_FACTOR = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR = 0.25
 PSEUDOTRAIL_MAX_TAKE_EXTENDS = 2
@@ -58,6 +59,7 @@ REQUIRED_GLOBALS = {
     'TRAILING_DYNAMIC_FACTOR',
     'TRAILING_DYNAMIC_MIN_ATR',
     'PSEUDOTRAIL_MIN_IMPROVE_ATR',
+    'PSEUDOTRAIL_MIN_STOP_GAP_ATR',
     'PSEUDOTRAIL_STOP_LOCK_FACTOR',
     'PSEUDOTRAIL_TP_EXTEND_FACTOR',
     'PSEUDOTRAIL_MAX_TAKE_EXTENDS',
@@ -1002,6 +1004,13 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
         if delta_price_equiv + tol >= improve_threshold and improve_threshold > 0:
             was_active = trail_active
             lock_distance = delta_price_equiv * PSEUDOTRAIL_STOP_LOCK_FACTOR
+            if lock_distance > 0 and PSEUDOTRAIL_MIN_STOP_GAP_ATR:
+                try:
+                    min_gap = float(PSEUDOTRAIL_MIN_STOP_GAP_ATR) * atrv
+                except Exception:
+                    min_gap = 0.0
+                if min_gap > 0:
+                    lock_distance = max(lock_distance, min_gap)
             if lock_distance > 0:
                 if is_long:
                     candidate_stop = price - lock_distance
@@ -1053,7 +1062,17 @@ def ensure_position_protection(exchange, symbol, position, df_primary, open_orde
             ):
                 take_transition_text = f", take {_fmt_px(initial_take_price)} -> {_fmt_px(take_price)}"
 
-            px_text = f", ΔPx≈{delta_price_equiv:.4f}, ATR={atrv:.4f}, triggerPx={improve_threshold:.4f}, qty={position_qty:.6f}"
+            gap_atr = None
+            try:
+                if lock_distance and atrv and math.isfinite(lock_distance) and math.isfinite(atrv) and atrv > 0:
+                    gap_atr = float(lock_distance) / float(atrv)
+            except Exception:
+                gap_atr = None
+            gap_text = f", gapATR={gap_atr:.2f}" if gap_atr is not None else ""
+            px_text = (
+                f", ΔPx≈{delta_price_equiv:.4f}, ATR={atrv:.4f}, triggerPx={improve_threshold:.4f}"
+                f"{gap_text}, qty={position_qty:.6f}"
+            )
             keep_tp_note = f", keep_tp={existing_take_count}" if has_take else ""
             log(
                 f"{pseudo_ctx}: tightened{keep_tp_note} ΔPnL={delta_unreal:.4f}{px_text}{stop_transition_text}{take_transition_text}"
