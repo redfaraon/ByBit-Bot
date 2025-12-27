@@ -7,6 +7,7 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 """
 
 import os
+import importlib
 import atexit
 import shutil
 import stat
@@ -49,6 +50,37 @@ STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get(
 STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
 STRATEGY_EXECUTION_SPEC = strategy.SPEC.get("execution", {})
 STRATEGY_PROVIDERS_SPEC = strategy.SPEC.get("providers", {})
+MODULE_AUTO_RELOAD_ENABLED = os.getenv("BYBITBOT_MODULE_AUTO_RELOAD", "1").strip().lower() not in {"0", "false", "no"}
+_MODULE_RELOAD_LOCK = threading.Lock()
+_MODULE_RELOAD_FINGERPRINTS: dict[str, float] = {}
+
+
+def _refresh_strategy_specs() -> None:
+    global STRATEGY_ENV_WHITELIST, STRATEGY_RISK_SPEC, STRATEGY_EXECUTION_SPEC, STRATEGY_PROVIDERS_SPEC
+    try:
+        context_spec = getattr(strategy, "CONTEXT_SPEC", None)
+    except Exception:
+        context_spec = None
+    if not isinstance(context_spec, dict):
+        context_spec = {}
+    env_vars = context_spec.get("env_vars")
+    if not isinstance(env_vars, (list, tuple, set)):
+        env_vars = []
+    STRATEGY_ENV_WHITELIST = {
+        str(var).upper() for var in env_vars if isinstance(var, str)
+    }
+    try:
+        spec_root = getattr(strategy, "SPEC", None)
+    except Exception:
+        spec_root = None
+    if not isinstance(spec_root, dict):
+        spec_root = {}
+    risk_spec = spec_root.get("risk")
+    exec_spec = spec_root.get("execution")
+    providers_spec = spec_root.get("providers")
+    STRATEGY_RISK_SPEC = risk_spec if isinstance(risk_spec, dict) else {}
+    STRATEGY_EXECUTION_SPEC = exec_spec if isinstance(exec_spec, dict) else {}
+    STRATEGY_PROVIDERS_SPEC = providers_spec if isinstance(providers_spec, dict) else {}
 
 
 def _strategy_env_value(var_name: str) -> str | None:
@@ -1595,6 +1627,100 @@ def _sync_module_configs() -> None:
     if atr_fn:
         protect_bindings["atr"] = atr_fn
     protection_engine.configure(protect_bindings)
+
+
+def _module_reload_targets() -> list[tuple[str, types.ModuleType]]:
+    return [
+        ("strategy", strategy),
+        ("strategy_context", strategy_context),
+        ("strategy_executor", strategy_executor),
+        ("order_utils", order_utils),
+        ("execution_engine", execution_engine),
+        ("protection_engine", protection_engine),
+        ("order_cleanup", order_cleanup),
+        ("execution_utils", execution_utils),
+        ("trailing_utils", trailing_utils),
+        ("protection_utils", protection_utils),
+        ("account_context", account_context),
+        ("universe_builder", universe_builder),
+    ]
+
+
+def _module_source_path(module: types.ModuleType) -> Optional[Path]:
+    try:
+        raw_path = getattr(module, "__file__", None)
+    except Exception:
+        raw_path = None
+    if not raw_path:
+        return None
+    try:
+        path = Path(raw_path).resolve()
+    except Exception:
+        return None
+    if path.suffix == ".pyc":
+        candidate = path.with_suffix(".py")
+        if candidate.exists():
+            path = candidate
+    return path if path.exists() else None
+
+
+def _module_fingerprint(name: str, module: types.ModuleType) -> Optional[float]:
+    watch_paths: list[Path] = []
+    module_path = _module_source_path(module)
+    if module_path is not None:
+        watch_paths.append(module_path)
+        if name == "strategy":
+            spec_path = module_path.with_name("strategy_spec.json")
+            if spec_path.exists():
+                watch_paths.append(spec_path)
+    mtimes: list[float] = []
+    for path in watch_paths:
+        try:
+            mtimes.append(path.stat().st_mtime)
+        except Exception:
+            continue
+    if not mtimes:
+        return None
+    return max(mtimes)
+
+
+def _reload_local_modules() -> None:
+    if not MODULE_AUTO_RELOAD_ENABLED:
+        return
+    with _MODULE_RELOAD_LOCK:
+        targets = _module_reload_targets()
+        changed: list[str] = []
+        fingerprints: dict[str, float] = {}
+        for name, module in targets:
+            fingerprint = _module_fingerprint(name, module)
+            if fingerprint is None:
+                continue
+            fingerprints[name] = fingerprint
+            prev = _MODULE_RELOAD_FINGERPRINTS.get(name)
+            if prev is None or fingerprint != prev:
+                changed.append(name)
+        if not changed:
+            for name, fp in fingerprints.items():
+                _MODULE_RELOAD_FINGERPRINTS.setdefault(name, fp)
+            return
+        importlib.invalidate_caches()
+        reloaded: list[str] = []
+        failed: list[tuple[str, Exception]] = []
+        for name, module in targets:
+            try:
+                importlib.reload(module)
+                reloaded.append(name)
+            except Exception as exc:
+                failed.append((name, exc))
+        _refresh_strategy_specs()
+        _sync_module_configs()
+        _bind_module_exports()
+        if reloaded:
+            log(f"[HOTRELOAD] Reloaded modules: {', '.join(reloaded)}", Fore.LIGHTBLACK_EX)
+        for name, exc in failed:
+            log(f"[WARN] Module reload failed for {name}: {exc}", Fore.YELLOW)
+        for name, fp in fingerprints.items():
+            _MODULE_RELOAD_FINGERPRINTS[name] = fp
 
 
 def _round_qty_up(value: float, step: float) -> float:
@@ -3997,6 +4123,7 @@ def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
 def refresh_settings():
     _configure_state_paths()
     load_environment()
+    _refresh_strategy_specs()
     stored_api_key, stored_api_secret = _load_bybit_credentials()
     if stored_api_key and not os.getenv("BYBIT_API_KEY"):
         os.environ["BYBIT_API_KEY"] = stored_api_key
@@ -13054,6 +13181,7 @@ def run_cycle():
     def log_open_skip(symbol: str, reason: str) -> None:
         log_user(f"OPEN SKIP {symbol}: {reason}")
     _sync_with_remote()
+    _reload_local_modules()
     _write_runtime_status(None, None, "running")
     refresh_settings()
     # Ensure each user has a bybit.log for per-user trading history
@@ -16699,48 +16827,63 @@ def run_cycle():
     return next_delay_minutes
 
 
+def _bind_module_exports() -> None:
+    global ProtectionMissingError, _has_stop_flag, _has_trailing_flag, _safe_round
+    global _extract_protection_orders, _categorize_protection_orders, _evaluate_position_protection
+    global _describe_protection_changes, _format_protection_snapshot, _summarize_open_orders_for_log
+    global _select_best_protection_levels, _format_progress_to_levels, _format_close_reason
+    global _get_position_reference_price, _protection_orders_signature, _cleanup_redundant_stop_orders
+    global _close_position_now, _trail_state_matches_position, ensure_position_protection
+    global _prepare_protection_dataframe, _refresh_position_protection_if_possible
+    global ORDER_TYPE_MAP, ORDER_TYPE_ALIASES, VALID_ORDER_TYPES
+    global _normalize_order_side, get_position_idx, _sanitize_order_params_for_category
+    global _spot_funds_sufficient, compute_order_amount, normalize_order_type_key
+    global get_trigger_direction_for_side, _order_allows_increase, _format_decimal
+    global _format_notional_pct, _summarize_order_spec, execute_extra_orders
+
+    ProtectionMissingError = protection_engine.ProtectionMissingError
+    _has_stop_flag = protection_engine._has_stop_flag
+    _has_trailing_flag = protection_engine._has_trailing_flag
+    _safe_round = protection_engine._safe_round
+    _extract_protection_orders = protection_engine._extract_protection_orders
+    _categorize_protection_orders = protection_engine._categorize_protection_orders
+    _evaluate_position_protection = protection_engine._evaluate_position_protection
+    _describe_protection_changes = protection_engine._describe_protection_changes
+    _format_protection_snapshot = protection_engine._format_protection_snapshot
+    _summarize_open_orders_for_log = protection_engine._summarize_open_orders_for_log
+    _select_best_protection_levels = protection_engine._select_best_protection_levels
+    _format_progress_to_levels = protection_engine._format_progress_to_levels
+    _format_close_reason = protection_engine._format_close_reason
+    _get_position_reference_price = protection_engine._get_position_reference_price
+    _protection_orders_signature = protection_engine._protection_orders_signature
+    _cleanup_redundant_stop_orders = protection_engine._cleanup_redundant_stop_orders
+    _close_position_now = protection_engine._close_position_now
+    _trail_state_matches_position = protection_engine._trail_state_matches_position
+    ensure_position_protection = protection_engine.ensure_position_protection
+    _prepare_protection_dataframe = protection_engine._prepare_protection_dataframe
+    _refresh_position_protection_if_possible = protection_engine._refresh_position_protection_if_possible
+
+    ORDER_TYPE_MAP = order_utils.ORDER_TYPE_MAP
+    ORDER_TYPE_ALIASES = order_utils.ORDER_TYPE_ALIASES
+    VALID_ORDER_TYPES = order_utils.VALID_ORDER_TYPES
+    _normalize_order_side = order_utils._normalize_order_side
+    get_position_idx = order_utils.get_position_idx
+    _sanitize_order_params_for_category = order_utils._sanitize_order_params_for_category
+    _spot_funds_sufficient = order_utils._spot_funds_sufficient
+    compute_order_amount = order_utils.compute_order_amount
+    normalize_order_type_key = order_utils.normalize_order_type_key
+    get_trigger_direction_for_side = order_utils.get_trigger_direction_for_side
+    _order_allows_increase = order_utils._order_allows_increase
+    _format_decimal = order_utils._format_decimal
+    _format_notional_pct = order_utils._format_notional_pct
+    _summarize_order_spec = order_utils._summarize_order_spec
+
+    execute_extra_orders = execution_engine.execute_extra_orders
+
+
 # Finalize module bindings after all helpers are available.
 _sync_module_configs()
-
-# Bind execution/protection helpers to module implementations.
-ProtectionMissingError = protection_engine.ProtectionMissingError
-_has_stop_flag = protection_engine._has_stop_flag
-_has_trailing_flag = protection_engine._has_trailing_flag
-_safe_round = protection_engine._safe_round
-_extract_protection_orders = protection_engine._extract_protection_orders
-_categorize_protection_orders = protection_engine._categorize_protection_orders
-_evaluate_position_protection = protection_engine._evaluate_position_protection
-_describe_protection_changes = protection_engine._describe_protection_changes
-_format_protection_snapshot = protection_engine._format_protection_snapshot
-_summarize_open_orders_for_log = protection_engine._summarize_open_orders_for_log
-_select_best_protection_levels = protection_engine._select_best_protection_levels
-_format_progress_to_levels = protection_engine._format_progress_to_levels
-_format_close_reason = protection_engine._format_close_reason
-_get_position_reference_price = protection_engine._get_position_reference_price
-_protection_orders_signature = protection_engine._protection_orders_signature
-_cleanup_redundant_stop_orders = protection_engine._cleanup_redundant_stop_orders
-_close_position_now = protection_engine._close_position_now
-_trail_state_matches_position = protection_engine._trail_state_matches_position
-ensure_position_protection = protection_engine.ensure_position_protection
-_prepare_protection_dataframe = protection_engine._prepare_protection_dataframe
-_refresh_position_protection_if_possible = protection_engine._refresh_position_protection_if_possible
-
-ORDER_TYPE_MAP = order_utils.ORDER_TYPE_MAP
-ORDER_TYPE_ALIASES = order_utils.ORDER_TYPE_ALIASES
-VALID_ORDER_TYPES = order_utils.VALID_ORDER_TYPES
-_normalize_order_side = order_utils._normalize_order_side
-get_position_idx = order_utils.get_position_idx
-_sanitize_order_params_for_category = order_utils._sanitize_order_params_for_category
-_spot_funds_sufficient = order_utils._spot_funds_sufficient
-compute_order_amount = order_utils.compute_order_amount
-normalize_order_type_key = order_utils.normalize_order_type_key
-get_trigger_direction_for_side = order_utils.get_trigger_direction_for_side
-_order_allows_increase = order_utils._order_allows_increase
-_format_decimal = order_utils._format_decimal
-_format_notional_pct = order_utils._format_notional_pct
-_summarize_order_spec = order_utils._summarize_order_spec
-
-execute_extra_orders = execution_engine.execute_extra_orders
+_bind_module_exports()
 
 
 def main():
