@@ -127,6 +127,7 @@ WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "AVAX/USDT",
 ]
 WATCHLIST = WATCHLIST_BASE[:]
+WATCHLIST_SOURCE = "strategy_spec.json"
 
 INDICATORS = [
     "ema20",
@@ -852,3 +853,31 @@ def _symbol_allowed(symbol: str) -> bool:
 
 def is_symbol_monitored(symbol: str) -> bool:
     return _symbol_allowed(symbol)
+
+
+def set_runtime_watchlist(symbols: Sequence[str] | None, *, source: str = "runtime") -> None:
+    """
+    Override the watchlist for this process runtime (e.g. per-cycle universe).
+    Symbols are normalized to upper-case; for derivatives forms like 'BTC/USDT:USDT'
+    we also include the base 'BTC/USDT' so checks work consistently.
+    """
+    global WATCHLIST, WATCHLIST_SOURCE
+    if not symbols:
+        WATCHLIST = WATCHLIST_BASE[:]
+        WATCHLIST_SOURCE = "strategy_spec.json"
+        return
+    seen: set[str] = set()
+    updated: list[str] = []
+    for item in symbols:
+        raw = str(item).strip().upper()
+        if not raw:
+            continue
+        candidates = [raw]
+        if ":" in raw:
+            candidates.append(raw.split(":", 1)[0])
+        for sym in candidates:
+            if sym and sym not in seen:
+                updated.append(sym)
+                seen.add(sym)
+    WATCHLIST = updated if updated else WATCHLIST_BASE[:]
+    WATCHLIST_SOURCE = source or "runtime"

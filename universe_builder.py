@@ -27,6 +27,22 @@ def build_universe(
 
     seen: set[str] = set()
     result: list[str] = []
+
+    def _add_symbol(sym_value: str) -> None:
+        norm = str(sym_value).strip().upper()
+        if not norm:
+            return
+        if norm in seen:
+            return
+        result.append(norm)
+        seen.add(norm)
+
+    # Always include open positions (even if it exceeds max_symbols).
+    if include_positions and open_position_symbols:
+        for sym in open_position_symbols:
+            _add_symbol(sym)
+
+    news_added = False
     if source == "news" and news_digest:
         entries: list[tuple[str, int]] = []
         for sym, payload in news_digest.items():
@@ -40,25 +56,18 @@ def build_universe(
         for normalized, count in entries:
             if count < min_news_items:
                 continue
-            if normalized not in seen:
-                result.append(normalized)
-                seen.add(normalized)
             if len(result) >= max_symbols:
                 break
+            _add_symbol(normalized)
+            news_added = True
 
-    for sym in fixed_list:
-        if sym and sym not in seen:
-            result.append(sym)
-            seen.add(sym)
+    # Fixed universe is a fallback:
+    # - always used in 'fixed' mode
+    # - used in 'news' mode only when no eligible news items were found
+    allow_fixed_fallback = source != "news" or not news_added
+    if allow_fixed_fallback:
+        for sym in fixed_list:
             if len(result) >= max_symbols:
                 break
-
-    if include_positions and open_position_symbols:
-        for sym in open_position_symbols:
-            norm = str(sym).strip().upper()
-            if norm not in seen:
-                result.append(norm)
-                seen.add(norm)
-            if len(result) >= max_symbols:
-                break
+            _add_symbol(sym)
     return result

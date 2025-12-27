@@ -14227,6 +14227,27 @@ def run_cycle():
         MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})
     except Exception:
         MANUAL_STRATEGY_SYMBOLS = {sym.upper() for sym in manual_universe_built}
+    try:
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        src = str(mode.get("source") or "fixed").strip().lower() or "fixed"
+    except Exception:
+        src = "fixed"
+    try:
+        strategy.set_runtime_watchlist(manual_universe_built, source=f"universe_builder:{src}")
+        watchlist_now = getattr(strategy, "WATCHLIST", []) or []
+        watchlist_source = getattr(strategy, "WATCHLIST_SOURCE", "unknown")
+        preview = ", ".join(list(watchlist_now)[:12]) if isinstance(watchlist_now, list) else ""
+        log(
+            f"[MANUAL][WATCHLIST] source={watchlist_source} size={len(watchlist_now) if isinstance(watchlist_now, list) else '?'}"
+            + (f" preview={preview}" if preview else ""),
+            Fore.LIGHTBLACK_EX,
+        )
+    except Exception:
+        pass
     # Ensure symbols_sequence aligns with manual universe if present.
     if manual_universe_built:
         symbols_sequence = manual_universe_built
