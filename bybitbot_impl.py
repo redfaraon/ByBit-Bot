@@ -4341,14 +4341,18 @@ def refresh_settings():
     global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
     global OFFLINE_MIN_NEXT_RUN_MINUTES, OFFLINE_MAX_NEXT_RUN_MINUTES
     global BACKOFF_MIN_NEXT_RUN_MINUTES, BACKOFF_MAX_NEXT_RUN_MINUTES
+    # Scheduling bounds: prefer strategy JSON schedule; fall back to env.
+    sched_offline_min, sched_offline_max = strategy.schedule_bounds("offline")
+    sched_online_min, sched_online_max = strategy.schedule_bounds("online")
+    sched_backoff_min, sched_backoff_max = strategy.schedule_bounds("backoff")
     try:
-        MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(MIN_NEXT_RUN_MINUTES)))
+        MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(sched_online_min)))
     except (TypeError, ValueError):
-        MIN_NEXT_RUN_MINUTES = 5.0
+        MIN_NEXT_RUN_MINUTES = float(sched_online_min)
     try:
-        MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(MAX_NEXT_RUN_FROM_START_MINUTES)))
+        MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(sched_online_max)))
     except (TypeError, ValueError):
-        MAX_NEXT_RUN_FROM_START_MINUTES = 45.0
+        MAX_NEXT_RUN_FROM_START_MINUTES = float(sched_online_max)
     MIN_NEXT_RUN_MINUTES = max(1.0, MIN_NEXT_RUN_MINUTES)
     MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES)
     def _env_float(name: str) -> float | None:
@@ -4359,12 +4363,12 @@ def refresh_settings():
             return float(raw)
         except (TypeError, ValueError):
             return None
-    ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or 10.0
-    ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or 45.0
-    OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or 5.0
-    OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or 35.0
-    BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or 25.0
-    BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or 55.0
+    ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or float(sched_online_min)
+    ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or float(sched_online_max)
+    OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or float(sched_offline_min)
+    OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or float(sched_offline_max)
+    BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or float(sched_backoff_min)
+    BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or float(sched_backoff_max)
     IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
     if not isinstance(protection_engine._TRAIL_PROTECTION, dict):
         protection_engine._TRAIL_PROTECTION = {}
@@ -16403,28 +16407,16 @@ def run_cycle():
         interval_floor = max(interval_floor, min_delay_override)
         interval_cap = min(interval_cap, max_delay_override)
     else:
-        # Online mode: use ONLINE_* bounds from .env (defaults 10-45m)
+        # Online mode: use ONLINE_* bounds (JSON schedule first, env fallback)
         online_min = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
         online_max = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
         min_delay_override = online_min
         max_delay_override = online_max
     if interval_cap < interval_floor:
         interval_cap = interval_floor
-        # Offline mode: use OFFLINE_* bounds from .env (defaults 5-35m)
-        min_delay_override = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
-        max_delay_override = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
-        log(
-            f"[SCHED] AI offline bounds applied: {min_delay_override:.1f}-{max_delay_override:.1f}m window while offline mode active",
-            Fore.LIGHTBLACK_EX,
-        )
-        interval_floor = max(interval_floor, min_delay_override)
-        interval_cap = min(interval_cap, max_delay_override)
-    else:
-        # Online mode: use ONLINE_* bounds from .env (defaults 10-45m)
-        online_min = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
-        online_max = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
-        min_delay_override = online_min
-        max_delay_override = online_max
+        # If bounds collapsed, keep floor=cap
+        min_delay_override = interval_floor
+        max_delay_override = interval_cap
     if interval_cap < interval_floor:
         interval_cap = interval_floor
     min_delay = max(0.0, min_delay_override)
@@ -16464,21 +16456,33 @@ def run_cycle():
                 diff_candidate = diff_cycle
             elif diff_intrabar is not None and math.isfinite(diff_intrabar):
                 diff_candidate = diff_intrabar
-            if diff_candidate is not None and math.isfinite(diff_candidate):
-                diff = diff_candidate
-                diff_value = diff
-                if diff > base_tol:
-                    strong = diff >= strong_threshold
-                    delta = -10.0 if strong else -5.0
-                    volatility_note = "vol↑↑" if strong else "vol↑"
-                elif diff < -base_tol:
-                    strong = diff <= -strong_threshold
-                    delta = 10.0 if strong else 5.0
-                    volatility_note = "vol↓↓" if strong else "vol↓"
-            else:
-                volatility_note = "vol=init"
+        if diff_candidate is not None and math.isfinite(diff_candidate):
+            diff = diff_candidate
+            diff_value = diff
+            if diff > base_tol:
+                strong = diff >= strong_threshold
+                delta = -10.0 if strong else -5.0
+                volatility_note = "vol↑↑" if strong else "vol↑"
+            elif diff < -base_tol:
+                strong = diff <= -strong_threshold
+                delta = 10.0 if strong else 5.0
+                volatility_note = "vol↓↓" if strong else "vol↓"
+        else:
+            volatility_note = "vol=init"
 
         target_interval = prev_interval + delta
+        # Apply news bias multipliers from strategy: shorten on strong news, lengthen on neutral/uncertain.
+        try:
+            news_boost, news_cut = strategy.schedule_news_bias_factors()
+        except Exception:
+            news_boost, news_cut = (0.9, 1.15)
+        if news_bias in {"positive", "negative"}:
+            target_interval *= news_boost
+            volatility_note = (volatility_note + " news_boost").strip()
+        elif news_bias in {"neutral", "uncertain"}:
+            target_interval *= news_cut
+            volatility_note = (volatility_note + " news_cut").strip()
+
         target_interval = round(target_interval / 5.0) * 5.0
         target_interval = min(max(target_interval, interval_floor), interval_cap)
         fallback_interval_from_start = target_interval

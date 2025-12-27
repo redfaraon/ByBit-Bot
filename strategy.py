@@ -142,6 +142,7 @@ NEWS_THRESHOLDS = CONTEXT_SPEC.get("news", {})
 NEWS_POSITIVE = float(NEWS_THRESHOLDS.get("positive", 0.55))
 NEWS_NEGATIVE = float(NEWS_THRESHOLDS.get("negative", -0.55))
 NEWS_NEUTRAL_BAND = float(NEWS_THRESHOLDS.get("neutral_band", 0.15))
+SCHEDULE_SPEC = CONTEXT_SPEC.get("schedule", {}) if isinstance(CONTEXT_SPEC.get("schedule", {}), dict) else {}
 
 ATR_SIGMA_HOT = float(THRESHOLDS.get("atr_sigma_hot", 2.5))
 ATR_LIMIT_MULT = float(THRESHOLDS.get("atr_limit_multiplier", 1.7))
@@ -194,6 +195,50 @@ def _news_bias(score: float | None) -> str:
     if abs(score) <= NEWS_NEUTRAL_BAND:
         return "neutral"
     return "uncertain"
+
+
+def schedule_bounds(for_mode: str) -> tuple[float, float]:
+    """
+    Return (min, max) minutes for a given mode: 'offline', 'online', or 'backoff'.
+    Falls back to legacy defaults if not present in SCHEDULE_SPEC.
+    """
+    mode = for_mode.lower().strip()
+    defaults = {
+        "offline": (5.0, 35.0),
+        "online": (10.0, 45.0),
+        "backoff": (25.0, 55.0),
+    }
+    spec = SCHEDULE_SPEC if isinstance(SCHEDULE_SPEC, dict) else {}
+    key_min = f"{mode}_min"
+    key_max = f"{mode}_max"
+    try:
+        min_val = float(spec.get(key_min, defaults.get(mode, (5.0, 35.0))[0]))
+    except Exception:
+        min_val = defaults.get(mode, (5.0, 35.0))[0]
+    try:
+        max_val = float(spec.get(key_max, defaults.get(mode, (5.0, 35.0))[1]))
+    except Exception:
+        max_val = defaults.get(mode, (5.0, 35.0))[1]
+    if max_val < min_val:
+        max_val = min_val
+    return (min_val, max_val)
+
+
+def schedule_news_bias_factors() -> tuple[float, float]:
+    """
+    Return (boost, cut) multipliers based on news bias. boost < 1.0 shortens interval,
+    cut > 1.0 lengthens interval.
+    """
+    spec = SCHEDULE_SPEC if isinstance(SCHEDULE_SPEC, dict) else {}
+    try:
+        boost = float(spec.get("news_bias_boost", 0.9))
+    except Exception:
+        boost = 0.9
+    try:
+        cut = float(spec.get("news_bias_cut", 1.15))
+    except Exception:
+        cut = 1.15
+    return boost, cut
 
 
 def _extract_oi_values(history: Sequence[Any] | None) -> list[float]:
@@ -617,12 +662,25 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
         ema_cross = ctx.tf30.ema20 < ctx.tf30.ema50
     else:
         ema_cross = ctx.tf30.ema20 > ctx.tf30.ema50
-    tp_spec = EVENTS_SPEC.get("tp", {})
+    tp_spec = EVENTS_SPEC.get("tp", {}) if isinstance(EVENTS_SPEC, dict) else {}
     rsi_long_tp = float(tp_spec.get("rsi_long", 70))
     rsi_short_tp = float(tp_spec.get("rsi_short", 30))
     rsi_extreme = (side == "long" and ctx.tf30.rsi >= rsi_long_tp) or (side == "short" and ctx.tf30.rsi <= rsi_short_tp)
     news_against = (side == "long" and ctx.news_bias == "negative") or (side == "short" and ctx.news_bias == "positive")
-    oi_flip = ctx.oi_trend == ("down" if side == "long" else "up")
+    close_spec = EVENTS_SPEC.get("close", {}) if isinstance(EVENTS_SPEC, dict) else {}
+    oi_reverse_enabled = bool(close_spec.get("oi_reverse", True))
+    oi_flip = oi_reverse_enabled and ctx.oi_trend == ("down" if side == "long" else "up")
+    oi_confirm = close_spec.get("oi_reverse_confirm") if isinstance(close_spec, dict) else {}
+    require_price_weak = bool(oi_confirm.get("price_weak")) if isinstance(oi_confirm, dict) else False
+    require_atr_hot = bool(oi_confirm.get("atr_hot")) if isinstance(oi_confirm, dict) else False
+    if oi_flip:
+        if require_price_weak:
+            if side == "long" and ctx.trend_bias not in {"short", "range"}:
+                oi_flip = False
+            elif side == "short" and ctx.trend_bias not in {"long", "range"}:
+                oi_flip = False
+        if oi_flip and require_atr_hot and not ctx.tf30.atr_is_hot:
+            oi_flip = False
     if ema_cross or (rsi_extreme and news_against) or oi_flip:
         close_side = "sell" if side == "long" else "buy"
         reasons: list[str] = []
@@ -643,7 +701,7 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
             order_type="market",
             reason=reason,
             size_pct=1.0,
-            confidence=0.84,
+            confidence=float(close_spec.get("confidence", 0.84)),
             metadata=_with_trace(None, trace),
         )
     return None

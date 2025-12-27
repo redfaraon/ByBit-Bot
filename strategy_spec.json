@@ -23,6 +23,16 @@
       "neutral_band": 0.44
     },
     "schedule_minutes": 10,
+    "schedule": {
+      "offline_min": 4,
+      "offline_max": 35,
+      "online_min": 10,
+      "online_max": 45,
+      "backoff_min": 25,
+      "backoff_max": 55,
+      "news_bias_boost": 0.9,
+      "news_bias_cut": 1.15
+    },
     "env_vars": [
       "RISK_PCT",
       "MIN_DYNAMIC_RISK_PCT",
