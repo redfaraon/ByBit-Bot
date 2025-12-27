@@ -364,13 +364,24 @@ class StrategyContext:
 
     @property
     def trend_bias(self) -> str | None:
+        trend_rules = RULES_SPEC.get("trend", {}) if isinstance(RULES_SPEC, dict) else {}
+        require_secondary = True
+        if isinstance(trend_rules, dict):
+            require_secondary = bool(trend_rules.get("require_secondary_tf", True))
+
         bull30 = self.tf30.ema20 and self.tf30.ema50 and self.tf30.ema20 > self.tf30.ema50
         bull4h = self.tf4h.ema20 and self.tf4h.ema50 and self.tf4h.ema20 > self.tf4h.ema50
         bear30 = self.tf30.ema20 and self.tf30.ema50 and self.tf30.ema20 < self.tf30.ema50
         bear4h = self.tf4h.ema20 and self.tf4h.ema50 and self.tf4h.ema20 < self.tf4h.ema50
-        if bull30 and bull4h:
+        if require_secondary:
+            if bull30 and bull4h:
+                return "long"
+            if bear30 and bear4h:
+                return "short"
+            return None
+        if bull30:
             return "long"
-        if bear30 and bear4h:
+        if bear30:
             return "short"
         return None
 
@@ -587,18 +598,32 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     counter = ctx.countertrend_bias
     if not counter:
         return None
+    counter_rules = RULES_SPEC.get("countertrend", {}) if isinstance(RULES_SPEC, dict) else {}
+    require_atr_calm = True
+    require_oi_flat = True
+    if isinstance(counter_rules, dict):
+        require_atr_calm = bool(counter_rules.get("require_atr_calm", True))
+        require_oi_flat = bool(counter_rules.get("require_oi_flat", True))
+
     atr_calm = (ctx.tf30.atr_mean and ctx.tf30.atr <= ctx.tf30.atr_mean) or False
     oi_flat = ctx.oi_trend != "up"
-    counter_rules = RULES_SPEC.get("countertrend", {})
+    atr_ok = (not require_atr_calm) or atr_calm
+    oi_ok = (not require_oi_flat) or oi_flat
+
     long_rule_ct = counter_rules.get("long", {})
     short_rule_ct = counter_rules.get("short", {})
     if (
         counter == "long"
         and news not in set(long_rule_ct.get("news_block", []))
-        and atr_calm
-        and oi_flat
+        and atr_ok
+        and oi_ok
     ):
-        reason = "countertrend long: RSI extreme, ATR cooling, OI not rising"
+        parts = ["countertrend long: RSI extreme"]
+        if require_atr_calm:
+            parts.append("ATR cooling")
+        if require_oi_flat:
+            parts.append("OI not rising")
+        reason = ", ".join(parts)
         meta: dict[str, Any] = {"regime": "counter"}
         if ENTRY_LADDER:
             meta["ladder_orders"] = ENTRY_LADDER
@@ -623,10 +648,15 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     if (
         counter == "short"
         and news not in set(short_rule_ct.get("news_block", []))
-        and atr_calm
-        and oi_flat
+        and atr_ok
+        and oi_ok
     ):
-        reason = "countertrend short: RSI extreme, ATR cooling, OI not rising"
+        parts = ["countertrend short: RSI extreme"]
+        if require_atr_calm:
+            parts.append("ATR cooling")
+        if require_oi_flat:
+            parts.append("OI not rising")
+        reason = ", ".join(parts)
         meta: dict[str, Any] = {"regime": "counter"}
         if ENTRY_LADDER:
             meta["ladder_orders"] = ENTRY_LADDER
@@ -893,11 +923,30 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     event = should_modify(ctx)
     if event:
         return event
+    trend = ctx.trend_bias or "none"
+    counter = ctx.countertrend_bias or "none"
     return StrategyEvent(
         "skip",
         reason="no confluence",
         confidence=0.0,
-        metadata=_with_trace(None, ["skip", "no_confluence"]),
+        metadata=_with_trace(
+            {
+                "trend_bias": ctx.trend_bias,
+                "countertrend_bias": ctx.countertrend_bias,
+                "news_bias": ctx.news_bias,
+                "oi_trend": ctx.oi_trend,
+                "rsi": ctx.tf30.rsi,
+            },
+            [
+                "skip",
+                "no_confluence",
+                f"trend={trend}",
+                f"counter={counter}",
+                f"news={ctx.news_bias}",
+                f"oi={ctx.oi_trend}",
+                f"rsi={ctx.tf30.rsi:.1f}",
+            ],
+        ),
     )
 def _symbol_allowed(symbol: str) -> bool:
     if not symbol:

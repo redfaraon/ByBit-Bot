@@ -14242,6 +14242,138 @@ def run_cycle():
         )
     except Exception:
         pass
+
+    # Optional: filter out symbols that are not tradeable with current usable margin (keeps open positions).
+    try:
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        affordability = mode.get("affordability") if isinstance(mode.get("affordability"), dict) else {}
+        affordability_enabled = bool(affordability.get("enabled", False))
+        affordability_fill_fallback = bool(affordability.get("fill_from_fallback", True))
+        affordability_max_symbols = int(mode.get("max_symbols") or 8)
+    except Exception:
+        affordability_enabled = False
+        affordability_fill_fallback = True
+        affordability_max_symbols = 8
+
+    if affordability_enabled and manual_universe_built:
+        try:
+            _equity_now, _available_now, _ = fetch_usdt_equity(ex)
+        except Exception:
+            _equity_now, _available_now = None, None
+        usable_margin = None
+        try:
+            if _available_now is not None and math.isfinite(_available_now) and _available_now > 0:
+                usable_margin = float(_available_now) * float(ORDER_MARGIN_UTILIZATION or 1.0)
+        except Exception:
+            usable_margin = None
+        try:
+            leverage_used = float(LEVERAGE or 1.0)
+        except Exception:
+            leverage_used = 1.0
+        if not math.isfinite(leverage_used) or leverage_used <= 0:
+            leverage_used = 1.0
+
+        if usable_margin is not None and math.isfinite(usable_margin) and usable_margin > 0:
+            def _min_required_margin(sym_raw: str) -> float | None:
+                sym_norm = normalize_symbol(sym_raw, record_missing=False) or sym_raw
+                try:
+                    trade_rules = _get_symbol_trade_rules(ex, sym_norm)
+                except Exception:
+                    return None
+                try:
+                    min_qty = float(trade_rules.get("min_qty") or 0.0)
+                except Exception:
+                    min_qty = 0.0
+                try:
+                    min_notional_ex = float(trade_rules.get("min_notional") or 0.0)
+                except Exception:
+                    min_notional_ex = 0.0
+                try:
+                    env_min = float(MIN_NOTIONAL_USDT or 0.0)
+                except Exception:
+                    env_min = 0.0
+                min_notional = max(min_notional_ex, env_min)
+
+                px = None
+                try:
+                    t = ex.fetch_ticker(sym_norm)
+                    if isinstance(t, dict):
+                        px = safe_float(t.get("last") or t.get("close"))
+                        if (px is None or not math.isfinite(px) or px <= 0) and isinstance(t.get("info"), dict):
+                            info = t["info"]
+                            px = safe_float(info.get("lastPrice") or info.get("markPrice") or info.get("price"))
+                except Exception:
+                    px = None
+                try:
+                    if px is not None and math.isfinite(px) and px > 0 and min_qty and min_qty > 0:
+                        min_notional = max(min_notional, float(min_qty) * float(px))
+                except Exception:
+                    pass
+
+                if min_notional <= 0 or not math.isfinite(min_notional):
+                    return None
+                try:
+                    return float(min_notional) / float(leverage_used) if leverage_used else float(min_notional)
+                except Exception:
+                    return None
+
+            kept: list[str] = []
+            kept_set: set[str] = set()
+            dropped: list[tuple[str, float]] = []
+            for sym in manual_universe_built:
+                sym_norm = normalize_symbol(sym, record_missing=False) or sym
+                sym_norm = str(sym_norm).strip()
+                if not sym_norm:
+                    continue
+                sym_norm = sym_norm.upper()
+                if sym_norm in kept_set:
+                    continue
+                if sym_norm in position_symbols:
+                    kept.append(sym_norm)
+                    kept_set.add(sym_norm)
+                    continue
+                req_margin = _min_required_margin(sym_norm)
+                if req_margin is None:
+                    kept.append(sym_norm)
+                    kept_set.add(sym_norm)
+                    continue
+                if req_margin <= usable_margin + 1e-9:
+                    kept.append(sym_norm)
+                    kept_set.add(sym_norm)
+                else:
+                    dropped.append((sym_norm, float(req_margin)))
+
+            if affordability_fill_fallback and len(kept) < affordability_max_symbols:
+                fallback_universe = strategy.CONTEXT_SPEC.get("universe") or []
+                for raw in fallback_universe:
+                    if len(kept) >= affordability_max_symbols:
+                        break
+                    sym_candidate = normalize_symbol(str(raw).strip(), record_missing=False)
+                    if not sym_candidate:
+                        continue
+                    sym_candidate = str(sym_candidate).strip().upper()
+                    if not sym_candidate or sym_candidate in kept_set or sym_candidate in position_symbols:
+                        continue
+                    req_margin = _min_required_margin(sym_candidate)
+                    if req_margin is None or req_margin <= usable_margin + 1e-9:
+                        kept.append(sym_candidate)
+                        kept_set.add(sym_candidate)
+
+            if dropped:
+                dropped_preview = ", ".join(f"{s}({m:.2f})" for s, m in dropped[:6])
+                if len(dropped) > 6:
+                    dropped_preview = f"{dropped_preview}, +{len(dropped) - 6} more"
+                log(
+                    f"[MANUAL] Universe affordability filter: usable={usable_margin:.2f} USDT (avail={_available_now:.2f}, util={ORDER_MARGIN_UTILIZATION}); "
+                    f"lev={leverage_used:.0f}x dropped={len(dropped)} [{dropped_preview}] -> pairs={', '.join(kept) if kept else 'none'}",
+                    Fore.LIGHTBLACK_EX,
+                )
+            manual_universe_built = kept
+
     try:
         MANUAL_STRATEGY_SYMBOLS.clear()
         MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})
@@ -14307,11 +14439,10 @@ def run_cycle():
             side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
         px_text = f"{px_ref:.4f}" if isinstance(px_ref, (int, float)) and math.isfinite(px_ref or 0) else "n/a"
         open_orders_symbol_snapshot = open_orders_prefetch.get(sym) or []
-        if sym and sym.upper().startswith("DOGE"):
-            log(
-                f"[DEBUG] {sym}: open_orders(start)={_summarize_open_orders_for_log(open_orders_symbol_snapshot)}",
-                Fore.LIGHTBLACK_EX,
-            )
+        log(
+            f"[DEBUG] {sym}: open_orders(start)={_summarize_open_orders_for_log(open_orders_symbol_snapshot)}",
+            Fore.LIGHTBLACK_EX,
+        )
         prot_orders_snapshot = _extract_protection_orders(open_orders_symbol_snapshot)
         stop_levels: list[float] = []
         take_levels: list[float] = []

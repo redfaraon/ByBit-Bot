@@ -42,6 +42,10 @@
       "source": "news",
       "max_symbols": 8,
       "include_positions": true,
+      "affordability": {
+        "enabled": true,
+        "fill_from_fallback": true
+      },
       "news_priority": {
         "min_items": 1
       }
@@ -70,6 +74,7 @@
   },
   "rules": {
     "trend": {
+      "require_secondary_tf": false,
       "long": {
         "rsi_max": 68,
         "funding_min": -0.0004,
@@ -96,6 +101,8 @@
       }
     },
     "countertrend": {
+      "require_atr_calm": true,
+      "require_oi_flat": true,
       "long": {
         "rsi_max": 28,
         "news_block": [
