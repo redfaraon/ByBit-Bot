@@ -14470,6 +14470,30 @@ def run_cycle():
                         )
                         log(context_msg, Fore.LIGHTBLACK_EX)
                         log_user(context_msg, color=Fore.LIGHTBLACK_EX)
+                        try:
+                            if bool(manual_ctx.has_position) and not bool(strategy.is_symbol_monitored(sym)):
+                                watchlist = getattr(strategy, "WATCHLIST", []) or []
+                                watchlist_count = len(watchlist) if isinstance(watchlist, list) else 0
+                                sym_upper = str(sym).upper()
+                                sym_base = sym_upper.split(":")[0]
+                                base_monitored = (
+                                    sym_base in {str(item).upper() for item in watchlist} if isinstance(watchlist, list) else False
+                                )
+                                try:
+                                    spec_path = Path(getattr(strategy, "__file__", "")).with_name("strategy_spec.json")
+                                except Exception:
+                                    spec_path = None
+                                spec_display = str(spec_path) if spec_path else "strategy_spec.json"
+                                watchlist_preview = ", ".join(list(watchlist)[:12]) if isinstance(watchlist, list) else ""
+                                log(
+                                    f"[MANUAL][WATCHLIST] {sym}: position is open but symbol not monitored; "
+                                    f"base={sym_base} base_monitored={base_monitored} watchlist_size={watchlist_count} "
+                                    f"source={spec_display}"
+                                    + (f" watchlist_preview={watchlist_preview}" if watchlist_preview else ""),
+                                    Fore.YELLOW,
+                                )
+                        except Exception:
+                            pass
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
                         confidence_value = manual_event.confidence if manual_event.confidence is not None else 0.0
                         signal_msg = (

@@ -848,3 +848,7 @@ def _symbol_allowed(symbol: str) -> bool:
         return True
     base = sym_upper.split(":")[0]
     return base in WATCHLIST
+
+
+def is_symbol_monitored(symbol: str) -> bool:
+    return _symbol_allowed(symbol)
