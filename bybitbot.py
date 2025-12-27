@@ -12,11 +12,61 @@ import subprocess
 import threading
 import sys
 import traceback
+import io
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from dotenv import dotenv_values
+
+
+def _kill_stale_backup_processes() -> None:
+    """Terminate leftover backup/legacy python processes to avoid duplicate polling/execution."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,cmd"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return
+    current_pid = os.getpid()
+    killed: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("PID "):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmd = parts[1]
+        if pid == current_pid:
+            continue
+        if (
+            "backups/bybitbot_impl" not in cmd
+            and "bybitbot_impl_branch" not in cmd
+            and "backups/snapshots" not in cmd
+        ):
+            continue
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+                time.sleep(0.2)
+                if sig == signal.SIGTERM:
+                    continue
+            except ProcessLookupError:
+                break
+            except Exception:
+                continue
+        killed.append(f"{pid}:{cmd[:120]}")
+    if killed:
+        print(f"[BOOT] Killed stale backup processes: {', '.join(killed)}", file=sys.stderr)
 
 
 def _resolve_repo_root(script_path: Path) -> Path:
@@ -623,33 +673,55 @@ def _current_head() -> str | None:
     return head or None
 
 
-def _materialize_commit_script(commit_hash: str) -> Path | None:
-    target = commit_hash.strip()
+def _materialize_ref_snapshot(ref: str) -> Path | None:
+    target = ref.strip()
     if not target:
         return None
-    cmd = ["git", "show", f"{target}:bybitbot_impl.py"]
+    backups_dir = REPO_ROOT / "backups"
+    snapshots_dir = backups_dir / "snapshots"
+    try:
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    safe_target = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in target)
+    snapshot_dir = snapshots_dir / safe_target
+    if snapshot_dir.exists():
+        try:
+            shutil.rmtree(snapshot_dir)
+        except Exception:
+            pass
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
     try:
         result = subprocess.run(
-            cmd,
+            ["git", "archive", "--format=tar", target],
             capture_output=True,
-            text=True,
             check=True,
             cwd=REPO_ROOT,
         )
     except Exception:
         return None
-    content = result.stdout
-    if not content:
+    if not result.stdout:
         return None
-    backups_dir = REPO_ROOT / "backups"
-    backups_dir.mkdir(exist_ok=True)
-    script_path = backups_dir / f"bybitbot_impl_commit_{target}.py"
     try:
-        script_path.write_text(content, encoding="utf-8")
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as tar:
+            tar.extractall(snapshot_dir)
     except Exception:
         return None
-    _sync_backup_resources(backups_dir)
-    return script_path
+    _sync_backup_resources(snapshot_dir)
+    impl_path = snapshot_dir / "bybitbot_impl.py"
+    if not impl_path.exists():
+        return None
+    return impl_path
+
+
+def _materialize_commit_script(commit_hash: str) -> Path | None:
+    target = commit_hash.strip()
+    if not target:
+        return None
+    return _materialize_ref_snapshot(target)
 
 
 def _locate_target_version_script(version: str) -> Path | None:
@@ -674,36 +746,25 @@ def _locate_target_version_script(version: str) -> Path | None:
     return None
 
 
+def _resolve_target_script(target_version: str) -> Path | None:
+    target = (target_version or "").strip()
+    if not target:
+        return None
+    target_lower = target.lower()
+    if target_lower.startswith("branch:"):
+        return _materialize_branch_script(target.split(":", 1)[1])
+    if target_lower.startswith("commit:"):
+        return _materialize_commit_script(target.split(":", 1)[1])
+    return _locate_target_version_script(target)
+
+
 def _materialize_branch_script(branch_name: str) -> Path | None:
     target = branch_name.strip()
     if not target:
         return None
 
-    def try_show(ref: str) -> Path | None:
-        cmd = ["git", "show", f"{ref}:bybitbot_impl.py"]
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=REPO_ROOT,
-            )
-        except Exception:
-            return None
-        content = result.stdout
-        if not content:
-            return None
-        backups_dir = REPO_ROOT / "backups"
-        backups_dir.mkdir(exist_ok=True)
-        safe_target = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in ref)
-        script_path = backups_dir / f"bybitbot_impl_branch_{safe_target}.py"
-        try:
-            script_path.write_text(content, encoding="utf-8")
-        except Exception:
-            return None
-        _sync_backup_resources(backups_dir)
-        return script_path
+    def try_snapshot(ref: str) -> Path | None:
+        return _materialize_ref_snapshot(ref)
 
     candidate_refs: list[str] = []
 
@@ -716,7 +777,7 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
         candidate_refs.append(target)
 
     for ref in candidate_refs:
-        path = try_show(ref)
+        path = try_snapshot(ref)
         if path:
             return path
 
@@ -733,7 +794,7 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
             pass
         else:
             for ref in (target, f"origin/{target}"):
-                path = try_show(ref)
+                path = try_snapshot(ref)
                 if path:
                     return path
 
@@ -749,7 +810,7 @@ def _materialize_branch_script(branch_name: str) -> Path | None:
         except Exception:
             pass
         else:
-            path = try_show(ref)
+            path = try_snapshot(ref)
             if path:
                 return path
 
@@ -1202,12 +1263,23 @@ def _run_script_candidate(
         env["BYBITBOT_SUPPRESS_ROUTINE_COUNTER"] = "1"
     else:
         env.pop("BYBITBOT_SUPPRESS_ROUTINE_COUNTER", None)
-    repo_path = str(REPO_ROOT)
+    repo_root = REPO_ROOT
+    candidate_root = script_path.parent
+    if (candidate_root / "strategy.py").exists():
+        repo_root = candidate_root
+    repo_path = str(repo_root)
     existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
         env["PYTHONPATH"] = repo_path + os.pathsep + existing_pythonpath
     else:
         env["PYTHONPATH"] = repo_path
+    try:
+        parts = script_path.resolve().parts
+    except Exception:
+        parts = ()
+    if parts and "backups" in parts and "snapshots" in parts:
+        snapshot_dir = script_path.parent
+        print(f"[BOOT] Using snapshot dir: {snapshot_dir}", file=sys.stderr)
     result = subprocess.run([sys.executable, str(script_path)], env=env)
     return result.returncode == 0
 
@@ -1375,6 +1447,8 @@ def main():
     else:
         _refresh_state_paths()
 
+    _kill_stale_backup_processes()
+
     branch_name, head_updated = _update_current_branch()
     if head_updated:
         new_head = _current_head()
@@ -1397,7 +1471,7 @@ def main():
 
     target_version = (os.getenv("TARGET_VERSION") or "").strip()
     if target_version:
-        target_script = _locate_target_version_script(target_version)
+        target_script = _resolve_target_script(target_version)
         if not target_script:
             print(f"[BOOT] TARGET_VERSION={target_version} не найден, используем текущую версию.", file=sys.stderr)
         else:

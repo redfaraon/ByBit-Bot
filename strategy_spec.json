@@ -1,15 +1,15 @@
 {
-  "version": "1.1.1",
+  "version": "1.1.4",
   "context": {
     "universe": [
-      "BTC/USDT",
-      "ETH/USDT",
-      "SOL/USDT",
       "XRP/USDT",
       "DOGE/USDT",
-      "TON/USDT",
       "ADA/USDT",
-      "AVAX/USDT"
+      "TON/USDT",
+      "SOL/USDT",
+      "AVAX/USDT",
+      "LINK/USDT",
+      "TRX/USDT"
     ],
     "timeframes": {
       "primary": "30m",
@@ -18,9 +18,9 @@
       "funding": "8h"
     },
     "news": {
-      "positive": 0.55,
-      "negative": -0.55,
-      "neutral_band": 0.15
+      "positive": 0.45,
+      "negative": -0.45,
+      "neutral_band": 0.44
     },
     "schedule_minutes": 10,
     "env_vars": [
@@ -29,79 +29,84 @@
       "MAX_DYNAMIC_RISK_PCT"
     ],
     "universe_mode": {
-      "source": "fixed",                // fixed | news
-      "max_symbols": 8,                 // cap, includes symbols with open positions
-      "include_positions": true         // ensure open-position symbols are always in universe
+      "source": "news",
+      "max_symbols": 8,
+      "include_positions": true,
+      "news_priority": {
+        "min_items": 1
+      }
     }
   },
   "risk": {
-    "base_pct": 0.02,
-    "min_pct": 0.01,
-    "max_pct": 0.0375
+    "base_pct": 0.05,
+    "min_pct": 0.03,
+    "max_pct": 0.12
   },
   "thresholds": {
-    "atr_sigma_hot": 2.5,
-    "atr_limit_multiplier": 1.7,
-    "atr_range_ratio": 0.008,
-    "atr_extreme_ratio": 0.025,
-    "oi_change_pct": 0.012
+    "atr_sigma_hot": 3.5,
+    "atr_limit_multiplier": 1.4,
+    "atr_range_ratio": 0.01,
+    "atr_extreme_ratio": 0.04,
+    "oi_change_pct": 0.004
   },
   "sizing": {
     "risk_multiplier": {
-      "trend": 1.15,
-      "counter": 0.55,
+      "trend": 1.0,
+      "counter": 0.6,
       "flat": 0.4
     },
-    "min_pct": 0.0025,
-    "max_pct": 0.05
+    "min_pct": 0.01,
+    "max_pct": 0.15
   },
   "rules": {
     "trend": {
       "long": {
-        "rsi_max": 65,
-        "funding_min": -0.0002,
+        "rsi_max": 68,
+        "funding_min": -0.0004,
         "news_block": [
           "negative"
         ],
-        "require_oi_up": true,
+        "require_oi_up": false,
         "confidence": {
-          "market": 0.82,
-          "limit": 0.78
+          "market": 0.55,
+          "limit": 0.45
         }
       },
       "short": {
-        "rsi_min": 35,
-        "funding_max": 0.0002,
+        "rsi_min": 32,
+        "funding_max": 0.0004,
         "news_block": [
           "positive"
         ],
-        "require_oi_up": true,
+        "require_oi_up": false,
         "confidence": {
-          "market": 0.82,
-          "limit": 0.78
+          "market": 0.55,
+          "limit": 0.45
         }
       }
     },
     "countertrend": {
       "long": {
-        "rsi_max": 30,
+        "rsi_max": 28,
         "news_block": [
-          "negative"
-        ],
-        "confidence": 0.72
-      },
-      "short": {
-        "rsi_min": 70,
-        "news_block": [
+          "negative",
           "positive"
         ],
-        "confidence": 0.72
+        "confidence": 0.45
+      },
+      "short": {
+        "rsi_min": 72,
+        "news_block": [
+          "negative",
+          "positive"
+        ],
+        "confidence": 0.45
       }
     },
     "flat": {
       "rsi_band": [
-        45,
-        55
+        43,
+        57
       ]
     }
   },
@@ -112,13 +117,24 @@
       "sell": 1.002
     },
     "entry_ladder": [
-      [0.6, 0.0],
-      [0.4, 0.6]
+      [
+        0.7,
+        0.0
+      ],
+      [
+        0.3,
+        0.6
+      ]
     ],
     "tp_ladder": [
-      [0.33, 1.2],
-      [0.33, 2.0],
-      [0.34, 3.0]
+      [
+        0.5,
+        1.2
+      ],
+      [
+        0.5,
+        2.2
+      ]
     ],
     "tp": {
       "atr_multiple": 2.0,
@@ -131,14 +147,14 @@
     },
     "modify_position": {
       "rsi_long": [
-        40,
+        42,
         65
       ],
       "rsi_short": [
         35,
-        60
+        58
       ],
-      "confidence": 0.58,
+      "confidence": 0.5,
       "scale": 0.5
     }
   },
@@ -159,12 +175,22 @@
     ]
   },
   "execution": {
+    "market_type": "linear",
     "manual_only": true,
-    "leverage": 10,
+    "leverage": 27,
     "order_margin_utilization": 0.95,
-    "sl_atr": 1.6,
-    "tp_atr": 2.8,
-    "trailing_atr_mult": 1.0,
+    "sl_atr": 1.4,
+    "tp_atr": 2.2,
+    "trailing_atr_mult": 0.8,
+    "trailing_dynamic_trigger_atr": 1.4,
+    "trailing_dynamic_factor": 0.65,
+    "trailing_dynamic_min_atr": 0.35,
+    "trailing_per_symbol": {},
+    "trailing_per_regime": {},
+    "max_trailing_loss_pct": 0.0,
+    "min_position_size": 0.0,
+    "min_notional_usdt": 0.1,
+    "news_weight": 1.0,
     "max_open_positions": 4,
     "max_positions_per_base": 1,
     "default_next_run_minutes": 10,
@@ -174,6 +200,10 @@
     "fallbacks": {
       "market_on_timeout": true,
       "cancel_on_conflict": true
-    }
+    },
+    "pseudotrail_min_improve_atr": 0.35,
+    "pseudotrail_min_stop_gap_atr": 0.6,
+    "pseudotrail_stop_lock_factor": 0.35,
+    "pseudotrail_tp_extend_factor": 0.25
   }
 }

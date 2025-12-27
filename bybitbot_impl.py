@@ -7,6 +7,7 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 """
 
 import os
+import importlib
 import atexit
 import shutil
 import stat
@@ -49,6 +50,37 @@ STRATEGY_ENV_WHITELIST = {str(var).upper() for var in strategy.CONTEXT_SPEC.get(
 STRATEGY_RISK_SPEC = strategy.SPEC.get("risk", {})
 STRATEGY_EXECUTION_SPEC = strategy.SPEC.get("execution", {})
 STRATEGY_PROVIDERS_SPEC = strategy.SPEC.get("providers", {})
+MODULE_AUTO_RELOAD_ENABLED = os.getenv("BYBITBOT_MODULE_AUTO_RELOAD", "1").strip().lower() not in {"0", "false", "no"}
+_MODULE_RELOAD_LOCK = threading.Lock()
+_MODULE_RELOAD_FINGERPRINTS: dict[str, float] = {}
+
+
+def _refresh_strategy_specs() -> None:
+    global STRATEGY_ENV_WHITELIST, STRATEGY_RISK_SPEC, STRATEGY_EXECUTION_SPEC, STRATEGY_PROVIDERS_SPEC
+    try:
+        context_spec = getattr(strategy, "CONTEXT_SPEC", None)
+    except Exception:
+        context_spec = None
+    if not isinstance(context_spec, dict):
+        context_spec = {}
+    env_vars = context_spec.get("env_vars")
+    if not isinstance(env_vars, (list, tuple, set)):
+        env_vars = []
+    STRATEGY_ENV_WHITELIST = {
+        str(var).upper() for var in env_vars if isinstance(var, str)
+    }
+    try:
+        spec_root = getattr(strategy, "SPEC", None)
+    except Exception:
+        spec_root = None
+    if not isinstance(spec_root, dict):
+        spec_root = {}
+    risk_spec = spec_root.get("risk")
+    exec_spec = spec_root.get("execution")
+    providers_spec = spec_root.get("providers")
+    STRATEGY_RISK_SPEC = risk_spec if isinstance(risk_spec, dict) else {}
+    STRATEGY_EXECUTION_SPEC = exec_spec if isinstance(exec_spec, dict) else {}
+    STRATEGY_PROVIDERS_SPEC = providers_spec if isinstance(providers_spec, dict) else {}
 
 
 def _strategy_env_value(var_name: str) -> str | None:
@@ -284,7 +316,7 @@ AI_PROVIDER_CURRENT = "openai"
 DEEPSEEK_API_KEY: str | None = None
 DEEPSEEK_API_BASE: str | None = None
 DEEPSEEK_MODEL: str | None = None
-AI_OFFLINE_CANCEL_ENTRIES = True
+AI_OFFLINE_CANCEL_ENTRIES = False
 _AI_OFFLINE_NOTICE_EMITTED_CYCLE: int | None = None
 _AI_OFFLINE_ACTIVE_CYCLE: int | None = None
 OFFLINE_TRADING_ENABLED = False
@@ -839,6 +871,7 @@ AUTO_DIRECTION_MIN_CONFIDENCE: float = max(
 )
 DEFAULT_OPEN_MIN_CONFIDENCE: float = 0.7
 OPEN_MIN_CONFIDENCE: float = DEFAULT_OPEN_MIN_CONFIDENCE
+MIN_NOTIONAL_USDT: float = 0.7
 
 TELEGRAM_DECISIONS_VERBOSE = False
 _LAST_COMMIT_HASH: Optional[str] = None
@@ -855,6 +888,7 @@ TRAILING_DYNAMIC_TRIGGER_ATR: float = 1.4
 TRAILING_DYNAMIC_FACTOR: float = 0.65
 TRAILING_DYNAMIC_MIN_ATR: float = 0.35
 PSEUDOTRAIL_MIN_IMPROVE_ATR: float = 0.35
+PSEUDOTRAIL_MIN_STOP_GAP_ATR: float = 0.6
 PSEUDOTRAIL_STOP_LOCK_FACTOR: float = 0.35
 PSEUDOTRAIL_TP_EXTEND_FACTOR: float = 0.25
 MIN_NEXT_RUN_MINUTES: float = 5.0
@@ -900,6 +934,9 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("config", "Настройки бота и окружения"),
     ("sandbox", "Управление песочницами"),
     ("version", "Текущая версия и changelog"),
+    ("stable", "Переключиться на stable/backup"),
+    ("head", "Переключиться на последний коммит текущей ветки"),
+    ("update", "Переключиться на последнюю версию"),
     ("ai", "Диагностика AI payload"),
 ]
 COMMANDS_HELP_SECTIONS = [
@@ -1561,6 +1598,7 @@ def _sync_module_configs() -> None:
         "TRAILING_DYNAMIC_FACTOR": TRAILING_DYNAMIC_FACTOR,
         "TRAILING_DYNAMIC_MIN_ATR": TRAILING_DYNAMIC_MIN_ATR,
         "PSEUDOTRAIL_MIN_IMPROVE_ATR": PSEUDOTRAIL_MIN_IMPROVE_ATR,
+        "PSEUDOTRAIL_MIN_STOP_GAP_ATR": PSEUDOTRAIL_MIN_STOP_GAP_ATR,
         "PSEUDOTRAIL_STOP_LOCK_FACTOR": PSEUDOTRAIL_STOP_LOCK_FACTOR,
         "PSEUDOTRAIL_TP_EXTEND_FACTOR": PSEUDOTRAIL_TP_EXTEND_FACTOR,
         "PSEUDOTRAIL_MAX_TAKE_EXTENDS": PSEUDOTRAIL_MAX_TAKE_EXTENDS,
@@ -1580,6 +1618,8 @@ def _sync_module_configs() -> None:
         protect_bindings["send_tg"] = send_tg_fn
     if truthy_flag_fn:
         protect_bindings["_is_truthy_flag"] = truthy_flag_fn
+    if cancel_order_fn:
+        protect_bindings["cancel_order_by_id"] = cancel_order_fn
     if resolve_symbol_fn:
         protect_bindings["_resolve_symbol_alias"] = resolve_symbol_fn
     if infer_market_fn:
@@ -1589,6 +1629,100 @@ def _sync_module_configs() -> None:
     if atr_fn:
         protect_bindings["atr"] = atr_fn
     protection_engine.configure(protect_bindings)
+
+
+def _module_reload_targets() -> list[tuple[str, types.ModuleType]]:
+    return [
+        ("strategy", strategy),
+        ("strategy_context", strategy_context),
+        ("strategy_executor", strategy_executor),
+        ("order_utils", order_utils),
+        ("execution_engine", execution_engine),
+        ("protection_engine", protection_engine),
+        ("order_cleanup", order_cleanup),
+        ("execution_utils", execution_utils),
+        ("trailing_utils", trailing_utils),
+        ("protection_utils", protection_utils),
+        ("account_context", account_context),
+        ("universe_builder", universe_builder),
+    ]
+
+
+def _module_source_path(module: types.ModuleType) -> Optional[Path]:
+    try:
+        raw_path = getattr(module, "__file__", None)
+    except Exception:
+        raw_path = None
+    if not raw_path:
+        return None
+    try:
+        path = Path(raw_path).resolve()
+    except Exception:
+        return None
+    if path.suffix == ".pyc":
+        candidate = path.with_suffix(".py")
+        if candidate.exists():
+            path = candidate
+    return path if path.exists() else None
+
+
+def _module_fingerprint(name: str, module: types.ModuleType) -> Optional[float]:
+    watch_paths: list[Path] = []
+    module_path = _module_source_path(module)
+    if module_path is not None:
+        watch_paths.append(module_path)
+        if name == "strategy":
+            spec_path = module_path.with_name("strategy_spec.json")
+            if spec_path.exists():
+                watch_paths.append(spec_path)
+    mtimes: list[float] = []
+    for path in watch_paths:
+        try:
+            mtimes.append(path.stat().st_mtime)
+        except Exception:
+            continue
+    if not mtimes:
+        return None
+    return max(mtimes)
+
+
+def _reload_local_modules() -> None:
+    if not MODULE_AUTO_RELOAD_ENABLED:
+        return
+    with _MODULE_RELOAD_LOCK:
+        targets = _module_reload_targets()
+        changed: list[str] = []
+        fingerprints: dict[str, float] = {}
+        for name, module in targets:
+            fingerprint = _module_fingerprint(name, module)
+            if fingerprint is None:
+                continue
+            fingerprints[name] = fingerprint
+            prev = _MODULE_RELOAD_FINGERPRINTS.get(name)
+            if prev is None or fingerprint != prev:
+                changed.append(name)
+        if not changed:
+            for name, fp in fingerprints.items():
+                _MODULE_RELOAD_FINGERPRINTS.setdefault(name, fp)
+            return
+        importlib.invalidate_caches()
+        reloaded: list[str] = []
+        failed: list[tuple[str, Exception]] = []
+        for name, module in targets:
+            try:
+                importlib.reload(module)
+                reloaded.append(name)
+            except Exception as exc:
+                failed.append((name, exc))
+        _refresh_strategy_specs()
+        _sync_module_configs()
+        _bind_module_exports()
+        if reloaded:
+            log(f"[HOTRELOAD] Reloaded modules: {', '.join(reloaded)}", Fore.LIGHTBLACK_EX)
+        for name, exc in failed:
+            log(f"[WARN] Module reload failed for {name}: {exc}", Fore.YELLOW)
+        for name, fp in fingerprints.items():
+            _MODULE_RELOAD_FINGERPRINTS[name] = fp
 
 
 def _round_qty_up(value: float, step: float) -> float:
@@ -1745,7 +1879,7 @@ def _sync_with_remote() -> None:
         return
     try:
         status_proc = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -3991,6 +4125,7 @@ def _parse_telegram_command_list(raw: str | None) -> list[dict[str, str]]:
 def refresh_settings():
     _configure_state_paths()
     load_environment()
+    _refresh_strategy_specs()
     stored_api_key, stored_api_secret = _load_bybit_credentials()
     if stored_api_key and not os.getenv("BYBIT_API_KEY"):
         os.environ["BYBIT_API_KEY"] = stored_api_key
@@ -4036,7 +4171,7 @@ def refresh_settings():
     global TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_COMMANDS_LIST, TELEGRAM_RELEASE_THREAD_ID, TELEGRAM_COMMAND_THREAD_ID
     global TELEGRAM_INPROGRESS_THREAD_ID, TELEGRAM_RESULTS_THREAD_ID, TELEGRAM_STATUS_THREAD_ID, TELEGRAM_TRADE_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
     global TRAILING_DYNAMIC_TRIGGER_ATR, TRAILING_DYNAMIC_FACTOR, TRAILING_DYNAMIC_MIN_ATR
-    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
+    global PSEUDOTRAIL_MIN_IMPROVE_ATR, PSEUDOTRAIL_MIN_STOP_GAP_ATR, PSEUDOTRAIL_STOP_LOCK_FACTOR, PSEUDOTRAIL_TP_EXTEND_FACTOR
     global USER_ID, USER_LABEL, TELEGRAM_MESSAGE_PREFIX, TG_TOPIC_ID, TG_GIT_TOPIC_ID
     global AI_SUPPORT_MODEL, SUPPORT_MAX_CONTEXT_BYTES, INPROGRESS_WIP_ENABLED
     global IMMEDIATE_CLOSE_ON_BREACH
@@ -4148,20 +4283,59 @@ def refresh_settings():
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
     try:
-        PSEUDOTRAIL_MIN_IMPROVE_ATR = float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+        pseudo_min_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_min_improve_atr")
+        PSEUDOTRAIL_MIN_IMPROVE_ATR = (
+            float(pseudo_min_spec)
+            if pseudo_min_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_MIN_IMPROVE_ATR", str(PSEUDOTRAIL_MIN_IMPROVE_ATR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_MIN_IMPROVE_ATR = 0.35
     try:
-        PSEUDOTRAIL_STOP_LOCK_FACTOR = float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+        pseudo_gap_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_min_stop_gap_atr")
+        PSEUDOTRAIL_MIN_STOP_GAP_ATR = (
+            float(pseudo_gap_spec)
+            if pseudo_gap_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_MIN_STOP_GAP_ATR", str(PSEUDOTRAIL_MIN_STOP_GAP_ATR)))
+        )
+    except (TypeError, ValueError):
+        PSEUDOTRAIL_MIN_STOP_GAP_ATR = 0.6
+    try:
+        pseudo_lock_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_stop_lock_factor")
+        PSEUDOTRAIL_STOP_LOCK_FACTOR = (
+            float(pseudo_lock_spec)
+            if pseudo_lock_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_STOP_LOCK_FACTOR", str(PSEUDOTRAIL_STOP_LOCK_FACTOR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_STOP_LOCK_FACTOR = 0.35
     try:
-        PSEUDOTRAIL_TP_EXTEND_FACTOR = float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+        pseudo_tp_spec = STRATEGY_EXECUTION_SPEC.get("pseudotrail_tp_extend_factor")
+        PSEUDOTRAIL_TP_EXTEND_FACTOR = (
+            float(pseudo_tp_spec)
+            if pseudo_tp_spec is not None
+            else float(os.getenv("PSEUDOTRAIL_TP_EXTEND_FACTOR", str(PSEUDOTRAIL_TP_EXTEND_FACTOR)))
+        )
     except (TypeError, ValueError):
         PSEUDOTRAIL_TP_EXTEND_FACTOR = 0.25
     PSEUDOTRAIL_MIN_IMPROVE_ATR = max(0.0, PSEUDOTRAIL_MIN_IMPROVE_ATR)
+    PSEUDOTRAIL_MIN_STOP_GAP_ATR = max(0.0, PSEUDOTRAIL_MIN_STOP_GAP_ATR)
     PSEUDOTRAIL_STOP_LOCK_FACTOR = max(0.0, PSEUDOTRAIL_STOP_LOCK_FACTOR)
     PSEUDOTRAIL_TP_EXTEND_FACTOR = max(0.0, PSEUDOTRAIL_TP_EXTEND_FACTOR)
+    log(
+        "[CONFIG][TRAIL] trailing_atr_mult={:.2f} dyn_trigger={:.2f} dyn_factor={:.2f} dyn_min={:.2f} "
+        "pseudo_min_improve={:.2f} pseudo_min_gap_atr={:.2f} pseudo_lock_factor={:.2f} pseudo_tp_extend={:.2f}".format(
+            TRAILING_ATR_MULT,
+            TRAILING_DYNAMIC_TRIGGER_ATR,
+            TRAILING_DYNAMIC_FACTOR,
+            TRAILING_DYNAMIC_MIN_ATR,
+            PSEUDOTRAIL_MIN_IMPROVE_ATR,
+            PSEUDOTRAIL_MIN_STOP_GAP_ATR,
+            PSEUDOTRAIL_STOP_LOCK_FACTOR,
+            PSEUDOTRAIL_TP_EXTEND_FACTOR,
+        ),
+        Fore.LIGHTBLACK_EX,
+    )
     # Scheduling bounds (online/offline) from .env
     global MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES
     global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
@@ -4315,7 +4489,41 @@ def refresh_settings():
         AUTO_MARGIN_CONFIDENCE_MULT = DEFAULT_AUTO_MARGIN_CONFIDENCE_MULT
     AI_LOG_MAX_BYTES = _bytes_from_env("BYBIT_AI_LOG_MAX_MB", DEFAULT_AI_LOG_MAX_MB)
     AI_LOG_BACKUPS = max(1, int(os.getenv("BYBIT_AI_LOG_BACKUPS", str(AI_LOG_BACKUPS))))
-    MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", 5.0))
+    min_notional_spec = STRATEGY_EXECUTION_SPEC.get("min_notional_usdt")
+    min_notional_env_raw = os.getenv("MIN_NOTIONAL_USDT")
+    min_notional_source = "code_default"
+    if min_notional_spec is not None:
+        try:
+            MIN_NOTIONAL_USDT = float(min_notional_spec)
+            min_notional_source = "strategy_spec.json"
+        except (TypeError, ValueError):
+            MIN_NOTIONAL_USDT = 0.7
+            log(
+                f"[WARN] Invalid execution.min_notional_usdt={min_notional_spec!r} in strategy_spec.json; using 0.7",
+                Fore.YELLOW,
+            )
+            min_notional_source = "code_default"
+    elif min_notional_env_raw is not None and str(min_notional_env_raw).strip() != "":
+        try:
+            MIN_NOTIONAL_USDT = float(min_notional_env_raw)
+            min_notional_source = ".env"
+        except (TypeError, ValueError):
+            MIN_NOTIONAL_USDT = 0.7
+            log(
+                f"[WARN] Invalid MIN_NOTIONAL_USDT={min_notional_env_raw!r} in .env; using 0.7",
+                Fore.YELLOW,
+            )
+            min_notional_source = "code_default"
+    else:
+        MIN_NOTIONAL_USDT = 0.7
+        log(
+            "[WARN] MIN_NOTIONAL_USDT not set in strategy_spec.json or .env; using code default 0.7",
+            Fore.YELLOW,
+        )
+        min_notional_source = "code_default"
+    MIN_NOTIONAL_USDT = max(0.0, MIN_NOTIONAL_USDT)
+    os.environ["MIN_NOTIONAL_USDT"] = str(MIN_NOTIONAL_USDT)
+    log(f"[CONFIG] MIN_NOTIONAL_USDT={MIN_NOTIONAL_USDT} source={min_notional_source}", Fore.LIGHTBLACK_EX)
     EXTRA_POSITION_SETTLES = _parse_settle_list(os.getenv("BYBIT_EXTRA_POSITION_SETTLES"), DEFAULT_EXTRA_POSITION_SETTLES)
     global NOTIONAL_EPSILON
     NOTIONAL_EPSILON = float(os.getenv("NOTIONAL_TOLERANCE", "1e-6"))
@@ -4447,7 +4655,7 @@ def refresh_settings():
         DEEPSEEK_MODEL = deepseek_model_env.strip()
     else:
         DEEPSEEK_MODEL = None
-    AI_OFFLINE_CANCEL_ENTRIES = str(os.getenv("AI_OFFLINE_CANCEL_ENTRIES", "1")).strip().lower() in {
+    AI_OFFLINE_CANCEL_ENTRIES = str(os.getenv("AI_OFFLINE_CANCEL_ENTRIES", "0")).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -6569,7 +6777,13 @@ def start_telegram_long_polling() -> None:
     if TELEGRAM_WEBHOOK_URL:
         return
     if _TELEGRAM_LONG_POLL_THREAD is not None:
-        return
+        if _TELEGRAM_LONG_POLL_THREAD.is_alive():
+            return
+        stop_event = _TELEGRAM_LONG_POLL_STOP
+        if stop_event:
+            stop_event.set()
+        _TELEGRAM_LONG_POLL_THREAD = None
+        _TELEGRAM_LONG_POLL_STOP = None
     if not TG_TOKEN:
         return
     stop_event = threading.Event()
@@ -7966,6 +8180,14 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_sandbox_command(args, user_id=user_id)
         if reply is None:
             return
+    elif command in {"stable", "backup"}:
+        reply = _set_target_and_restart("branch:stable", "[RESTART] /stable -> switching to stable/backup", chat_id=chat_id, thread_id=response_thread)
+    elif command in {"head", "normal"}:
+        reply = _set_target_and_restart(None, "[RESTART] /head -> switching to latest HEAD", chat_id=chat_id, thread_id=response_thread)
+    elif command == "update":
+        reply = _handle_version_command(["latest"], user_id=user_id, chat_id=chat_id, thread_id=response_thread)
+        if reply is None:
+            reply = "Переключаюсь на последнюю версию..."
     elif command == "version":
         reply = f"Версия {BOT_VERSION}\n{BOT_CHANGELOG}"
         _tmp = _handle_version_command(args, user_id=user_id, chat_id=chat_id, thread_id=response_thread)
@@ -8189,6 +8411,16 @@ def _handle_version_command(args: list[str], *, user_id: Optional[int], chat_id:
         return f"Переключаюсь на {ver} и перезапускаюсь…"
 
     return "Использование: /version list | /version latest | /version set <YYYY.MM.DD[.N]>"
+
+
+def _set_target_and_restart(target: str | None, reason: str, *, chat_id: int, thread_id: Optional[int]) -> str:
+    target_path = _get_bot_config_path(USER_ID, REPO_ROOT)
+    payload = {"TARGET_VERSION": target if target else None}
+    updated = _persist_env_file(target_path, payload)
+    if not updated:
+        return "Не удалось обновить TARGET_VERSION."
+    _restart_with_latest_code(reason)
+    return f"{reason}…"
 def _restart_with_latest_code(reason: str) -> None:
     log(reason, Fore.LIGHTBLUE_EX)
     send_tg(reason)
@@ -8200,6 +8432,14 @@ def _restart_with_latest_code(reason: str) -> None:
         pass
     python_exec = sys.executable or "python"
     args = [python_exec, *sys.argv]
+    try:
+        script_path = Path(__file__).resolve()
+        if "backups" in script_path.parts:
+            launcher = REPO_ROOT / "bybitbot.py"
+            if launcher.exists():
+                args = [python_exec, str(launcher), *sys.argv[1:]]
+    except Exception:
+        pass
     try:
         os.execv(python_exec, args)
     except Exception as exc:
@@ -12943,6 +13183,7 @@ def run_cycle():
     def log_open_skip(symbol: str, reason: str) -> None:
         log_user(f"OPEN SKIP {symbol}: {reason}")
     _sync_with_remote()
+    _reload_local_modules()
     _write_runtime_status(None, None, "running")
     refresh_settings()
     # Ensure each user has a bybit.log for per-user trading history
@@ -13958,12 +14199,55 @@ def run_cycle():
         symbols_sequence = available_pairs or list(PAIR_LIST)
 
     # Rebuild manual universe to include open positions and JSON constraints.
-    manual_universe_built = universe_builder.build_universe(strategy.CONTEXT_SPEC, position_symbols)
+    manual_universe_built = universe_builder.build_universe(
+        strategy.CONTEXT_SPEC,
+        position_symbols,
+        news_digest=news_headlines,
+    )
+    try:
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        src = str(mode.get("source") or "fixed").strip().lower() or "fixed"
+        max_symbols = int(mode.get("max_symbols") or 8)
+        news_pr = mode.get("news_priority") if isinstance(mode.get("news_priority"), dict) else {}
+        min_items = int(news_pr.get("min_items") or 0)
+        log(
+            f"[MANUAL] Universe source={src} news_symbols={len(news_headlines or {})} min_items={min_items} "
+            f"max_symbols={max_symbols} include_positions={bool(mode.get('include_positions', True))} "
+            f"pairs={', '.join(manual_universe_built) if manual_universe_built else 'none'}",
+            Fore.LIGHTBLACK_EX,
+        )
+    except Exception:
+        pass
     try:
         MANUAL_STRATEGY_SYMBOLS.clear()
         MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})
     except Exception:
         MANUAL_STRATEGY_SYMBOLS = {sym.upper() for sym in manual_universe_built}
+    try:
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        src = str(mode.get("source") or "fixed").strip().lower() or "fixed"
+    except Exception:
+        src = "fixed"
+    try:
+        strategy.set_runtime_watchlist(manual_universe_built, source=f"universe_builder:{src}")
+        watchlist_now = getattr(strategy, "WATCHLIST", []) or []
+        watchlist_source = getattr(strategy, "WATCHLIST_SOURCE", "unknown")
+        preview = ", ".join(list(watchlist_now)[:12]) if isinstance(watchlist_now, list) else ""
+        log(
+            f"[MANUAL][WATCHLIST] source={watchlist_source} size={len(watchlist_now) if isinstance(watchlist_now, list) else '?'}"
+            + (f" preview={preview}" if preview else ""),
+            Fore.LIGHTBLACK_EX,
+        )
+    except Exception:
+        pass
     # Ensure symbols_sequence aligns with manual universe if present.
     if manual_universe_built:
         symbols_sequence = manual_universe_built
@@ -14207,6 +14491,30 @@ def run_cycle():
                         )
                         log(context_msg, Fore.LIGHTBLACK_EX)
                         log_user(context_msg, color=Fore.LIGHTBLACK_EX)
+                        try:
+                            if bool(manual_ctx.has_position) and not bool(strategy.is_symbol_monitored(sym)):
+                                watchlist = getattr(strategy, "WATCHLIST", []) or []
+                                watchlist_count = len(watchlist) if isinstance(watchlist, list) else 0
+                                sym_upper = str(sym).upper()
+                                sym_base = sym_upper.split(":")[0]
+                                base_monitored = (
+                                    sym_base in {str(item).upper() for item in watchlist} if isinstance(watchlist, list) else False
+                                )
+                                try:
+                                    spec_path = Path(getattr(strategy, "__file__", "")).with_name("strategy_spec.json")
+                                except Exception:
+                                    spec_path = None
+                                spec_display = str(spec_path) if spec_path else "strategy_spec.json"
+                                watchlist_preview = ", ".join(list(watchlist)[:12]) if isinstance(watchlist, list) else ""
+                                log(
+                                    f"[MANUAL][WATCHLIST] {sym}: position is open but symbol not monitored; "
+                                    f"base={sym_base} base_monitored={base_monitored} watchlist_size={watchlist_count} "
+                                    f"source={spec_display}"
+                                    + (f" watchlist_preview={watchlist_preview}" if watchlist_preview else ""),
+                                    Fore.YELLOW,
+                                )
+                        except Exception:
+                            pass
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
                         confidence_value = manual_event.confidence if manual_event.confidence is not None else 0.0
                         signal_msg = (
@@ -15783,54 +16091,71 @@ def run_cycle():
         except Exception as exc_refresh_orders:
             log(f"[WARN] Failed to refresh orders after protection attempt for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
             refreshed_orders = open_orders_attempt
-        if str(sym_unprotected).upper().startswith("DOGE"):
-            log(
-                f"[PROTECT][DOGE] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
-                Fore.LIGHTBLACK_EX,
+        current_orders = refreshed_orders
+        recheck_attempted = False
+        has_any_level = False
+        stop_vals_dbg: list[float] = []
+        take_vals_dbg: list[float] = []
+        has_stop_after = False
+        has_take_after = False
+        categorized_after: dict[str, list[tuple[float | None, float | None]]] = {}
+        while True:
+            protective_orders_after = _extract_protection_orders(current_orders)
+            has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
+                position_payload,
+                protective_orders_after,
+                price_hint=px_val,
             )
-        protective_orders_after = _extract_protection_orders(refreshed_orders)
-        has_stop_after, has_take_after, categorized_after = _evaluate_position_protection(
-            position_payload,
-            protective_orders_after,
-            price_hint=px_val,
+            stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
+            take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
+            has_any_level = bool(stop_vals_dbg or take_vals_dbg)
+            if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
+                stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
+                take_hint = f"{take_vals_dbg[0]:.2f}" if take_vals_dbg else "n/a"
+                parts_text = f"stop={stop_hint},take={take_hint}"
+                log(
+                    f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
+                    Fore.CYAN,
+                )
+                restored = True
+                break
+            if has_stop_after and REQUIRE_TAKE_PROFIT and not has_take_after:
+                stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
+                log(
+                    f"[WARN] {sym_unprotected}: take-profit still missing after restore "
+                    f"(stop={stop_hint}, takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – keeping position with stop-only",
+                    Fore.YELLOW,
+                )
+                restored = True
+                break
+            if has_any_level:
+                log(
+                    f"[WARN] {sym_unprotected}: ambiguous protection after restore "
+                    f"(has_stop={has_stop_after}, has_take={has_take_after}, "
+                    f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
+                    f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – skipping auto-close",
+                    Fore.YELLOW,
+                )
+                unresolved_unprotected.append(sym_unprotected)
+                break
+            if recheck_attempted:
+                break
+            recheck_attempted = True
+            time.sleep(0.5)
+            try:
+                current_orders = fetch_open_orders_for_symbol(ex, sym_unprotected)
+            except Exception as exc_refresh_orders:
+                log(f"[WARN] Recheck: failed to refresh orders for {sym_unprotected}: {exc_refresh_orders}", Fore.YELLOW)
+                current_orders = current_orders
+            continue
+        refreshed_orders = current_orders
+        log(
+            f"[PROTECT] {sym_unprotected}: open_orders_out={_summarize_open_orders_for_log(refreshed_orders)}",
+            Fore.LIGHTBLACK_EX,
         )
-        stop_vals_dbg = [p for p, _amt in (categorized_after.get("stop") or []) if p is not None]
-        take_vals_dbg = [p for p, _amt in (categorized_after.get("take_profit") or []) if p is not None]
-        has_any_level = bool(stop_vals_dbg or take_vals_dbg)
-
-        if has_stop_after and (not REQUIRE_TAKE_PROFIT or has_take_after):
-            # Полная защита восстановлена.
-            stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
-            take_hint = f"{take_vals_dbg[0]:.2f}" if take_vals_dbg else "n/a"
-            parts_text = f"stop={stop_hint},take={take_hint}"
-            log(
-                f"[INFO] {sym_unprotected}: protection restored ({parts_text}; {len(protective_orders_after)} orders)",
-                Fore.CYAN,
-            )
-            restored = True
+        if restored:
             continue
-
-        if has_stop_after and REQUIRE_TAKE_PROFIT and not has_take_after:
-            # Есть стоп, но нет тейка – считаем позицию защищённой стопом и не закрываем её.
-            stop_hint = f"{stop_vals_dbg[-1]:.2f}" if stop_vals_dbg else "n/a"
-            log(
-                f"[WARN] {sym_unprotected}: take-profit still missing after restore "
-                f"(stop={stop_hint}, takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – keeping position with stop-only",
-                Fore.YELLOW,
-            )
-            restored = True
-            continue
-
         if has_any_level:
-            # Есть какие‑то защитные уровни, но классификация считает их невалидными — не закрываем автоматически.
-            log(
-                f"[WARN] {sym_unprotected}: ambiguous protection after restore "
-                f"(has_stop={has_stop_after}, has_take={has_take_after}, "
-                f"stops={','.join(f'{p:.2f}' for p in stop_vals_dbg) or 'n/a'}, "
-                f"takes={','.join(f'{p:.2f}' for p in take_vals_dbg) or 'n/a'}) – skipping auto-close",
-                Fore.YELLOW,
-            )
-            unresolved_unprotected.append(sym_unprotected)
             continue
 
         # Действительно нет ни стопа, ни тейка – закрываем позицию как раньше.
@@ -16549,51 +16874,73 @@ def run_cycle():
     return next_delay_minutes
 
 
+def _bind_module_exports() -> None:
+    global ProtectionMissingError, _has_stop_flag, _has_trailing_flag, _safe_round
+    global _extract_protection_orders, _categorize_protection_orders, _evaluate_position_protection
+    global _describe_protection_changes, _format_protection_snapshot, _summarize_open_orders_for_log
+    global _select_best_protection_levels, _format_progress_to_levels, _format_close_reason
+    global _get_position_reference_price, _protection_orders_signature, _cleanup_redundant_stop_orders
+    global _close_position_now, _trail_state_matches_position, ensure_position_protection
+    global _prepare_protection_dataframe, _refresh_position_protection_if_possible
+    global ORDER_TYPE_MAP, ORDER_TYPE_ALIASES, VALID_ORDER_TYPES
+    global _normalize_order_side, get_position_idx, _sanitize_order_params_for_category
+    global _spot_funds_sufficient, compute_order_amount, normalize_order_type_key
+    global get_trigger_direction_for_side, _order_allows_increase, _format_decimal
+    global _format_notional_pct, _summarize_order_spec, execute_extra_orders
+
+    ProtectionMissingError = protection_engine.ProtectionMissingError
+    _has_stop_flag = protection_engine._has_stop_flag
+    _has_trailing_flag = protection_engine._has_trailing_flag
+    _safe_round = protection_engine._safe_round
+    _extract_protection_orders = protection_engine._extract_protection_orders
+    _categorize_protection_orders = protection_engine._categorize_protection_orders
+    _evaluate_position_protection = protection_engine._evaluate_position_protection
+    _describe_protection_changes = protection_engine._describe_protection_changes
+    _format_protection_snapshot = protection_engine._format_protection_snapshot
+    _summarize_open_orders_for_log = protection_engine._summarize_open_orders_for_log
+    _select_best_protection_levels = protection_engine._select_best_protection_levels
+    _format_progress_to_levels = protection_engine._format_progress_to_levels
+    _format_close_reason = protection_engine._format_close_reason
+    _get_position_reference_price = protection_engine._get_position_reference_price
+    _protection_orders_signature = protection_engine._protection_orders_signature
+    _cleanup_redundant_stop_orders = protection_engine._cleanup_redundant_stop_orders
+    _close_position_now = protection_engine._close_position_now
+    _trail_state_matches_position = protection_engine._trail_state_matches_position
+    ensure_position_protection = protection_engine.ensure_position_protection
+    _prepare_protection_dataframe = protection_engine._prepare_protection_dataframe
+    _refresh_position_protection_if_possible = protection_engine._refresh_position_protection_if_possible
+
+    ORDER_TYPE_MAP = order_utils.ORDER_TYPE_MAP
+    ORDER_TYPE_ALIASES = order_utils.ORDER_TYPE_ALIASES
+    VALID_ORDER_TYPES = order_utils.VALID_ORDER_TYPES
+    _normalize_order_side = order_utils._normalize_order_side
+    get_position_idx = order_utils.get_position_idx
+    _sanitize_order_params_for_category = order_utils._sanitize_order_params_for_category
+    _spot_funds_sufficient = order_utils._spot_funds_sufficient
+    compute_order_amount = order_utils.compute_order_amount
+    normalize_order_type_key = order_utils.normalize_order_type_key
+    get_trigger_direction_for_side = order_utils.get_trigger_direction_for_side
+    _order_allows_increase = order_utils._order_allows_increase
+    _format_decimal = order_utils._format_decimal
+    _format_notional_pct = order_utils._format_notional_pct
+    _summarize_order_spec = order_utils._summarize_order_spec
+
+    execute_extra_orders = execution_engine.execute_extra_orders
+
+
 # Finalize module bindings after all helpers are available.
 _sync_module_configs()
-
-# Bind execution/protection helpers to module implementations.
-ProtectionMissingError = protection_engine.ProtectionMissingError
-_has_stop_flag = protection_engine._has_stop_flag
-_has_trailing_flag = protection_engine._has_trailing_flag
-_safe_round = protection_engine._safe_round
-_extract_protection_orders = protection_engine._extract_protection_orders
-_categorize_protection_orders = protection_engine._categorize_protection_orders
-_evaluate_position_protection = protection_engine._evaluate_position_protection
-_describe_protection_changes = protection_engine._describe_protection_changes
-_format_protection_snapshot = protection_engine._format_protection_snapshot
-_summarize_open_orders_for_log = protection_engine._summarize_open_orders_for_log
-_select_best_protection_levels = protection_engine._select_best_protection_levels
-_format_progress_to_levels = protection_engine._format_progress_to_levels
-_format_close_reason = protection_engine._format_close_reason
-_get_position_reference_price = protection_engine._get_position_reference_price
-_protection_orders_signature = protection_engine._protection_orders_signature
-_cleanup_redundant_stop_orders = protection_engine._cleanup_redundant_stop_orders
-_close_position_now = protection_engine._close_position_now
-_trail_state_matches_position = protection_engine._trail_state_matches_position
-ensure_position_protection = protection_engine.ensure_position_protection
-_prepare_protection_dataframe = protection_engine._prepare_protection_dataframe
-_refresh_position_protection_if_possible = protection_engine._refresh_position_protection_if_possible
-
-ORDER_TYPE_MAP = order_utils.ORDER_TYPE_MAP
-ORDER_TYPE_ALIASES = order_utils.ORDER_TYPE_ALIASES
-VALID_ORDER_TYPES = order_utils.VALID_ORDER_TYPES
-_normalize_order_side = order_utils._normalize_order_side
-get_position_idx = order_utils.get_position_idx
-_sanitize_order_params_for_category = order_utils._sanitize_order_params_for_category
-_spot_funds_sufficient = order_utils._spot_funds_sufficient
-compute_order_amount = order_utils.compute_order_amount
-normalize_order_type_key = order_utils.normalize_order_type_key
-get_trigger_direction_for_side = order_utils.get_trigger_direction_for_side
-_order_allows_increase = order_utils._order_allows_increase
-_format_decimal = order_utils._format_decimal
-_format_notional_pct = order_utils._format_notional_pct
-_summarize_order_spec = order_utils._summarize_order_spec
-
-execute_extra_orders = execution_engine.execute_extra_orders
+_bind_module_exports()
 
 
 def main():
+    # If we are running from a backup script but the repo is reachable, jump back to the latest code.
+    try:
+        script_path = Path(__file__).resolve()
+        if "backups" in script_path.parts and (REPO_ROOT / ".git").exists():
+            _restart_with_latest_code("[RECOVER] Running from backup, switching to latest HEAD")
+    except Exception:
+        pass
     ensure_version_backup()
     refresh_settings()
     base_margin_utilization = ORDER_MARGIN_UTILIZATION

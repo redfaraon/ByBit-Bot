@@ -87,12 +87,23 @@ def _default_spec() -> dict[str, Any]:
 def _load_spec() -> dict[str, Any]:
     default_spec = _default_spec()
     spec_path = Path(__file__).with_name("strategy_spec.json")
+    last_good_path = spec_path.with_suffix(".last_good.json")
     try:
         payload = json.loads(spec_path.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
+            try:
+                last_good_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
             return payload
     except Exception:
-        pass
+        if last_good_path.exists():
+            try:
+                payload = json.loads(last_good_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
     return default_spec
 
 
@@ -116,6 +127,7 @@ WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "AVAX/USDT",
 ]
 WATCHLIST = WATCHLIST_BASE[:]
+WATCHLIST_SOURCE = "strategy_spec.json"
 
 INDICATORS = [
     "ema20",
@@ -462,7 +474,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 base_reason.append("news positive bias")
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
-                reason = "; ".join(base_reason) or "trend long confluence"
+            reason = "; ".join(base_reason) or "trend long confluence"
             metadata: dict[str, Any] = {"regime": "trend"}
             if order_type == "limit" and ENTRY_LADDER:
                 metadata["ladder_orders"] = ENTRY_LADDER
@@ -502,7 +514,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                 base_reason.append("news negative bias")
             if ctx.is_flat:
                 base_reason.append("range regime -> limit only")
-                reason = "; ".join(base_reason) or "trend short confluence"
+            reason = "; ".join(base_reason) or "trend short confluence"
             metadata: dict[str, Any] = {"regime": "trend"}
             if order_type == "limit" and ENTRY_LADDER:
                 metadata["ladder_orders"] = ENTRY_LADDER
@@ -787,13 +799,6 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
 
 
 def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
-    if not _symbol_allowed(ctx.symbol):
-        return StrategyEvent(
-            "skip",
-            reason="symbol not monitored",
-            confidence=0.0,
-            metadata=_with_trace(None, ["skip", "symbol_not_monitored"]),
-        )
     if ctx.price is None or not math.isfinite(ctx.price):
         return StrategyEvent(
             "skip",
@@ -817,6 +822,13 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
             confidence=0.45,
             metadata=_with_trace(None, ["skip", "hold_position"]),
         )
+    if not _symbol_allowed(ctx.symbol):
+        return StrategyEvent(
+            "skip",
+            reason="symbol not monitored",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "symbol_not_monitored"]),
+        )
     event = should_open(ctx)
     if event:
         return event
@@ -837,3 +849,35 @@ def _symbol_allowed(symbol: str) -> bool:
         return True
     base = sym_upper.split(":")[0]
     return base in WATCHLIST
+
+
+def is_symbol_monitored(symbol: str) -> bool:
+    return _symbol_allowed(symbol)
+
+
+def set_runtime_watchlist(symbols: Sequence[str] | None, *, source: str = "runtime") -> None:
+    """
+    Override the watchlist for this process runtime (e.g. per-cycle universe).
+    Symbols are normalized to upper-case; for derivatives forms like 'BTC/USDT:USDT'
+    we also include the base 'BTC/USDT' so checks work consistently.
+    """
+    global WATCHLIST, WATCHLIST_SOURCE
+    if not symbols:
+        WATCHLIST = WATCHLIST_BASE[:]
+        WATCHLIST_SOURCE = "strategy_spec.json"
+        return
+    seen: set[str] = set()
+    updated: list[str] = []
+    for item in symbols:
+        raw = str(item).strip().upper()
+        if not raw:
+            continue
+        candidates = [raw]
+        if ":" in raw:
+            candidates.append(raw.split(":", 1)[0])
+        for sym in candidates:
+            if sym and sym not in seen:
+                updated.append(sym)
+                seen.add(sym)
+    WATCHLIST = updated if updated else WATCHLIST_BASE[:]
+    WATCHLIST_SOURCE = source or "runtime"
