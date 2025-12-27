@@ -16389,6 +16389,7 @@ def run_cycle():
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
     prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
+    prev_news_intensity = safe_float((cycle_state or {}).get("last_news_intensity"))
     current_cycle_no = safe_int(protection_engine._CURRENT_CYCLE_NUMBER)
     ai_offline_active = (
         current_cycle_no is not None
@@ -16569,6 +16570,69 @@ def run_cycle():
         news_bias = str(LATEST_STATUS.get("news_bias") or "").strip().lower() or "neutral"
     except Exception:
         news_bias = "neutral"
+
+    # Scheduling: news intensity (frequency + "emotion"), independent of positive/negative direction.
+    # We use the same lightweight keyword heuristics as offline mode, but only for ABS(score).
+    schedule_spec = getattr(strategy, "SCHEDULE_SPEC", None)
+    schedule_spec = schedule_spec if isinstance(schedule_spec, dict) else {}
+    try:
+        news_intensity_enabled = bool(schedule_spec.get("news_intensity_enabled", True))
+    except Exception:
+        news_intensity_enabled = True
+    news_items_total = 0
+    news_emotion_mean = 0.0
+    news_intensity = 0.0
+    try:
+        universe_mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        universe_max_symbols = max(1, int(universe_mode.get("max_symbols") or 8))
+    except Exception:
+        universe_max_symbols = 8
+    try:
+        digest = news_headlines if isinstance(news_headlines, dict) else {}
+        total_items = 0
+        weighted_abs = 0.0
+        weight_sum = 0.0
+        for _sym, payload in digest.items():
+            if not isinstance(payload, dict):
+                continue
+            items = payload.get("items")
+            try:
+                count = len(items) if isinstance(items, (list, tuple)) else 0
+            except Exception:
+                count = 0
+            total_items += count
+            if count <= 0:
+                continue
+            try:
+                score_val = safe_float(_offline_news_score(payload))
+            except Exception:
+                score_val = None
+            if score_val is None or not math.isfinite(score_val):
+                continue
+            weighted_abs += abs(float(score_val)) * count
+            weight_sum += count
+        news_items_total = int(total_items)
+        news_emotion_mean = float(weighted_abs / weight_sum) if weight_sum > 0 else 0.0
+        items_norm = min(1.0, float(news_items_total) / float(max(1, universe_max_symbols * 3)))
+        w_items = safe_float(schedule_spec.get("news_intensity_weight_items"))
+        w_emotion = safe_float(schedule_spec.get("news_intensity_weight_emotion"))
+        w_items = float(w_items) if w_items is not None and math.isfinite(w_items) and w_items >= 0 else 0.5
+        w_emotion = float(w_emotion) if w_emotion is not None and math.isfinite(w_emotion) and w_emotion >= 0 else 0.5
+        w_total = w_items + w_emotion
+        if w_total <= 0:
+            w_items = 0.5
+            w_emotion = 0.5
+            w_total = 1.0
+        news_intensity = (items_norm * w_items + news_emotion_mean * w_emotion) / w_total
+        news_intensity = max(0.0, min(1.0, float(news_intensity)))
+    except Exception:
+        news_items_total = 0
+        news_emotion_mean = 0.0
+        news_intensity = 0.0
     interval_floor = float(MIN_NEXT_RUN_MINUTES)
     interval_cap = float(MAX_NEXT_RUN_FROM_START_MINUTES)
     if ai_offline_active:
@@ -16654,25 +16718,34 @@ def run_cycle():
         else:
             volatility_note = "vol=init"
 
-        interval_after_delta = prev_interval + delta
+        news_delta_minutes = 0.0
+        news_note = "news_intensity=off"
+        if news_intensity_enabled:
+            try:
+                big_thr = safe_float(schedule_spec.get("news_intensity_shorten_10_at"))
+                small_thr = safe_float(schedule_spec.get("news_intensity_shorten_5_at"))
+                len_small_thr = safe_float(schedule_spec.get("news_intensity_lengthen_5_below"))
+                len_big_thr = safe_float(schedule_spec.get("news_intensity_lengthen_10_below"))
+                big_thr = float(big_thr) if big_thr is not None and math.isfinite(big_thr) else 0.6
+                small_thr = float(small_thr) if small_thr is not None and math.isfinite(small_thr) else 0.35
+                len_small_thr = float(len_small_thr) if len_small_thr is not None and math.isfinite(len_small_thr) else 0.2
+                len_big_thr = float(len_big_thr) if len_big_thr is not None and math.isfinite(len_big_thr) else 0.1
+            except Exception:
+                big_thr, small_thr, len_small_thr, len_big_thr = (0.6, 0.35, 0.2, 0.1)
+            if news_intensity >= big_thr:
+                news_delta_minutes = -10.0
+            elif news_intensity >= small_thr:
+                news_delta_minutes = -5.0
+            elif news_intensity <= len_big_thr:
+                news_delta_minutes = 10.0
+            elif news_intensity <= len_small_thr:
+                news_delta_minutes = 5.0
+            prev_note = f" prev={prev_news_intensity:.2f}" if prev_news_intensity is not None and math.isfinite(prev_news_intensity) else ""
+            news_note = f"news_intensity={news_intensity:.2f}{prev_note} items={news_items_total} emotion={news_emotion_mean:.2f} -> {news_delta_minutes:+.0f}m"
 
-        # Apply news bias multipliers from strategy: shorten on strong news, lengthen on neutral/uncertain.
-        try:
-            news_boost, news_cut = strategy.schedule_news_bias_factors()
-        except Exception:
-            news_boost, news_cut = (0.9, 1.15)
-        news_factor = 1.0
-        news_action = "none"
-        if news_bias in {"positive", "negative"}:
-            news_factor = float(news_boost)
-            news_action = "boost"
-        elif news_bias in {"neutral", "uncertain"}:
-            news_factor = float(news_cut)
-            news_action = "cut"
-        news_note = f"news_{news_action}({news_bias}) x{news_factor:.2f}"
-        interval_after_news = interval_after_delta * news_factor
+        interval_after_delta = prev_interval + delta + news_delta_minutes
 
-        interval_after_round = round(interval_after_news / 5.0) * 5.0
+        interval_after_round = round(interval_after_delta / 5.0) * 5.0
         fallback_interval_from_start = min(max(interval_after_round, interval_floor), interval_cap)
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
         diff_text = f"{diff_value:.4f}" if diff_value is not None and math.isfinite(diff_value) else "n/a"
@@ -16680,7 +16753,7 @@ def run_cycle():
         intrabar_diff_text = f"{diff_intrabar:.4f}" if diff_intrabar is not None and math.isfinite(diff_intrabar) else "n/a"
         timing_debug_parts.append(
             f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {interval_after_delta:.2f}m; "
-            f"{news_note} -> {interval_after_news:.2f}m; round5 -> {interval_after_round:.2f}m; "
+            f"{news_note}; round5 -> {interval_after_round:.2f}m; "
             f"bounds {interval_floor:.1f}-{interval_cap:.1f} -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
             f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; "
             f"diff_cycle={cycle_diff_text}, diff_intrabar={intrabar_diff_text}; {thresholds_note})"
@@ -16740,6 +16813,10 @@ def run_cycle():
                 )
                 if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
                     cycle_state["last_volatility_ratio"] = float(atr_ratio_median)
+                if news_intensity_enabled:
+                    cycle_state["last_news_intensity"] = float(news_intensity)
+                    cycle_state["last_news_items_total"] = int(news_items_total)
+                    cycle_state["last_news_emotion_mean"] = float(news_emotion_mean)
                 cycle_state["rate_limit_backoff"] = bool(rate_limit_backoff)
         except Exception:
             pass

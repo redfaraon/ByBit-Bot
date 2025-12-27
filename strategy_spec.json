@@ -30,8 +30,13 @@
       "online_max": 45,
       "backoff_min": 25,
       "backoff_max": 55,
-      "news_bias_boost": 0.9,
-      "news_bias_cut": 1.15
+      "news_intensity_enabled": true,
+      "news_intensity_weight_items": 0.5,
+      "news_intensity_weight_emotion": 0.5,
+      "news_intensity_shorten_5_at": 0.35,
+      "news_intensity_shorten_10_at": 0.6,
+      "news_intensity_lengthen_5_below": 0.2,
+      "news_intensity_lengthen_10_below": 0.1
     },
     "env_vars": [
       "RISK_PCT",
