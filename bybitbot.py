@@ -1193,6 +1193,18 @@ def _update_current_branch() -> tuple[str | None, bool]:
     return branch, bool(before_head and after_head and before_head != after_head)
 
 
+def _restart_self(reason: str) -> None:
+    print(f"[BOOT] Restarting launcher: {reason}", file=sys.stderr)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    python_exec = sys.executable or "python"
+    args = [python_exec, *sys.argv]
+    os.execv(python_exec, args)
+
+
 def _run_script_candidate(
     script_path: Path,
     version_label: str,
@@ -1454,6 +1466,8 @@ def main():
         new_head = _current_head()
         if new_head:
             print(f"[BOOT] Pulled latest {branch_name or 'HEAD'} -> {new_head[:8]}", file=sys.stderr)
+        # Restart launcher to ensure fresh imports of updated modules (no manual restart needed).
+        _restart_self("new commit pulled")
     history = _load_fallback_history()
     history.setdefault("branches", {})
     cycle_state = _load_cycle_state()
