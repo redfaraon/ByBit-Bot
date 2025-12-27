@@ -1518,6 +1518,17 @@ def main():
             # Run the freshly pulled current version once, then continue normal flow
             _run_current()
             return
+        # If HEAD advanced beyond the fallback snapshot, try the fresh HEAD once.
+        if current_head and fallback_head and current_head != fallback_head:
+            history["fallback_active"] = False
+            history["fallback_cycles"] = 0
+            history["fallback_last_head"] = None
+            history["fallback_source"] = None
+            history["fallback_target"] = None
+            _save_fallback_history(history)
+            print(f"[BOOT] HEAD advanced to {current_head[:8]} (fallback was {fallback_head[:8]}), attempting fresh HEAD.", file=sys.stderr)
+            _run_current()
+            return
         fallback_cycles_recorded = int(history.get("fallback_cycles") or 0)
         if fallback_cycles_recorded != completed_fallback_cycles:
             history["fallback_cycles"] = completed_fallback_cycles
