@@ -4341,34 +4341,56 @@ def refresh_settings():
     global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
     global OFFLINE_MIN_NEXT_RUN_MINUTES, OFFLINE_MAX_NEXT_RUN_MINUTES
     global BACKOFF_MIN_NEXT_RUN_MINUTES, BACKOFF_MAX_NEXT_RUN_MINUTES
-    # Scheduling bounds: prefer strategy JSON schedule; fall back to env.
     sched_offline_min, sched_offline_max = strategy.schedule_bounds("offline")
     sched_online_min, sched_online_max = strategy.schedule_bounds("online")
     sched_backoff_min, sched_backoff_max = strategy.schedule_bounds("backoff")
-    try:
-        MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(sched_online_min)))
-    except (TypeError, ValueError):
-        MIN_NEXT_RUN_MINUTES = float(sched_online_min)
-    try:
-        MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(sched_online_max)))
-    except (TypeError, ValueError):
-        MAX_NEXT_RUN_FROM_START_MINUTES = float(sched_online_max)
-    MIN_NEXT_RUN_MINUTES = max(1.0, MIN_NEXT_RUN_MINUTES)
-    MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES)
-    def _env_float(name: str) -> float | None:
-        raw = os.getenv(name)
-        if raw is None or str(raw).strip() == "":
-            return None
+    schedule_spec = getattr(strategy, "SCHEDULE_SPEC", None)
+    has_json_schedule = isinstance(schedule_spec, dict) and any(
+        key in schedule_spec
+        for key in (
+            "offline_min",
+            "offline_max",
+            "online_min",
+            "online_max",
+            "backoff_min",
+            "backoff_max",
+        )
+    )
+    if has_json_schedule:
+        MIN_NEXT_RUN_MINUTES = max(1.0, float(sched_online_min))
+        MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, float(sched_online_max))
+        ONLINE_MIN_NEXT_RUN_MINUTES = float(sched_online_min)
+        ONLINE_MAX_NEXT_RUN_MINUTES = float(sched_online_max)
+        OFFLINE_MIN_NEXT_RUN_MINUTES = float(sched_offline_min)
+        OFFLINE_MAX_NEXT_RUN_MINUTES = float(sched_offline_max)
+        BACKOFF_MIN_NEXT_RUN_MINUTES = float(sched_backoff_min)
+        BACKOFF_MAX_NEXT_RUN_MINUTES = float(sched_backoff_max)
+    else:
+        # Legacy: schedule bounds from .env
         try:
-            return float(raw)
+            MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(MIN_NEXT_RUN_MINUTES)))
         except (TypeError, ValueError):
-            return None
-    ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or float(sched_online_min)
-    ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or float(sched_online_max)
-    OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or float(sched_offline_min)
-    OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or float(sched_offline_max)
-    BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or float(sched_backoff_min)
-    BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or float(sched_backoff_max)
+            MIN_NEXT_RUN_MINUTES = 5.0
+        try:
+            MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(MAX_NEXT_RUN_FROM_START_MINUTES)))
+        except (TypeError, ValueError):
+            MAX_NEXT_RUN_FROM_START_MINUTES = 45.0
+        MIN_NEXT_RUN_MINUTES = max(1.0, MIN_NEXT_RUN_MINUTES)
+        MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES)
+        def _env_float(name: str) -> float | None:
+            raw = os.getenv(name)
+            if raw is None or str(raw).strip() == "":
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+        ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or 10.0
+        ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or 45.0
+        OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or 5.0
+        OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or 35.0
+        BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or 25.0
+        BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or 55.0
     IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
     if not isinstance(protection_engine._TRAIL_PROTECTION, dict):
         protection_engine._TRAIL_PROTECTION = {}
@@ -4666,34 +4688,28 @@ def refresh_settings():
         "on",
     }
     manual_only_execution = bool(STRATEGY_EXECUTION_SPEC.get("manual_only"))
-    if manual_only_execution:
-        OFFLINE_TRADING_ENABLED = False
-        OFFLINE_NEWS_BIAS_ENABLED = False
-        OFFLINE_PAIR_LIMIT = 0
-        OFFLINE_MAX_NEW_POSITIONS = 0
-    else:
-        OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        try:
-            OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
-        except (TypeError, ValueError):
-            OFFLINE_PAIR_LIMIT = 8
-        OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
-        try:
-            OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
-        except (TypeError, ValueError):
-            OFFLINE_MAX_NEW_POSITIONS = 1
-        OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
+    OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
+    except (TypeError, ValueError):
+        OFFLINE_PAIR_LIMIT = 8
+    OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
+    try:
+        OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
+    except (TypeError, ValueError):
+        OFFLINE_MAX_NEW_POSITIONS = 1
+    OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
     MANUAL_STRATEGY_SYMBOLS = {sym.upper() for sym in strategy.WATCHLIST}
     MANUAL_STRATEGY_FORCE = True
 
@@ -15253,6 +15269,32 @@ def run_cycle():
                     if notional > max_notional + NOTIONAL_EPSILON:
                         qty = _clamp_qty_to_max_notional(qty, price, max_notional, qty_step_rule)
                         if qty <= 0:
+                            try:
+                                min_notional_by_qty = (min_qty_rule * price) if min_qty_rule and price else None
+                            except Exception:
+                                min_notional_by_qty = None
+                            min_notional_candidate = min_notional_required
+                            try:
+                                if min_notional_by_qty is not None and math.isfinite(min_notional_by_qty):
+                                    min_notional_candidate = max(min_notional_candidate, float(min_notional_by_qty))
+                            except Exception:
+                                pass
+                            try:
+                                margin_min_required = (
+                                    float(min_notional_candidate) / float(symbol_leverage)
+                                    if symbol_leverage and min_notional_candidate
+                                    else float(min_notional_candidate or 0.0)
+                                )
+                            except Exception:
+                                margin_min_required = None
+                            detail_msg = (
+                                f"[WARN] {user_tag} {sym}: min order too large for balance "
+                                f"(min_notional≈{min_notional_candidate:.2f} USDT, min_qty={min_qty_rule}, px={price:.4f}, lev={symbol_leverage}x) "
+                                f"requires margin≈{margin_min_required:.2f} USDT; usable={effective_margin:.2f} (avail={available_margin:.2f})"
+                                if margin_min_required is not None and math.isfinite(margin_min_required)
+                                else f"[WARN] {user_tag} {sym}: min order too large for balance; usable={effective_margin:.2f} (avail={available_margin:.2f})"
+                            )
+                            log(detail_msg, Fore.YELLOW)
                             log(f"[WARN] {user_tag} {sym}: usable margin cannot satisfy minimum trade size", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: margin too small for minimum order")
                             log_open_skip(sym, "margin cannot satisfy minimum size")
@@ -16218,11 +16260,16 @@ def run_cycle():
     prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
     current_cycle_no = safe_int(protection_engine._CURRENT_CYCLE_NUMBER)
     ai_offline_active = (
-        OFFLINE_TRADING_ENABLED
-        and current_cycle_no is not None
+        current_cycle_no is not None
         and _AI_OFFLINE_ACTIVE_CYCLE is not None
         and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == current_cycle_no
     )
+    try:
+        # In manual-only mode we treat scheduling as offline-like even if AI isn't queried.
+        if bool(STRATEGY_EXECUTION_SPEC.get("manual_only")):
+            ai_offline_active = True
+    except Exception:
+        pass
     atr_ratio_median: float | None = None
     vol_source = "hints"
     source_tags: list[str] = []
