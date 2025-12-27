@@ -1618,6 +1618,8 @@ def _sync_module_configs() -> None:
         protect_bindings["send_tg"] = send_tg_fn
     if truthy_flag_fn:
         protect_bindings["_is_truthy_flag"] = truthy_flag_fn
+    if cancel_order_fn:
+        protect_bindings["cancel_order_by_id"] = cancel_order_fn
     if resolve_symbol_fn:
         protect_bindings["_resolve_symbol_alias"] = resolve_symbol_fn
     if infer_market_fn:
@@ -1877,7 +1879,7 @@ def _sync_with_remote() -> None:
         return
     try:
         status_proc = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,

@@ -46,6 +46,7 @@ REQUIRED_GLOBALS = {
     'safe_int',
     '_is_truthy_flag',
     'log',
+    'cancel_order_by_id',
     'send_tg',
     '_resolve_symbol_alias',
     '_infer_market_category',

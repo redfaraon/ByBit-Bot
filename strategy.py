@@ -798,13 +798,6 @@ def should_modify(ctx: StrategyContext) -> StrategyEvent | None:
 
 
 def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
-    if not _symbol_allowed(ctx.symbol):
-        return StrategyEvent(
-            "skip",
-            reason="symbol not monitored",
-            confidence=0.0,
-            metadata=_with_trace(None, ["skip", "symbol_not_monitored"]),
-        )
     if ctx.price is None or not math.isfinite(ctx.price):
         return StrategyEvent(
             "skip",
@@ -827,6 +820,13 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
             reason="hold position",
             confidence=0.45,
             metadata=_with_trace(None, ["skip", "hold_position"]),
+        )
+    if not _symbol_allowed(ctx.symbol):
+        return StrategyEvent(
+            "skip",
+            reason="symbol not monitored",
+            confidence=0.0,
+            metadata=_with_trace(None, ["skip", "symbol_not_monitored"]),
         )
     event = should_open(ctx)
     if event:
