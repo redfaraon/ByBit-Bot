@@ -16385,6 +16385,12 @@ def run_cycle():
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
+    news_bias = "neutral"
+    try:
+        # Use last known news bias from strategy if available
+        news_bias = str(LATEST_STATUS.get("news_bias") or "").strip().lower() or "neutral"
+    except Exception:
+        news_bias = "neutral"
     interval_floor = float(MIN_NEXT_RUN_MINUTES)
     interval_cap = float(MAX_NEXT_RUN_FROM_START_MINUTES)
     if ai_offline_active:
