@@ -16654,28 +16654,34 @@ def run_cycle():
         else:
             volatility_note = "vol=init"
 
-        target_interval = prev_interval + delta
+        interval_after_delta = prev_interval + delta
+
         # Apply news bias multipliers from strategy: shorten on strong news, lengthen on neutral/uncertain.
         try:
             news_boost, news_cut = strategy.schedule_news_bias_factors()
         except Exception:
             news_boost, news_cut = (0.9, 1.15)
+        news_factor = 1.0
+        news_action = "none"
         if news_bias in {"positive", "negative"}:
-            target_interval *= news_boost
-            volatility_note = (volatility_note + " news_boost").strip()
+            news_factor = float(news_boost)
+            news_action = "boost"
         elif news_bias in {"neutral", "uncertain"}:
-            target_interval *= news_cut
-            volatility_note = (volatility_note + " news_cut").strip()
+            news_factor = float(news_cut)
+            news_action = "cut"
+        news_note = f"news_{news_action}({news_bias}) x{news_factor:.2f}"
+        interval_after_news = interval_after_delta * news_factor
 
-        target_interval = round(target_interval / 5.0) * 5.0
-        target_interval = min(max(target_interval, interval_floor), interval_cap)
-        fallback_interval_from_start = target_interval
+        interval_after_round = round(interval_after_news / 5.0) * 5.0
+        fallback_interval_from_start = min(max(interval_after_round, interval_floor), interval_cap)
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
         diff_text = f"{diff_value:.4f}" if diff_value is not None and math.isfinite(diff_value) else "n/a"
         cycle_diff_text = f"{diff_cycle:.4f}" if diff_cycle is not None and math.isfinite(diff_cycle) else "n/a"
         intrabar_diff_text = f"{diff_intrabar:.4f}" if diff_intrabar is not None and math.isfinite(diff_intrabar) else "n/a"
         timing_debug_parts.append(
-            f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
+            f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {interval_after_delta:.2f}m; "
+            f"{news_note} -> {interval_after_news:.2f}m; round5 -> {interval_after_round:.2f}m; "
+            f"bounds {interval_floor:.1f}-{interval_cap:.1f} -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
             f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; "
             f"diff_cycle={cycle_diff_text}, diff_intrabar={intrabar_diff_text}; {thresholds_note})"
         )
