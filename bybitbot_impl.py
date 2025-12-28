@@ -9,12 +9,14 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 import os
 import importlib
 import atexit
+import faulthandler
 import shutil
 import stat
 import subprocess
 import sys
 import threading
 import time
+import signal
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
@@ -53,6 +55,91 @@ STRATEGY_PROVIDERS_SPEC = strategy.SPEC.get("providers", {})
 MODULE_AUTO_RELOAD_ENABLED = os.getenv("BYBITBOT_MODULE_AUTO_RELOAD", "1").strip().lower() not in {"0", "false", "no"}
 _MODULE_RELOAD_LOCK = threading.Lock()
 _MODULE_RELOAD_FINGERPRINTS: dict[str, float] = {}
+_EXIT_SIGNAL_NAME: str | None = None
+_EXIT_SIGNAL_TS: float | None = None
+_START_TS = time.time()
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except Exception:
+        return f"SIG({signum})"
+
+
+def _read_proc_text(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except Exception:
+        return None
+
+
+def _install_process_diagnostics() -> None:
+    global _EXIT_SIGNAL_NAME, _EXIT_SIGNAL_TS
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:
+        pass
+
+    for dump_sig_name in ("SIGUSR1", "SIGUSR2"):
+        dump_sig = getattr(signal, dump_sig_name, None)
+        if dump_sig is None:
+            continue
+        try:
+            faulthandler.register(dump_sig, all_threads=True, chain=False)
+        except Exception:
+            pass
+
+    def _handle(signum: int, _frame) -> None:
+        global _EXIT_SIGNAL_NAME, _EXIT_SIGNAL_TS
+        _EXIT_SIGNAL_NAME = _signal_name(signum)
+        _EXIT_SIGNAL_TS = time.time()
+        try:
+            boot_id = _read_proc_text("/proc/sys/kernel/random/boot_id")
+            boot_note = f" boot_id={boot_id}" if boot_id else ""
+            uptime = time.time() - _START_TS
+            log(f"[EXIT] received {_EXIT_SIGNAL_NAME}; uptime={uptime:.1f}s pid={os.getpid()} ppid={os.getppid()}{boot_note}", Fore.YELLOW)
+        except Exception:
+            pass
+        try:
+            _flush_tg_log_buffer(force=True)
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            _write_runtime_status(None, None, "stopped")
+        except Exception:
+            pass
+        raise SystemExit(0)
+
+    for sig_name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handle)
+        except Exception:
+            pass
+
+    def _on_exit() -> None:
+        try:
+            uptime = time.time() - _START_TS
+            sig_note = f" last_signal={_EXIT_SIGNAL_NAME}" if _EXIT_SIGNAL_NAME else ""
+            log(f"[EXIT] process exit; uptime={uptime:.1f}s pid={os.getpid()}{sig_note}", Fore.LIGHTBLACK_EX)
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    atexit.register(_on_exit)
 
 
 def _refresh_strategy_specs() -> None:
@@ -17224,6 +17311,16 @@ _bind_module_exports()
 
 
 def main():
+    try:
+        _install_process_diagnostics()
+        boot_id = _read_proc_text("/proc/sys/kernel/random/boot_id")
+        boot_note = f" boot_id={boot_id}" if boot_id else ""
+        log(
+            f"[BOOT] pid={os.getpid()} ppid={os.getppid()} python={sys.executable} cwd={os.getcwd()}{boot_note}",
+            Fore.LIGHTBLACK_EX,
+        )
+    except Exception:
+        pass
     # If we are running from a backup script but the repo is reachable, jump back to the latest code.
     try:
         script_path = Path(__file__).resolve()
