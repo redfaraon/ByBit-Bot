@@ -16672,10 +16672,12 @@ def run_cycle():
 
         delta = 0.0
         volatility_note = ""
+        volatility_rule = ""
         thresholds_note = ""
         diff_value: float | None = None
         diff_cycle: float | None = None
         diff_intrabar: float | None = None
+        diff_source = "n/a"
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
             base_ref = prev_volatility_ratio if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else atr_ratio_median
             base_tol = max(0.0001, base_ref * 0.03 if base_ref and math.isfinite(base_ref) else 0.0001)
@@ -16689,11 +16691,18 @@ def run_cycle():
                 diff_intrabar = bar_deltas[len(bar_deltas) // 2]
                 thresholds_note += "+intrabar"
             if diff_cycle is not None and math.isfinite(diff_cycle) and diff_intrabar is not None and math.isfinite(diff_intrabar):
-                diff_candidate = diff_cycle if abs(diff_cycle) >= abs(diff_intrabar) else diff_intrabar
+                if abs(diff_cycle) >= abs(diff_intrabar):
+                    diff_candidate = diff_cycle
+                    diff_source = "cycle"
+                else:
+                    diff_candidate = diff_intrabar
+                    diff_source = "intrabar"
             elif diff_cycle is not None and math.isfinite(diff_cycle):
                 diff_candidate = diff_cycle
+                diff_source = "cycle"
             elif diff_intrabar is not None and math.isfinite(diff_intrabar):
                 diff_candidate = diff_intrabar
+                diff_source = "intrabar"
         if diff_candidate is not None and math.isfinite(diff_candidate):
             diff = diff_candidate
             diff_value = diff
@@ -16701,15 +16710,24 @@ def run_cycle():
                 strong = diff >= strong_threshold
                 delta = -10.0 if strong else -5.0
                 volatility_note = "vol↑↑" if strong else "vol↑"
+                thr_text = f"{strong_threshold:.4f}" if strong else f"{base_tol:.4f}"
+                volatility_rule = f"X={delta:+.0f}m (vol↑ diff={diff:.4f} {diff_source} >= {thr_text})"
             elif diff < -base_tol:
                 strong = diff <= -strong_threshold
                 delta = 10.0 if strong else 5.0
                 volatility_note = "vol↓↓" if strong else "vol↓"
+                thr_text = f"{strong_threshold:.4f}" if strong else f"{base_tol:.4f}"
+                volatility_rule = f"X={delta:+.0f}m (vol↓ diff={diff:.4f} {diff_source} <= -{thr_text})"
+            else:
+                volatility_note = "vol≈"
+                volatility_rule = f"X={delta:+.0f}m (vol≈ diff={diff:.4f} {diff_source} within ±{base_tol:.4f})"
         else:
             volatility_note = "vol=init"
+            volatility_rule = "X=+0m (vol n/a)"
 
         news_delta_minutes = 0.0
         news_note = "news_intensity=off"
+        news_rule = "Y=+0m (news_intensity=off)"
         if news_intensity_enabled:
             try:
                 big_thr = safe_float(schedule_spec.get("news_intensity_shorten_10_at"))
@@ -16724,12 +16742,18 @@ def run_cycle():
                 big_thr, small_thr, len_small_thr, len_big_thr = (0.6, 0.35, 0.2, 0.1)
             if news_intensity >= big_thr:
                 news_delta_minutes = -10.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} >= shorten_10_at={big_thr:.2f})"
             elif news_intensity >= small_thr:
                 news_delta_minutes = -5.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} >= shorten_5_at={small_thr:.2f})"
             elif news_intensity <= len_big_thr:
                 news_delta_minutes = 10.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} <= lengthen_10_below={len_big_thr:.2f})"
             elif news_intensity <= len_small_thr:
                 news_delta_minutes = 5.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} <= lengthen_5_below={len_small_thr:.2f})"
+            else:
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} within neutral band)"
             prev_note = f" prev={prev_news_intensity:.2f}" if prev_news_intensity is not None and math.isfinite(prev_news_intensity) else ""
             news_note = f"news_intensity={news_intensity:.2f}{prev_note} items={news_items_total} emotion={news_emotion_mean:.2f} -> {news_delta_minutes:+.0f}m"
 
@@ -16749,7 +16773,7 @@ def run_cycle():
             f"-> round5 {interval_after_round:.2f} -> clamp[{interval_floor:.1f}-{interval_cap:.1f}] B={fallback_interval_from_start:.2f}"
         )
         timing_debug_parts.append(
-            f"fallback=adaptive {eq_text}; {news_note}; {volatility_note or ''} "
+            f"fallback=adaptive {eq_text}; {volatility_rule}; {news_rule}; {news_note}; {volatility_note or ''} "
             f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; "
             f"diff_cycle={cycle_diff_text}, diff_intrabar={intrabar_diff_text}; {thresholds_note})"
         )
