@@ -116,9 +116,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.7"
+BOT_VERSION = "1.3.8"
 BOT_CHANGELOG = (
-    "Fix module config sync on startup, enable early stdio log mirroring, and harden fallback script imports."
+    "Scheduler: honor offline bounds from JSON, add news-intensity interval nudges, and log A+X+Y=B timing breakdown."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -16633,45 +16633,35 @@ def run_cycle():
         news_items_total = 0
         news_emotion_mean = 0.0
         news_intensity = 0.0
-    interval_floor = float(MIN_NEXT_RUN_MINUTES)
-    interval_cap = float(MAX_NEXT_RUN_FROM_START_MINUTES)
+    schedule_mode = "online"
     if ai_offline_active:
-        # Offline mode: use OFFLINE_* bounds from .env (defaults 5-35m)
-        min_delay_override = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
-        max_delay_override = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
+        schedule_mode = "offline"
+        interval_floor = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
+        interval_cap = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
         log(
-            f"[SCHED] AI offline bounds applied: {min_delay_override:.1f}-{max_delay_override:.1f}m window while offline mode active",
+            f"[SCHED] AI offline bounds applied: {interval_floor:.1f}-{interval_cap:.1f}m window while offline mode active",
             Fore.LIGHTBLACK_EX,
         )
-        interval_floor = max(interval_floor, min_delay_override)
-        interval_cap = min(interval_cap, max_delay_override)
     elif rate_limit_backoff:
-        # Rate-limit backoff (provider still available): use BACKOFF_* bounds (defaults 25-55m)
-        backoff_min = float(os.getenv("BACKOFF_MIN_NEXT_RUN_MINUTES", "25") if BACKOFF_MIN_NEXT_RUN_MINUTES is None else BACKOFF_MIN_NEXT_RUN_MINUTES)
-        backoff_max = float(os.getenv("BACKOFF_MAX_NEXT_RUN_MINUTES", "55") if BACKOFF_MAX_NEXT_RUN_MINUTES is None else BACKOFF_MAX_NEXT_RUN_MINUTES)
-        min_delay_override = backoff_min
-        max_delay_override = backoff_max
-        log(f"[SCHED] rate-limit backoff active: bounds {min_delay_override:.1f}-{max_delay_override:.1f}m", Fore.LIGHTBLACK_EX)
-        interval_floor = max(interval_floor, min_delay_override)
-        interval_cap = min(interval_cap, max_delay_override)
+        schedule_mode = "backoff"
+        interval_floor = float(os.getenv("BACKOFF_MIN_NEXT_RUN_MINUTES", "25") if BACKOFF_MIN_NEXT_RUN_MINUTES is None else BACKOFF_MIN_NEXT_RUN_MINUTES)
+        interval_cap = float(os.getenv("BACKOFF_MAX_NEXT_RUN_MINUTES", "55") if BACKOFF_MAX_NEXT_RUN_MINUTES is None else BACKOFF_MAX_NEXT_RUN_MINUTES)
+        log(f"[SCHED] rate-limit backoff active: bounds {interval_floor:.1f}-{interval_cap:.1f}m", Fore.LIGHTBLACK_EX)
     else:
-        # Online mode: use ONLINE_* bounds (JSON schedule first, env fallback)
-        online_min = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
-        online_max = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
-        min_delay_override = online_min
-        max_delay_override = online_max
+        interval_floor = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
+        interval_cap = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
     if interval_cap < interval_floor:
         interval_cap = interval_floor
-        # If bounds collapsed, keep floor=cap
-        min_delay_override = interval_floor
-        max_delay_override = interval_cap
-    if interval_cap < interval_floor:
-        interval_cap = interval_floor
-    min_delay = max(0.0, min_delay_override)
+    min_delay = max(
+        0.0,
+        (cycle_start_utc + datetime.timedelta(minutes=float(interval_floor)) - schedule_now_utc).total_seconds() / 60.0,
+    )
     max_delay = max(
         0.0,
-        (cycle_start_utc + datetime.timedelta(minutes=float(max_delay_override)) - schedule_now_utc).total_seconds() / 60.0,
+        (cycle_start_utc + datetime.timedelta(minutes=float(interval_cap)) - schedule_now_utc).total_seconds() / 60.0,
     )
+    if max_delay < min_delay:
+        max_delay = min_delay
     timing_debug_parts: list[str] = []
     if next_delay_minutes is None:
         # Fallback: start from previous interval and nudge ±5/±10 minutes based on volatility change.
@@ -16743,18 +16733,23 @@ def run_cycle():
             prev_note = f" prev={prev_news_intensity:.2f}" if prev_news_intensity is not None and math.isfinite(prev_news_intensity) else ""
             news_note = f"news_intensity={news_intensity:.2f}{prev_note} items={news_items_total} emotion={news_emotion_mean:.2f} -> {news_delta_minutes:+.0f}m"
 
-        interval_after_delta = prev_interval + delta + news_delta_minutes
+        interval_a = prev_interval
+        vol_minutes = float(delta)
+        news_minutes = float(news_delta_minutes)
+        interval_raw = interval_a + vol_minutes + news_minutes
 
-        interval_after_round = round(interval_after_delta / 5.0) * 5.0
+        interval_after_round = round(interval_raw / 5.0) * 5.0
         fallback_interval_from_start = min(max(interval_after_round, interval_floor), interval_cap)
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
         diff_text = f"{diff_value:.4f}" if diff_value is not None and math.isfinite(diff_value) else "n/a"
         cycle_diff_text = f"{diff_cycle:.4f}" if diff_cycle is not None and math.isfinite(diff_cycle) else "n/a"
         intrabar_diff_text = f"{diff_intrabar:.4f}" if diff_intrabar is not None and math.isfinite(diff_intrabar) else "n/a"
+        eq_text = (
+            f"A={interval_a:.2f} + X={vol_minutes:+.0f} + Y={news_minutes:+.0f} = {interval_raw:.2f} "
+            f"-> round5 {interval_after_round:.2f} -> clamp[{interval_floor:.1f}-{interval_cap:.1f}] B={fallback_interval_from_start:.2f}"
+        )
         timing_debug_parts.append(
-            f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {interval_after_delta:.2f}m; "
-            f"{news_note}; round5 -> {interval_after_round:.2f}m; "
-            f"bounds {interval_floor:.1f}-{interval_cap:.1f} -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
+            f"fallback=adaptive {eq_text}; {news_note}; {volatility_note or ''} "
             f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; "
             f"diff_cycle={cycle_diff_text}, diff_intrabar={intrabar_diff_text}; {thresholds_note})"
         )

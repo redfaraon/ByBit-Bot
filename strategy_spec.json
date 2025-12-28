@@ -2,14 +2,14 @@
   "version": "1.1.4",
   "context": {
     "universe": [
-      "XRP/USDT",
-      "DOGE/USDT",
-      "ADA/USDT",
-      "TON/USDT",
-      "SOL/USDT",
-      "AVAX/USDT",
-      "LINK/USDT",
-      "TRX/USDT"
+      "XRP/USDT:USDT",
+      "DOGE/USDT:USDT",
+      "ADA/USDT:USDT",
+      "TON/USDT:USDT",
+      "SOL/USDT:USDT",
+      "AVAX/USDT:USDT",
+      "LINK/USDT:USDT",
+      "TRX/USDT:USDT"
     ],
     "timeframes": {
       "primary": "30m",
@@ -47,6 +47,7 @@
       "source": "news",
       "max_symbols": 8,
       "include_positions": true,
+      "fill_from_fallback": true,
       "affordability": {
         "enabled": true,
         "fill_from_fallback": true
