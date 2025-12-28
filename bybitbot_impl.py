@@ -16704,7 +16704,16 @@ def run_cycle():
             weight_sum += count
         news_items_total = int(total_items)
         news_emotion_mean = float(weighted_abs / weight_sum) if weight_sum > 0 else 0.0
-        items_norm = min(1.0, float(news_items_total) / float(max(1, universe_max_symbols * 3)))
+        items_per_symbol = safe_float(schedule_spec.get("news_intensity_items_per_symbol"))
+        items_per_symbol = (
+            float(items_per_symbol)
+            if items_per_symbol is not None and math.isfinite(items_per_symbol) and items_per_symbol > 0
+            else 3.0
+        )
+        items_norm = min(
+            1.0,
+            float(news_items_total) / float(max(1.0, universe_max_symbols * items_per_symbol)),
+        )
         w_items = safe_float(schedule_spec.get("news_intensity_weight_items"))
         w_emotion = safe_float(schedule_spec.get("news_intensity_weight_emotion"))
         w_items = float(w_items) if w_items is not None and math.isfinite(w_items) and w_items >= 0 else 0.5
@@ -16842,7 +16851,11 @@ def run_cycle():
             else:
                 news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} within neutral band)"
             prev_note = f" prev={prev_news_intensity:.2f}" if prev_news_intensity is not None and math.isfinite(prev_news_intensity) else ""
-            news_note = f"news_intensity={news_intensity:.2f}{prev_note} items={news_items_total} emotion={news_emotion_mean:.2f} -> {news_delta_minutes:+.0f}m"
+            news_note = (
+                f"news_intensity={news_intensity:.2f}{prev_note} items={news_items_total} "
+                f"items_norm={items_norm:.2f} per_symbol={items_per_symbol:.1f} "
+                f"emotion={news_emotion_mean:.2f} -> {news_delta_minutes:+.0f}m"
+            )
 
         interval_a = prev_interval
         vol_minutes = float(delta)
