@@ -17280,9 +17280,24 @@ def main():
                 f"ℹ️ Следующая сессия запланирована на {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
                 f"(~{delay_minutes:.1f} мин)"
             )
-            log(eta_msg, Fore.LIGHTBLACK_EX)
-            send_tg(eta_msg)
-            _write_runtime_status(delay_minutes, target_dt, "sleeping")
+            try:
+                log(eta_msg, Fore.LIGHTBLACK_EX)
+            except Exception:
+                pass
+            try:
+                send_tg(eta_msg)
+            except Exception as exc:
+                try:
+                    log(f"[WARN] Telegram send failed during sleep setup: {exc}", Fore.YELLOW)
+                except Exception:
+                    pass
+            try:
+                _write_runtime_status(delay_minutes, target_dt, "sleeping")
+            except Exception as exc:
+                try:
+                    log(f"[WARN] Failed to write runtime status during sleep setup: {exc}", Fore.YELLOW)
+                except Exception:
+                    pass
 
             progress_enabled = remaining_seconds >= 180
             progress_interval = (
@@ -17312,12 +17327,24 @@ def main():
                         f"ℹ️ Осталось ~{minutes_left:.1f} мин до следующей сессии "
                         f"({eta_local.strftime('%H:%M:%S %Z')})"
                     )
-                    log(progress_msg, Fore.LIGHTBLACK_EX)
-                    send_tg(progress_msg)
+                    try:
+                        log(progress_msg, Fore.LIGHTBLACK_EX)
+                    except Exception:
+                        pass
+                    try:
+                        send_tg(progress_msg)
+                    except Exception:
+                        pass
             except KeyboardInterrupt:
                 log("Interrupted during sleep.", Fore.YELLOW)
                 _write_runtime_status(None, None, "stopped")
                 break
+            except Exception as exc:
+                try:
+                    log(f"[WARN] Sleep loop error (will retry scheduling): {exc}", Fore.YELLOW)
+                except Exception:
+                    pass
+                interrupted = True
             if interrupted:
                 continue
             break
