@@ -2132,7 +2132,10 @@ def _sync_with_remote() -> None:
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
         return
-    git_env = _git_subprocess_env()
+    git_env = _git_subprocess_env() or os.environ.copy()
+    git_env.setdefault("HOME", str(Path.home()))
+    git_env["GIT_TERMINAL_PROMPT"] = "0"
+    git_cmd = ["git", "-c", "credential.helper="]
     try:
         status_proc = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=no"],
@@ -2147,7 +2150,7 @@ def _sync_with_remote() -> None:
         return
     try:
         fetch_proc = subprocess.run(
-            ["git", "fetch", "--all", "--prune"],
+            [*git_cmd, "fetch", "--all", "--prune"],
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,
@@ -2174,7 +2177,7 @@ def _sync_with_remote() -> None:
         return
     try:
         pull_proc = subprocess.run(
-            ["git", "pull", "--ff-only"],
+            [*git_cmd, "pull", "--ff-only"],
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,

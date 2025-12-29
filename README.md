@@ -9,10 +9,11 @@
    python3 -m pip install --user -U ccxt pandas requests colorama "openai>=1.0.0" python-dotenv pyyaml matplotlib
    ```
 
-2. Disable password request from github
-   ```
-   git config --global credential.helper store
-   ```
+2. Git auth (server/systemd)
+
+   - For a **public** repository, `git fetch/pull` over HTTPS should work without any credentials.
+   - Avoid `git config --global credential.helper store` on servers: a stale/invalid credential can make `git fetch` prompt for username/password, and `systemd` has no TTY (auto-pull will fail after reboot).
+   - If you still need non-interactive auth (e.g., private fork): use an SSH key or set `BYBITBOT_GIT_TOKEN` / `GITHUB_TOKEN` in `.env`.
 
 3. Export environment variables (example):
    ```bash
