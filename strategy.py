@@ -698,7 +698,7 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
     rsi_extreme = (side == "long" and ctx.tf30.rsi >= rsi_long_tp) or (side == "short" and ctx.tf30.rsi <= rsi_short_tp)
     news_against = (side == "long" and ctx.news_bias == "negative") or (side == "short" and ctx.news_bias == "positive")
     close_spec = EVENTS_SPEC.get("close", {}) if isinstance(EVENTS_SPEC, dict) else {}
-    oi_reverse_enabled = bool(close_spec.get("oi_reverse", True))
+    oi_reverse_enabled = bool(close_spec.get("oi_reverse", False))
     oi_flip = oi_reverse_enabled and ctx.oi_trend == ("down" if side == "long" else "up")
     oi_confirm = close_spec.get("oi_reverse_confirm") if isinstance(close_spec, dict) else {}
     require_price_weak = bool(oi_confirm.get("price_weak")) if isinstance(oi_confirm, dict) else False

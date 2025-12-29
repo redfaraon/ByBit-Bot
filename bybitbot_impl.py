@@ -60,6 +60,7 @@ _EXIT_SIGNAL_TS: float | None = None
 _START_TS = time.time()
 _LOCK_FILE: Path | None = None
 _LOCK_OWNED = False
+_GIT_AUTH_HINT_LOGGED = False
 
 
 def _signal_name(signum: int) -> str:
@@ -157,6 +158,78 @@ def _acquire_lock() -> bool:
     except Exception as exc:
         log(f"[LOCK] Failed to write lock file {lock_path}: {exc}", Fore.YELLOW)
     return True
+
+
+def _git_auth_token() -> str | None:
+    candidates = (
+        os.getenv("BYBITBOT_GIT_TOKEN"),
+        os.getenv("GITHUB_TOKEN"),
+        os.getenv("GIT_TOKEN"),
+    )
+    for raw in candidates:
+        if not raw:
+            continue
+        token = raw.strip()
+        if token:
+            return token
+    return None
+
+
+def _git_auth_username() -> str:
+    candidates = (
+        os.getenv("BYBITBOT_GIT_USERNAME"),
+        os.getenv("GITHUB_USERNAME"),
+        os.getenv("GIT_USERNAME"),
+    )
+    for raw in candidates:
+        if not raw:
+            continue
+        username = raw.strip()
+        if username:
+            return username
+    return "x-access-token"
+
+
+def _ensure_git_askpass_script() -> Path | None:
+    if os.name != "posix":
+        return None
+    token = _git_auth_token()
+    if not token:
+        return None
+    target_dir = STATE_DIR or REPO_ROOT
+    path = target_dir / ".bybitbot_git_askpass.sh"
+    if path.exists():
+        return path
+    script = (
+        "#!/usr/bin/env sh\n"
+        'prompt="$1"\n'
+        'case "$prompt" in\n'
+        "  *sername*) printf '%s\\n' \"${BYBITBOT_GIT_USERNAME:-x-access-token}\" ;;\n"
+        "  *) printf '%s\\n' \"${BYBITBOT_GIT_TOKEN:-}\" ;;\n"
+        "esac\n"
+    )
+    try:
+        path.write_text(script, encoding="utf-8", newline="\n")
+        os.chmod(path, 0o700)
+    except Exception:
+        return None
+    return path
+
+
+def _git_subprocess_env() -> dict[str, str] | None:
+    token = _git_auth_token()
+    if not token:
+        return None
+    askpass = _ensure_git_askpass_script()
+    if not askpass:
+        return None
+    env = os.environ.copy()
+    env.setdefault("HOME", str(Path.home()))
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = str(askpass)
+    env["BYBITBOT_GIT_TOKEN"] = token
+    env["BYBITBOT_GIT_USERNAME"] = _git_auth_username()
+    return env
 
 
 def _install_process_diagnostics() -> None:
@@ -2059,6 +2132,7 @@ def _sync_with_remote() -> None:
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
         return
+    git_env = _git_subprocess_env()
     try:
         status_proc = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=no"],
@@ -2075,6 +2149,7 @@ def _sync_with_remote() -> None:
         fetch_proc = subprocess.run(
             ["git", "fetch", "--all", "--prune"],
             cwd=REPO_ROOT,
+            env=git_env,
             capture_output=True,
             text=True,
             check=True,
@@ -2083,7 +2158,16 @@ def _sync_with_remote() -> None:
         if fetch_output:
             log(f"[GIT] fetch: {fetch_output}", Fore.LIGHTBLACK_EX)
     except subprocess.CalledProcessError as exc:
-        log(f"[WARN] Git fetch failed: {exc.stderr or exc.stdout or exc}", Fore.YELLOW)
+        details = exc.stderr or exc.stdout or str(exc)
+        if "could not read username" in (details or "").lower() or "authentication failed" in (details or "").lower():
+            global _GIT_AUTH_HINT_LOGGED
+            if not _GIT_AUTH_HINT_LOGGED:
+                log(
+                    "[GIT] Auth required for fetch. Configure SSH deploy key or set BYBITBOT_GIT_TOKEN/GITHUB_TOKEN in .env for non-interactive pulls.",
+                    Fore.YELLOW,
+                )
+                _GIT_AUTH_HINT_LOGGED = True
+        log(f"[WARN] Git fetch failed: {details}", Fore.YELLOW)
         return
     if working_tree_dirty:
         log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
@@ -2092,6 +2176,7 @@ def _sync_with_remote() -> None:
         pull_proc = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=REPO_ROOT,
+            env=git_env,
             capture_output=True,
             text=True,
             check=True,

@@ -165,15 +165,23 @@
       "rsi_long": 70,
       "rsi_short": 30
     },
-    "hedge": {
-      "funding_flip": 0.0001,
-      "size_pct": 0.5
-    },
-    "modify_position": {
-      "rsi_long": [
-        42,
-        65
-      ],
+  "hedge": {
+    "funding_flip": 0.0001,
+    "size_pct": 0.5
+  },
+  "close": {
+    "confidence": 0.84,
+    "oi_reverse": true,
+    "oi_reverse_confirm": {
+      "price_weak": true,
+      "atr_hot": true
+    }
+  },
+  "modify_position": {
+    "rsi_long": [
+      42,
+      65
+    ],
       "rsi_short": [
         35,
         58

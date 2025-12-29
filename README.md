@@ -101,6 +101,8 @@ If you're deploying on a Linux server (Ubuntu/Debian), run the bot under `system
    WantedBy=multi-user.target
    ```
 
+   If the repository is private, ensure `git fetch` can run non-interactively (otherwise auto-pull will fail after reboot). Recommended: use an SSH deploy key and set `origin` to `git@github.com:redfaraon/ByBit-Bot.git`. Alternative: set `BYBITBOT_GIT_TOKEN` (or `GITHUB_TOKEN`) in `.env` so the bot can authenticate during `git fetch`.
+
 3. Enable and start it:
    ```bash
    sudo systemctl daemon-reload
