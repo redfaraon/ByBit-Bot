@@ -58,6 +58,8 @@ _MODULE_RELOAD_FINGERPRINTS: dict[str, float] = {}
 _EXIT_SIGNAL_NAME: str | None = None
 _EXIT_SIGNAL_TS: float | None = None
 _START_TS = time.time()
+_LOCK_FILE: Path | None = None
+_LOCK_OWNED = False
 
 
 def _signal_name(signum: int) -> str:
@@ -73,6 +75,88 @@ def _read_proc_text(path: str) -> str | None:
             return fh.read().strip()
     except Exception:
         return None
+
+
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "posix":
+        return Path(f"/proc/{pid}").exists()
+    try:
+        os.kill(pid, 0)
+    except Exception:
+        return False
+    return True
+
+
+def _pid_cmdline(pid: int) -> str | None:
+    if os.name != "posix":
+        return None
+    raw = _read_proc_text(f"/proc/{pid}/cmdline")
+    if not raw:
+        return None
+    return raw.replace("\x00", " ").strip()
+
+
+def _lock_path() -> Path:
+    lock_override = os.getenv("BYBITBOT_LOCK_FILE")
+    if lock_override:
+        try:
+            return Path(lock_override).expanduser().resolve()
+        except Exception:
+            return Path(lock_override)
+    return (STATE_DIR or REPO_ROOT) / "bybitbot.lock"
+
+
+def _acquire_lock() -> bool:
+    global _LOCK_FILE, _LOCK_OWNED
+    if os.getenv("BYBITBOT_DISABLE_LOCK", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    lock_path = _lock_path()
+    _LOCK_FILE = lock_path
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    current_boot_id = _read_proc_text("/proc/sys/kernel/random/boot_id")
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = None
+        if isinstance(existing, dict):
+            existing_pid = safe_int(existing.get("pid") or 0)
+            existing_boot_id = existing.get("boot_id")
+            cmdline = _pid_cmdline(existing_pid) if existing_pid else None
+            alive = _is_pid_running(existing_pid)
+            if (
+                alive
+                and (not current_boot_id or not existing_boot_id or existing_boot_id == current_boot_id)
+                and (not cmdline or "bybitbot.py" in cmdline or "bybitbot_impl.py" in cmdline)
+            ):
+                log(
+                    f"[LOCK] Another instance is running (pid={existing_pid}, boot_id={existing_boot_id or 'n/a'}). Exiting.",
+                    Fore.YELLOW,
+                )
+                return False
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    payload = {
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "boot_id": current_boot_id,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "cwd": os.getcwd(),
+        "script": str(Path(__file__).resolve()),
+    }
+    try:
+        lock_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _LOCK_OWNED = True
+    except Exception as exc:
+        log(f"[LOCK] Failed to write lock file {lock_path}: {exc}", Fore.YELLOW)
+    return True
 
 
 def _install_process_diagnostics() -> None:
@@ -136,6 +220,17 @@ def _install_process_diagnostics() -> None:
         try:
             sys.stdout.flush()
             sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            if _LOCK_OWNED and _LOCK_FILE:
+                try:
+                    existing = json.loads(_LOCK_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = None
+                lock_pid = safe_int(existing.get("pid")) if isinstance(existing, dict) else None
+                if not lock_pid or lock_pid == os.getpid():
+                    _LOCK_FILE.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -17343,6 +17438,9 @@ def main():
         pass
     ensure_version_backup()
     refresh_settings()
+    if not _acquire_lock():
+        _write_runtime_status(None, None, "stopped")
+        return
     base_margin_utilization = ORDER_MARGIN_UTILIZATION
     base_auto_margin_ratio = AUTO_MARGIN_SCALE_RATIO
     configure_telegram_bot()

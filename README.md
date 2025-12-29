@@ -70,6 +70,51 @@ Set `TELEGRAM_FORWARD_LOGS=1` to mirror console logs into Telegram. The bot batc
    python bybitbot.py
    ```
 
+## Running as a systemd service (recommended)
+
+If you're deploying on a Linux server (Ubuntu/Debian), run the bot under `systemd` so it autostarts on reboot and restarts on failures.
+
+1. Create a log directory:
+   ```bash
+   sudo mkdir -p /var/log/bybitbot
+   ```
+
+2. Create a unit file (example: `/etc/systemd/system/bybitbot.service`):
+   ```ini
+   [Unit]
+   Description=ByBit Bot
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   WorkingDirectory=/root/bot/ByBit-Bot
+   Environment=PY_COLORS=1
+   Environment=FORCE_COLOR=1
+   ExecStart=/usr/bin/python3 /root/bot/ByBit-Bot/bybitbot.py
+   Restart=always
+   RestartSec=5
+   StandardOutput=append:/var/log/bybitbot/console.log
+   StandardError=append:/var/log/bybitbot/console.log
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+3. Enable and start it:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now bybitbot
+   ```
+
+4. Useful commands:
+   ```bash
+   sudo systemctl status bybitbot --no-pager
+   sudo systemctl restart bybitbot
+   sudo journalctl -u bybitbot -f
+   tail -f /var/log/bybitbot/console.log
+   ```
+
 # Scheduled restart & update workflow
 
 Use `manage_update.py` to stop the bot, run your update commands, and restart it at the planned trading time.
