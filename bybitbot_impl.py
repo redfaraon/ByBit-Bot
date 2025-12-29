@@ -2128,6 +2128,44 @@ def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
     return commit_hash or None, commit_message or None, commit_timestamp or None
 
 
+def _git_upstream_remote() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return None
+    upstream = (proc.stdout or "").strip()
+    if not upstream or "/" not in upstream:
+        return None
+    remote, _branch = upstream.split("/", 1)
+    remote = remote.strip()
+    return remote or None
+
+
+def _git_default_remote() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "remote"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return "origin"
+    remotes = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if not remotes:
+        return "origin"
+    if "origin" in remotes:
+        return "origin"
+    return remotes[0]
+
+
 def _sync_with_remote() -> None:
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
@@ -2136,6 +2174,7 @@ def _sync_with_remote() -> None:
     git_env.setdefault("HOME", str(Path.home()))
     git_env["GIT_TERMINAL_PROMPT"] = "0"
     git_cmd = ["git", "-c", "credential.helper="]
+    remote = _git_upstream_remote() or _git_default_remote() or "origin"
     try:
         status_proc = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=no"],
@@ -2150,7 +2189,7 @@ def _sync_with_remote() -> None:
         return
     try:
         fetch_proc = subprocess.run(
-            [*git_cmd, "fetch", "--all", "--prune"],
+            [*git_cmd, "fetch", remote, "--prune"],
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,
