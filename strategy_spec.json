@@ -1,5 +1,5 @@
 {
-  "version": "1.1.4",
+  "version": "1.1.5",
   "context": {
     "universe": [
       "XRP/USDT:USDT",
@@ -81,26 +81,31 @@
   },
   "rules": {
     "trend": {
-      "require_secondary_tf": false,
+      "require_secondary_tf": true,
+      "min_ema_spread_pct": 0.0015,
       "long": {
-        "rsi_max": 68,
+        "rsi_max": 65,
+        "rsi4h_min": 45,
         "funding_min": -0.0004,
         "news_block": [
           "negative"
         ],
         "require_oi_up": false,
+        "oi_trend_required": "not_down",
         "confidence": {
           "market": 0.55,
           "limit": 0.45
         }
       },
       "short": {
-        "rsi_min": 32,
+        "rsi_min": 35,
+        "rsi4h_max": 55,
         "funding_max": 0.0004,
         "news_block": [
           "positive"
         ],
         "require_oi_up": false,
+        "oi_trend_required": "not_up",
         "confidence": {
           "market": 0.55,
           "limit": 0.45

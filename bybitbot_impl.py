@@ -371,9 +371,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.8"
+BOT_VERSION = "1.3.9-legacy"
 BOT_CHANGELOG = (
-    "Scheduler: honor offline bounds from JSON, add news-intensity interval nudges, and log A+X+Y=B timing breakdown."
+    "Strategy: tighten trend entries (4h confirmation, EMA spread floor, OI/RSI4h filters) and improve git auto-pull auth after reboot."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 

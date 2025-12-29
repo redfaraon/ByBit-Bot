@@ -472,6 +472,20 @@ def _with_trace(metadata: dict[str, Any] | None, trace: Sequence[str] | None) ->
     return meta
 
 
+def _oi_trend_allows(required: Any, actual: str) -> bool:
+    req = str(required or "").strip().lower()
+    if not req or req in {"any", "*", "none"}:
+        return True
+    actual_norm = (actual or "").strip().lower()
+    if req in {"up", "down", "flat"}:
+        return actual_norm == req
+    if req in {"not_up", "not-up"}:
+        return actual_norm != "up"
+    if req in {"not_down", "not-down"}:
+        return actual_norm != "down"
+    return True
+
+
 def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -> float:
     base = ctx.risk_pct or 0.01
     multiplier = float(SIZING_MULTIPLIERS.get(regime, 1.0))
@@ -512,14 +526,28 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     trend_rules = RULES_SPEC.get("trend", {})
     long_rule = trend_rules.get("long", {})
     short_rule = trend_rules.get("short", {})
+    min_spread_pct = float(trend_rules.get("min_ema_spread_pct", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    ema_spread_pct = 0.0
+    if ctx.price and math.isfinite(ctx.price) and ctx.price > 0:
+        ema_spread_pct = abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price
 
     if trend == "long":
         confidence_map = long_rule.get("confidence", {})
+        oi_required = (
+            long_rule.get("oi_trend_required")
+            if isinstance(long_rule, dict)
+            else None
+        )
+        if isinstance(long_rule, dict) and long_rule.get("require_oi_up", False):
+            oi_required = oi_required or "up"
+        rsi4h_min = float(long_rule.get("rsi4h_min", 0.0)) if isinstance(long_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi <= float(long_rule.get("rsi_max", 65))
+            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and (not rsi4h_min or ctx.tf4h.rsi >= rsi4h_min)
             and news not in set(long_rule.get("news_block", []))
             and funding >= float(long_rule.get("funding_min", -0.0002))
-            and (not long_rule.get("require_oi_up", True) or oi_up)
+            and _oi_trend_allows(oi_required, ctx.oi_trend)
         )
         if cond:
             order_type = "limit" if (ctx.tf30.atr_is_hot or ctx.is_flat) else "market"
@@ -542,6 +570,8 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"order={order_type}",
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
+                    f"ema_spread={ema_spread_pct:.4f}",
+                    f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
             return StrategyEvent(
@@ -555,11 +585,21 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             )
     elif trend == "short":
         confidence_map = short_rule.get("confidence", {})
+        oi_required = (
+            short_rule.get("oi_trend_required")
+            if isinstance(short_rule, dict)
+            else None
+        )
+        if isinstance(short_rule, dict) and short_rule.get("require_oi_up", False):
+            oi_required = oi_required or "up"
+        rsi4h_max = float(short_rule.get("rsi4h_max", 0.0)) if isinstance(short_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi >= float(short_rule.get("rsi_min", 35))
+            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and (not rsi4h_max or ctx.tf4h.rsi <= rsi4h_max)
             and news not in set(short_rule.get("news_block", []))
             and funding <= float(short_rule.get("funding_max", 0.0002))
-            and (not short_rule.get("require_oi_up", True) or oi_up)
+            and _oi_trend_allows(oi_required, ctx.oi_trend)
         )
         if cond:
             order_type = "limit" if (ctx.tf30.atr_is_hot or ctx.is_flat) else "market"
@@ -582,6 +622,8 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"order={order_type}",
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
+                    f"ema_spread={ema_spread_pct:.4f}",
+                    f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
             return StrategyEvent(
