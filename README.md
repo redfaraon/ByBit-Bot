@@ -203,6 +203,16 @@ python manage_update.py status
 - `--no-restart` stops and updates without starting the bot.
 - `--foreground` keeps the bot attached to the current terminal.
 
+# Auto-update across branches
+
+Before each cycle the bot:
+
+1. Fetches the configured remote (`git fetch --prune`).
+2. Reads `refs/remotes/<remote>/HEAD` and checks out whichever branch it currently points at (`git checkout -B <branch> <remote>/<branch>`).
+3. Runs `git pull --ff-only` to fast-forward that branch and restart from the new commit.
+
+In practice this keeps every instance aligned with the latest remote `HEAD` (any branch), so when a new commit lands on another branch the bot will switch to that branch automatically after the next fetch/pull cycle.
+
 ## Bybit timing/nonce errors
 
 If you see InvalidNonce / retCode 10002 from Bybit complaining about timestamp/recv_window, set a larger receive window and let CCXT adjust for server time:
