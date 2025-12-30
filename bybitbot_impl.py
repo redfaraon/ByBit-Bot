@@ -2199,37 +2199,97 @@ def _git_current_commit(git_env: Mapping[str, str]) -> str | None:
         return None
 
 
-def _resolve_remote_head(remote: str, git_env: Mapping[str, str]) -> tuple[str | None, str | None]:
+def _git_commit_timestamp(commit_hash: str, git_env: Mapping[str, str]) -> int | None:
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "--symbolic-full-name", f"refs/remotes/{remote}/HEAD"],
+            ["git", "show", "-s", "--format=%ct", commit_hash],
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,
             text=True,
             check=True,
         )
-        ref = (proc.stdout or "").strip()
+        raw = (proc.stdout or "").strip()
+        return int(raw)
     except Exception:
-        # fall back when symbolic head is missing; skip auto-branch selection
-        return None, None
-    if not ref or not ref.startswith(f"refs/remotes/{remote}/"):
-        return None, None
-    branch_name = ref.split("/", 3)[-1]
-    target_ref = f"refs/remotes/{remote}/{branch_name}"
+        return None
+
+
+def _git_newest_remote_branch(remote: str, git_env: Mapping[str, str]) -> tuple[str | None, str | None, int | None]:
+    """
+    Return (branch_name, commit_hash, commit_ts) for the most recent commit across all remote branches.
+
+    Uses committer timestamp; excludes refs/remotes/<remote>/HEAD.
+    """
     try:
-        commit_proc = subprocess.run(
-            ["git", "rev-parse", "--verify", target_ref],
+        proc = subprocess.run(
+            [
+                "git",
+                "for-each-ref",
+                f"refs/remotes/{remote}",
+                "--format=%(refname:short)\t%(committerdate:unix)\t%(objectname)",
+            ],
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,
             text=True,
             check=True,
         )
-        commit_hash = (commit_proc.stdout or "").strip()
     except Exception:
-        commit_hash = None
-    return branch_name, commit_hash
+        return None, None, None
+    best_branch: str | None = None
+    best_commit: str | None = None
+    best_ts: int | None = None
+    for line in (proc.stdout or "").splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 3:
+            continue
+        ref_short, ts_raw, commit_hash = parts
+        if ref_short == f"{remote}/HEAD":
+            continue
+        if not ref_short.startswith(f"{remote}/"):
+            continue
+        branch_name = ref_short.split("/", 1)[1]
+        try:
+            ts = int(ts_raw)
+        except Exception:
+            continue
+        if best_ts is None or ts > best_ts:
+            best_ts = ts
+            best_commit = commit_hash
+            best_branch = branch_name
+    return best_branch, best_commit, best_ts
+
+
+def _read_fallback_history() -> dict[str, Any]:
+    try:
+        path = FALLBACK_HISTORY_FILE
+    except Exception:
+        return {}
+    if not path:
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_fallback_history(state: dict[str, Any]) -> None:
+    try:
+        path = FALLBACK_HISTORY_FILE
+    except Exception:
+        return
+    if not path:
+        return
+    try:
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _sync_with_remote() -> None:
@@ -2277,21 +2337,38 @@ def _sync_with_remote() -> None:
                 _GIT_AUTH_HINT_LOGGED = True
         log(f"[WARN] Git fetch failed: {details}", Fore.YELLOW)
         return
-    follow_remote_head = (os.getenv("GIT_FOLLOW_REMOTE_HEAD") or "").strip().lower() in {"1", "true", "yes", "on"}
-    if follow_remote_head:
-        remote_head_branch, remote_head_commit = _resolve_remote_head(remote, git_env)
-        local_branch = _git_current_branch(git_env)
-        local_commit = _git_current_commit(git_env)
-        if remote_head_branch and remote_head_commit:
-            needs_switch = (
-                remote_head_branch != local_branch
-                or (local_commit is not None and local_commit != remote_head_commit)
+    newest_branch, newest_commit, newest_ts = _git_newest_remote_branch(remote, git_env)
+    current_commit = _git_current_commit(git_env)
+    if newest_branch and newest_commit and newest_ts:
+        fallback_state = _read_fallback_history()
+        in_fallback = bool(fallback_state.get("fallback_active"))
+        failed_head = fallback_state.get("fallback_failed_head")
+        failed_ts = None
+        if in_fallback and isinstance(failed_head, str) and failed_head:
+            failed_ts = _git_commit_timestamp(failed_head, git_env)
+        if in_fallback and failed_ts is not None and newest_ts <= failed_ts:
+            log(
+                f"[GIT] Backup mode active; staying on current branch until a newer commit appears "
+                f"(failed={failed_head[:7]} ts={failed_ts}, newest={newest_commit[:7]} ts={newest_ts}).",
+                Fore.LIGHTBLACK_EX,
             )
-            if needs_switch:
-                checkout_target = f"{remote}/{remote_head_branch}"
+        else:
+            if in_fallback and failed_ts is not None and newest_ts > failed_ts:
+                log(
+                    f"[RECOVER] Newer commit detected; exiting backup mode -> {newest_branch} {newest_commit[:7]}",
+                    Fore.LIGHTBLUE_EX,
+                )
+                try:
+                    fallback_state["fallback_active"] = False
+                    fallback_state["fallback_branch_next"] = newest_branch
+                    _write_fallback_history(fallback_state)
+                except Exception:
+                    pass
+            if current_commit and current_commit != newest_commit:
+                checkout_target = f"{remote}/{newest_branch}"
                 try:
                     subprocess.run(
-                        [*git_cmd, "checkout", "-B", remote_head_branch, checkout_target],
+                        [*git_cmd, "checkout", "-B", newest_branch, checkout_target],
                         cwd=REPO_ROOT,
                         env=git_env,
                         capture_output=True,
@@ -2299,8 +2376,7 @@ def _sync_with_remote() -> None:
                         check=True,
                     )
                     log(
-                        f"[GIT] switched to {remote_head_branch} ({remote_head_commit[:7]}) to follow remote HEAD "
-                        f"(GIT_FOLLOW_REMOTE_HEAD=1)",
+                        f"[GIT] switched to newest commit {newest_commit[:7]} on branch {newest_branch}",
                         Fore.LIGHTBLACK_EX,
                     )
                 except subprocess.CalledProcessError as exc:
@@ -17665,11 +17741,16 @@ def main():
         )
     except Exception:
         pass
-    # If we are running from a backup script but the repo is reachable, jump back to the latest code.
+    # If we are running from a backup script, only jump back when fallback mode is not active.
     try:
+        _configure_state_paths()
         script_path = Path(__file__).resolve()
         if "backups" in script_path.parts and (REPO_ROOT / ".git").exists():
-            _restart_with_latest_code("[RECOVER] Running from backup, switching to latest HEAD")
+            history = _read_fallback_history()
+            if bool(history.get("fallback_active")):
+                log("[RECOVER] Running from backup; fallback_active=1 so staying on backup until a newer commit appears.", Fore.YELLOW)
+            else:
+                _restart_with_latest_code("[RECOVER] Running from backup, switching to latest code")
     except Exception:
         pass
     ensure_version_backup()

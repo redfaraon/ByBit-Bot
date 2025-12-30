@@ -205,21 +205,17 @@ python manage_update.py status
 
 # Auto-update across branches
 
-By default, auto-update stays on the **current branch** (the same behavior as before): it fetches and fast-forwards without switching branches.
-
-If you want instances to automatically follow whatever branch the remote `HEAD` points at, enable it explicitly:
-
-```bash
-export GIT_FOLLOW_REMOTE_HEAD=1
-```
-
-With `GIT_FOLLOW_REMOTE_HEAD=1`, before each cycle the bot:
+Before each cycle the bot:
 
 1. Fetches the configured remote (`git fetch --prune`).
-2. Reads `refs/remotes/<remote>/HEAD` and checks out whichever branch it currently points at (`git checkout -B <branch> <remote>/<branch>`).
-3. Runs `git pull --ff-only` to fast-forward that branch and restart from the new commit.
+2. Finds the **newest commit across all remote branches** (by committer timestamp).
+3. If the current checkout is older, checks out the branch that contains that newest commit and then runs `git pull --ff-only`.
 
-In practice this keeps every instance aligned with the latest remote `HEAD` (any branch), so when a new commit lands on another branch the bot will switch to that branch automatically after the next fetch/pull cycle.
+Practical behavior:
+
+- If you manually switch the server to the branch that currently has the newest commit, the bot will **not** jump away.
+- If you manually switch to an older branch/commit, the bot will automatically jump back to the newest commit.
+- If backup mode is active, the bot stays on stable/backup until a **newer** commit appears, then exits backup mode automatically.
 
 ## Bybit timing/nonce errors
 
