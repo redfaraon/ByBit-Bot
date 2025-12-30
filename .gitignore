@@ -23,3 +23,17 @@ cycle_state.json
 equity_history.json
 ai_decisions.log
 error.log
+
+# Runtime state / data (must not block auto-pull)
+state/
+support_sandboxes/
+support_sandboxes.json
+commands_help_state.json
+universe_cache.json
+master_decisions.json
+ai_decision_summary.json
+ai_requests.log*
+run.stdout.log
+CHANGELOG.txt
+bybit.log.*
+fallback_history.json*

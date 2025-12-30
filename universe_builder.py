@@ -20,6 +20,7 @@ def build_universe(
     source = str(mode.get("source") or "fixed").strip().lower()
     max_symbols = max(1, int(mode.get("max_symbols") or 8))
     include_positions = bool(mode.get("include_positions", True))
+    fill_from_fallback = bool(mode.get("fill_from_fallback", False))
 
     fixed_list = [str(sym).strip().upper() for sym in (ctx.get("universe") or []) if sym]
     news_priority = mode.get("news_priority") if isinstance(mode.get("news_priority"), dict) else {}
@@ -63,9 +64,10 @@ def build_universe(
 
     # Fixed universe is a fallback:
     # - always used in 'fixed' mode
-    # - used in 'news' mode only when no eligible news items were found
-    allow_fixed_fallback = source != "news" or not news_added
-    if allow_fixed_fallback:
+    # - used in 'news' mode when no eligible news items were found
+    # - optionally used in 'news' mode to fill remaining slots up to max_symbols
+    allow_fixed_fallback = source != "news" or not news_added or fill_from_fallback
+    if allow_fixed_fallback and len(result) < max_symbols:
         for sym in fixed_list:
             if len(result) >= max_symbols:
                 break

@@ -142,6 +142,7 @@ NEWS_THRESHOLDS = CONTEXT_SPEC.get("news", {})
 NEWS_POSITIVE = float(NEWS_THRESHOLDS.get("positive", 0.55))
 NEWS_NEGATIVE = float(NEWS_THRESHOLDS.get("negative", -0.55))
 NEWS_NEUTRAL_BAND = float(NEWS_THRESHOLDS.get("neutral_band", 0.15))
+SCHEDULE_SPEC = CONTEXT_SPEC.get("schedule", {}) if isinstance(CONTEXT_SPEC.get("schedule", {}), dict) else {}
 
 ATR_SIGMA_HOT = float(THRESHOLDS.get("atr_sigma_hot", 2.5))
 ATR_LIMIT_MULT = float(THRESHOLDS.get("atr_limit_multiplier", 1.7))
@@ -194,6 +195,50 @@ def _news_bias(score: float | None) -> str:
     if abs(score) <= NEWS_NEUTRAL_BAND:
         return "neutral"
     return "uncertain"
+
+
+def schedule_bounds(for_mode: str) -> tuple[float, float]:
+    """
+    Return (min, max) minutes for a given mode: 'offline', 'online', or 'backoff'.
+    Falls back to legacy defaults if not present in SCHEDULE_SPEC.
+    """
+    mode = for_mode.lower().strip()
+    defaults = {
+        "offline": (5.0, 35.0),
+        "online": (10.0, 45.0),
+        "backoff": (25.0, 55.0),
+    }
+    spec = SCHEDULE_SPEC if isinstance(SCHEDULE_SPEC, dict) else {}
+    key_min = f"{mode}_min"
+    key_max = f"{mode}_max"
+    try:
+        min_val = float(spec.get(key_min, defaults.get(mode, (5.0, 35.0))[0]))
+    except Exception:
+        min_val = defaults.get(mode, (5.0, 35.0))[0]
+    try:
+        max_val = float(spec.get(key_max, defaults.get(mode, (5.0, 35.0))[1]))
+    except Exception:
+        max_val = defaults.get(mode, (5.0, 35.0))[1]
+    if max_val < min_val:
+        max_val = min_val
+    return (min_val, max_val)
+
+
+def schedule_news_bias_factors() -> tuple[float, float]:
+    """
+    Return (boost, cut) multipliers based on news bias. boost < 1.0 shortens interval,
+    cut > 1.0 lengthens interval.
+    """
+    spec = SCHEDULE_SPEC if isinstance(SCHEDULE_SPEC, dict) else {}
+    try:
+        boost = float(spec.get("news_bias_boost", 0.9))
+    except Exception:
+        boost = 0.9
+    try:
+        cut = float(spec.get("news_bias_cut", 1.15))
+    except Exception:
+        cut = 1.15
+    return boost, cut
 
 
 def _extract_oi_values(history: Sequence[Any] | None) -> list[float]:
@@ -319,13 +364,24 @@ class StrategyContext:
 
     @property
     def trend_bias(self) -> str | None:
+        trend_rules = RULES_SPEC.get("trend", {}) if isinstance(RULES_SPEC, dict) else {}
+        require_secondary = True
+        if isinstance(trend_rules, dict):
+            require_secondary = bool(trend_rules.get("require_secondary_tf", True))
+
         bull30 = self.tf30.ema20 and self.tf30.ema50 and self.tf30.ema20 > self.tf30.ema50
         bull4h = self.tf4h.ema20 and self.tf4h.ema50 and self.tf4h.ema20 > self.tf4h.ema50
         bear30 = self.tf30.ema20 and self.tf30.ema50 and self.tf30.ema20 < self.tf30.ema50
         bear4h = self.tf4h.ema20 and self.tf4h.ema50 and self.tf4h.ema20 < self.tf4h.ema50
-        if bull30 and bull4h:
+        if require_secondary:
+            if bull30 and bull4h:
+                return "long"
+            if bear30 and bear4h:
+                return "short"
+            return None
+        if bull30:
             return "long"
-        if bear30 and bear4h:
+        if bear30:
             return "short"
         return None
 
@@ -416,6 +472,20 @@ def _with_trace(metadata: dict[str, Any] | None, trace: Sequence[str] | None) ->
     return meta
 
 
+def _oi_trend_allows(required: Any, actual: str) -> bool:
+    req = str(required or "").strip().lower()
+    if not req or req in {"any", "*", "none"}:
+        return True
+    actual_norm = (actual or "").strip().lower()
+    if req in {"up", "down", "flat"}:
+        return actual_norm == req
+    if req in {"not_up", "not-up"}:
+        return actual_norm != "up"
+    if req in {"not_down", "not-down"}:
+        return actual_norm != "down"
+    return True
+
+
 def _size_for_regime(ctx: StrategyContext, regime: str, *, scale: float = 1.0) -> float:
     base = ctx.risk_pct or 0.01
     multiplier = float(SIZING_MULTIPLIERS.get(regime, 1.0))
@@ -456,14 +526,28 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     trend_rules = RULES_SPEC.get("trend", {})
     long_rule = trend_rules.get("long", {})
     short_rule = trend_rules.get("short", {})
+    min_spread_pct = float(trend_rules.get("min_ema_spread_pct", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    ema_spread_pct = 0.0
+    if ctx.price and math.isfinite(ctx.price) and ctx.price > 0:
+        ema_spread_pct = abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price
 
     if trend == "long":
         confidence_map = long_rule.get("confidence", {})
+        oi_required = (
+            long_rule.get("oi_trend_required")
+            if isinstance(long_rule, dict)
+            else None
+        )
+        if isinstance(long_rule, dict) and long_rule.get("require_oi_up", False):
+            oi_required = oi_required or "up"
+        rsi4h_min = float(long_rule.get("rsi4h_min", 0.0)) if isinstance(long_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi <= float(long_rule.get("rsi_max", 65))
+            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and (not rsi4h_min or ctx.tf4h.rsi >= rsi4h_min)
             and news not in set(long_rule.get("news_block", []))
             and funding >= float(long_rule.get("funding_min", -0.0002))
-            and (not long_rule.get("require_oi_up", True) or oi_up)
+            and _oi_trend_allows(oi_required, ctx.oi_trend)
         )
         if cond:
             order_type = "limit" if (ctx.tf30.atr_is_hot or ctx.is_flat) else "market"
@@ -486,6 +570,8 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"order={order_type}",
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
+                    f"ema_spread={ema_spread_pct:.4f}",
+                    f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
             return StrategyEvent(
@@ -499,11 +585,21 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
             )
     elif trend == "short":
         confidence_map = short_rule.get("confidence", {})
+        oi_required = (
+            short_rule.get("oi_trend_required")
+            if isinstance(short_rule, dict)
+            else None
+        )
+        if isinstance(short_rule, dict) and short_rule.get("require_oi_up", False):
+            oi_required = oi_required or "up"
+        rsi4h_max = float(short_rule.get("rsi4h_max", 0.0)) if isinstance(short_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi >= float(short_rule.get("rsi_min", 35))
+            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and (not rsi4h_max or ctx.tf4h.rsi <= rsi4h_max)
             and news not in set(short_rule.get("news_block", []))
             and funding <= float(short_rule.get("funding_max", 0.0002))
-            and (not short_rule.get("require_oi_up", True) or oi_up)
+            and _oi_trend_allows(oi_required, ctx.oi_trend)
         )
         if cond:
             order_type = "limit" if (ctx.tf30.atr_is_hot or ctx.is_flat) else "market"
@@ -526,6 +622,8 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"order={order_type}",
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
+                    f"ema_spread={ema_spread_pct:.4f}",
+                    f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
             return StrategyEvent(
@@ -542,18 +640,32 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     counter = ctx.countertrend_bias
     if not counter:
         return None
+    counter_rules = RULES_SPEC.get("countertrend", {}) if isinstance(RULES_SPEC, dict) else {}
+    require_atr_calm = True
+    require_oi_flat = True
+    if isinstance(counter_rules, dict):
+        require_atr_calm = bool(counter_rules.get("require_atr_calm", True))
+        require_oi_flat = bool(counter_rules.get("require_oi_flat", True))
+
     atr_calm = (ctx.tf30.atr_mean and ctx.tf30.atr <= ctx.tf30.atr_mean) or False
     oi_flat = ctx.oi_trend != "up"
-    counter_rules = RULES_SPEC.get("countertrend", {})
+    atr_ok = (not require_atr_calm) or atr_calm
+    oi_ok = (not require_oi_flat) or oi_flat
+
     long_rule_ct = counter_rules.get("long", {})
     short_rule_ct = counter_rules.get("short", {})
     if (
         counter == "long"
         and news not in set(long_rule_ct.get("news_block", []))
-        and atr_calm
-        and oi_flat
+        and atr_ok
+        and oi_ok
     ):
-        reason = "countertrend long: RSI extreme, ATR cooling, OI not rising"
+        parts = ["countertrend long: RSI extreme"]
+        if require_atr_calm:
+            parts.append("ATR cooling")
+        if require_oi_flat:
+            parts.append("OI not rising")
+        reason = ", ".join(parts)
         meta: dict[str, Any] = {"regime": "counter"}
         if ENTRY_LADDER:
             meta["ladder_orders"] = ENTRY_LADDER
@@ -578,10 +690,15 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     if (
         counter == "short"
         and news not in set(short_rule_ct.get("news_block", []))
-        and atr_calm
-        and oi_flat
+        and atr_ok
+        and oi_ok
     ):
-        reason = "countertrend short: RSI extreme, ATR cooling, OI not rising"
+        parts = ["countertrend short: RSI extreme"]
+        if require_atr_calm:
+            parts.append("ATR cooling")
+        if require_oi_flat:
+            parts.append("OI not rising")
+        reason = ", ".join(parts)
         meta: dict[str, Any] = {"regime": "counter"}
         if ENTRY_LADDER:
             meta["ladder_orders"] = ENTRY_LADDER
@@ -617,12 +734,25 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
         ema_cross = ctx.tf30.ema20 < ctx.tf30.ema50
     else:
         ema_cross = ctx.tf30.ema20 > ctx.tf30.ema50
-    tp_spec = EVENTS_SPEC.get("tp", {})
+    tp_spec = EVENTS_SPEC.get("tp", {}) if isinstance(EVENTS_SPEC, dict) else {}
     rsi_long_tp = float(tp_spec.get("rsi_long", 70))
     rsi_short_tp = float(tp_spec.get("rsi_short", 30))
     rsi_extreme = (side == "long" and ctx.tf30.rsi >= rsi_long_tp) or (side == "short" and ctx.tf30.rsi <= rsi_short_tp)
     news_against = (side == "long" and ctx.news_bias == "negative") or (side == "short" and ctx.news_bias == "positive")
-    oi_flip = ctx.oi_trend == ("down" if side == "long" else "up")
+    close_spec = EVENTS_SPEC.get("close", {}) if isinstance(EVENTS_SPEC, dict) else {}
+    oi_reverse_enabled = bool(close_spec.get("oi_reverse", False))
+    oi_flip = oi_reverse_enabled and ctx.oi_trend == ("down" if side == "long" else "up")
+    oi_confirm = close_spec.get("oi_reverse_confirm") if isinstance(close_spec, dict) else {}
+    require_price_weak = bool(oi_confirm.get("price_weak")) if isinstance(oi_confirm, dict) else False
+    require_atr_hot = bool(oi_confirm.get("atr_hot")) if isinstance(oi_confirm, dict) else False
+    if oi_flip:
+        if require_price_weak:
+            if side == "long" and ctx.trend_bias not in {"short", "range"}:
+                oi_flip = False
+            elif side == "short" and ctx.trend_bias not in {"long", "range"}:
+                oi_flip = False
+        if oi_flip and require_atr_hot and not ctx.tf30.atr_is_hot:
+            oi_flip = False
     if ema_cross or (rsi_extreme and news_against) or oi_flip:
         close_side = "sell" if side == "long" else "buy"
         reasons: list[str] = []
@@ -643,7 +773,7 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
             order_type="market",
             reason=reason,
             size_pct=1.0,
-            confidence=0.84,
+            confidence=float(close_spec.get("confidence", 0.84)),
             metadata=_with_trace(None, trace),
         )
     return None
@@ -835,11 +965,30 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     event = should_modify(ctx)
     if event:
         return event
+    trend = ctx.trend_bias or "none"
+    counter = ctx.countertrend_bias or "none"
     return StrategyEvent(
         "skip",
         reason="no confluence",
         confidence=0.0,
-        metadata=_with_trace(None, ["skip", "no_confluence"]),
+        metadata=_with_trace(
+            {
+                "trend_bias": ctx.trend_bias,
+                "countertrend_bias": ctx.countertrend_bias,
+                "news_bias": ctx.news_bias,
+                "oi_trend": ctx.oi_trend,
+                "rsi": ctx.tf30.rsi,
+            },
+            [
+                "skip",
+                "no_confluence",
+                f"trend={trend}",
+                f"counter={counter}",
+                f"news={ctx.news_bias}",
+                f"oi={ctx.oi_trend}",
+                f"rsi={ctx.tf30.rsi:.1f}",
+            ],
+        ),
     )
 def _symbol_allowed(symbol: str) -> bool:
     if not symbol:

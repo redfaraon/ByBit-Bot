@@ -9,10 +9,11 @@
    python3 -m pip install --user -U ccxt pandas requests colorama "openai>=1.0.0" python-dotenv pyyaml matplotlib
    ```
 
-2. Disable password request from github
-   ```
-   git config --global credential.helper store
-   ```
+2. Git auth (server/systemd)
+
+   - For a **public** repository, `git fetch/pull` over HTTPS should work without any credentials.
+   - Avoid `git config --global credential.helper store` on servers: a stale/invalid credential can make `git fetch` prompt for username/password, and `systemd` has no TTY (auto-pull will fail after reboot).
+   - If you still need non-interactive auth (e.g., private fork): use an SSH key or set `BYBITBOT_GIT_TOKEN` / `GITHUB_TOKEN` in `.env`.
 
 3. Export environment variables (example):
    ```bash
@@ -68,6 +69,53 @@ Set `TELEGRAM_FORWARD_LOGS=1` to mirror console logs into Telegram. The bot batc
 4. Run the bot:
    ```bash
    python bybitbot.py
+   ```
+
+## Running as a systemd service (recommended)
+
+If you're deploying on a Linux server (Ubuntu/Debian), run the bot under `systemd` so it autostarts on reboot and restarts on failures.
+
+1. Create a log directory:
+   ```bash
+   sudo mkdir -p /var/log/bybitbot
+   ```
+
+2. Create a unit file (example: `/etc/systemd/system/bybitbot.service`):
+   ```ini
+   [Unit]
+   Description=ByBit Bot
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   WorkingDirectory=/root/bot/ByBit-Bot
+   Environment=PY_COLORS=1
+   Environment=FORCE_COLOR=1
+   ExecStart=/usr/bin/python3 /root/bot/ByBit-Bot/bybitbot.py
+   Restart=always
+   RestartSec=5
+   StandardOutput=append:/var/log/bybitbot/console.log
+   StandardError=append:/var/log/bybitbot/console.log
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   If the repository is private, ensure `git fetch` can run non-interactively (otherwise auto-pull will fail after reboot). Recommended: use an SSH deploy key and set `origin` to `git@github.com:redfaraon/ByBit-Bot.git`. Alternative: set `BYBITBOT_GIT_TOKEN` (or `GITHUB_TOKEN`) in `.env` so the bot can authenticate during `git fetch`.
+
+3. Enable and start it:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now bybitbot
+   ```
+
+4. Useful commands:
+   ```bash
+   sudo systemctl status bybitbot --no-pager
+   sudo systemctl restart bybitbot
+   sudo journalctl -u bybitbot -f
+   tail -f /var/log/bybitbot/console.log
    ```
 
 # Scheduled restart & update workflow

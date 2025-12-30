@@ -9,12 +9,14 @@ Bybit Intraday AI Trading Bot — 30m, 5 пар USDT Perpetual
 import os
 import importlib
 import atexit
+import faulthandler
 import shutil
 import stat
 import subprocess
 import sys
 import threading
 import time
+import signal
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
@@ -53,6 +55,259 @@ STRATEGY_PROVIDERS_SPEC = strategy.SPEC.get("providers", {})
 MODULE_AUTO_RELOAD_ENABLED = os.getenv("BYBITBOT_MODULE_AUTO_RELOAD", "1").strip().lower() not in {"0", "false", "no"}
 _MODULE_RELOAD_LOCK = threading.Lock()
 _MODULE_RELOAD_FINGERPRINTS: dict[str, float] = {}
+_EXIT_SIGNAL_NAME: str | None = None
+_EXIT_SIGNAL_TS: float | None = None
+_START_TS = time.time()
+_LOCK_FILE: Path | None = None
+_LOCK_OWNED = False
+_GIT_AUTH_HINT_LOGGED = False
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except Exception:
+        return f"SIG({signum})"
+
+
+def _read_proc_text(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except Exception:
+        return None
+
+
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "posix":
+        return Path(f"/proc/{pid}").exists()
+    try:
+        os.kill(pid, 0)
+    except Exception:
+        return False
+    return True
+
+
+def _pid_cmdline(pid: int) -> str | None:
+    if os.name != "posix":
+        return None
+    raw = _read_proc_text(f"/proc/{pid}/cmdline")
+    if not raw:
+        return None
+    return raw.replace("\x00", " ").strip()
+
+
+def _lock_path() -> Path:
+    lock_override = os.getenv("BYBITBOT_LOCK_FILE")
+    if lock_override:
+        try:
+            return Path(lock_override).expanduser().resolve()
+        except Exception:
+            return Path(lock_override)
+    return (STATE_DIR or REPO_ROOT) / "bybitbot.lock"
+
+
+def _acquire_lock() -> bool:
+    global _LOCK_FILE, _LOCK_OWNED
+    if os.getenv("BYBITBOT_DISABLE_LOCK", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    lock_path = _lock_path()
+    _LOCK_FILE = lock_path
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    current_boot_id = _read_proc_text("/proc/sys/kernel/random/boot_id")
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = None
+        if isinstance(existing, dict):
+            existing_pid = safe_int(existing.get("pid") or 0)
+            existing_boot_id = existing.get("boot_id")
+            cmdline = _pid_cmdline(existing_pid) if existing_pid else None
+            alive = _is_pid_running(existing_pid)
+            if (
+                alive
+                and (not current_boot_id or not existing_boot_id or existing_boot_id == current_boot_id)
+                and (not cmdline or "bybitbot.py" in cmdline or "bybitbot_impl.py" in cmdline)
+            ):
+                log(
+                    f"[LOCK] Another instance is running (pid={existing_pid}, boot_id={existing_boot_id or 'n/a'}). Exiting.",
+                    Fore.YELLOW,
+                )
+                return False
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    payload = {
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "boot_id": current_boot_id,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "cwd": os.getcwd(),
+        "script": str(Path(__file__).resolve()),
+    }
+    try:
+        lock_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _LOCK_OWNED = True
+    except Exception as exc:
+        log(f"[LOCK] Failed to write lock file {lock_path}: {exc}", Fore.YELLOW)
+    return True
+
+
+def _git_auth_token() -> str | None:
+    candidates = (
+        os.getenv("BYBITBOT_GIT_TOKEN"),
+        os.getenv("GITHUB_TOKEN"),
+        os.getenv("GIT_TOKEN"),
+    )
+    for raw in candidates:
+        if not raw:
+            continue
+        token = raw.strip()
+        if token:
+            return token
+    return None
+
+
+def _git_auth_username() -> str:
+    candidates = (
+        os.getenv("BYBITBOT_GIT_USERNAME"),
+        os.getenv("GITHUB_USERNAME"),
+        os.getenv("GIT_USERNAME"),
+    )
+    for raw in candidates:
+        if not raw:
+            continue
+        username = raw.strip()
+        if username:
+            return username
+    return "x-access-token"
+
+
+def _ensure_git_askpass_script() -> Path | None:
+    if os.name != "posix":
+        return None
+    token = _git_auth_token()
+    if not token:
+        return None
+    target_dir = STATE_DIR or REPO_ROOT
+    path = target_dir / ".bybitbot_git_askpass.sh"
+    if path.exists():
+        return path
+    script = (
+        "#!/usr/bin/env sh\n"
+        'prompt="$1"\n'
+        'case "$prompt" in\n'
+        "  *sername*) printf '%s\\n' \"${BYBITBOT_GIT_USERNAME:-x-access-token}\" ;;\n"
+        "  *) printf '%s\\n' \"${BYBITBOT_GIT_TOKEN:-}\" ;;\n"
+        "esac\n"
+    )
+    try:
+        path.write_text(script, encoding="utf-8", newline="\n")
+        os.chmod(path, 0o700)
+    except Exception:
+        return None
+    return path
+
+
+def _git_subprocess_env() -> dict[str, str] | None:
+    token = _git_auth_token()
+    if not token:
+        return None
+    askpass = _ensure_git_askpass_script()
+    if not askpass:
+        return None
+    env = os.environ.copy()
+    env.setdefault("HOME", str(Path.home()))
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = str(askpass)
+    env["BYBITBOT_GIT_TOKEN"] = token
+    env["BYBITBOT_GIT_USERNAME"] = _git_auth_username()
+    return env
+
+
+def _install_process_diagnostics() -> None:
+    global _EXIT_SIGNAL_NAME, _EXIT_SIGNAL_TS
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:
+        pass
+
+    for dump_sig_name in ("SIGUSR1", "SIGUSR2"):
+        dump_sig = getattr(signal, dump_sig_name, None)
+        if dump_sig is None:
+            continue
+        try:
+            faulthandler.register(dump_sig, all_threads=True, chain=False)
+        except Exception:
+            pass
+
+    def _handle(signum: int, _frame) -> None:
+        global _EXIT_SIGNAL_NAME, _EXIT_SIGNAL_TS
+        _EXIT_SIGNAL_NAME = _signal_name(signum)
+        _EXIT_SIGNAL_TS = time.time()
+        try:
+            boot_id = _read_proc_text("/proc/sys/kernel/random/boot_id")
+            boot_note = f" boot_id={boot_id}" if boot_id else ""
+            uptime = time.time() - _START_TS
+            log(f"[EXIT] received {_EXIT_SIGNAL_NAME}; uptime={uptime:.1f}s pid={os.getpid()} ppid={os.getppid()}{boot_note}", Fore.YELLOW)
+        except Exception:
+            pass
+        try:
+            _flush_tg_log_buffer(force=True)
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            _write_runtime_status(None, None, "stopped")
+        except Exception:
+            pass
+        raise SystemExit(0)
+
+    for sig_name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handle)
+        except Exception:
+            pass
+
+    def _on_exit() -> None:
+        try:
+            uptime = time.time() - _START_TS
+            sig_note = f" last_signal={_EXIT_SIGNAL_NAME}" if _EXIT_SIGNAL_NAME else ""
+            log(f"[EXIT] process exit; uptime={uptime:.1f}s pid={os.getpid()}{sig_note}", Fore.LIGHTBLACK_EX)
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            if _LOCK_OWNED and _LOCK_FILE:
+                try:
+                    existing = json.loads(_LOCK_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = None
+                lock_pid = safe_int(existing.get("pid")) if isinstance(existing, dict) else None
+                if not lock_pid or lock_pid == os.getpid():
+                    _LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    atexit.register(_on_exit)
 
 
 def _refresh_strategy_specs() -> None:
@@ -116,9 +371,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.7"
+BOT_VERSION = "1.3.9-legacy"
 BOT_CHANGELOG = (
-    "Fix module config sync on startup, enable early stdio log mirroring, and harden fallback script imports."
+    "Strategy: tighten trend entries (4h confirmation, EMA spread floor, OI/RSI4h filters) and improve git auto-pull auth after reboot."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -1873,10 +2128,53 @@ def get_current_commit_info() -> tuple[str | None, str | None, str | None]:
     return commit_hash or None, commit_message or None, commit_timestamp or None
 
 
+def _git_upstream_remote() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return None
+    upstream = (proc.stdout or "").strip()
+    if not upstream or "/" not in upstream:
+        return None
+    remote, _branch = upstream.split("/", 1)
+    remote = remote.strip()
+    return remote or None
+
+
+def _git_default_remote() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "remote"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return "origin"
+    remotes = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if not remotes:
+        return "origin"
+    if "origin" in remotes:
+        return "origin"
+    return remotes[0]
+
+
 def _sync_with_remote() -> None:
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
         return
+    git_env = _git_subprocess_env() or os.environ.copy()
+    git_env.setdefault("HOME", str(Path.home()))
+    git_env["GIT_TERMINAL_PROMPT"] = "0"
+    git_cmd = ["git", "-c", "credential.helper="]
+    remote = _git_upstream_remote() or _git_default_remote() or "origin"
     try:
         status_proc = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=no"],
@@ -1891,8 +2189,9 @@ def _sync_with_remote() -> None:
         return
     try:
         fetch_proc = subprocess.run(
-            ["git", "fetch", "--all", "--prune"],
+            [*git_cmd, "fetch", remote, "--prune"],
             cwd=REPO_ROOT,
+            env=git_env,
             capture_output=True,
             text=True,
             check=True,
@@ -1901,15 +2200,25 @@ def _sync_with_remote() -> None:
         if fetch_output:
             log(f"[GIT] fetch: {fetch_output}", Fore.LIGHTBLACK_EX)
     except subprocess.CalledProcessError as exc:
-        log(f"[WARN] Git fetch failed: {exc.stderr or exc.stdout or exc}", Fore.YELLOW)
+        details = exc.stderr or exc.stdout or str(exc)
+        if "could not read username" in (details or "").lower() or "authentication failed" in (details or "").lower():
+            global _GIT_AUTH_HINT_LOGGED
+            if not _GIT_AUTH_HINT_LOGGED:
+                log(
+                    "[GIT] Auth required for fetch. Configure SSH deploy key or set BYBITBOT_GIT_TOKEN/GITHUB_TOKEN in .env for non-interactive pulls.",
+                    Fore.YELLOW,
+                )
+                _GIT_AUTH_HINT_LOGGED = True
+        log(f"[WARN] Git fetch failed: {details}", Fore.YELLOW)
         return
     if working_tree_dirty:
         log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
         return
     try:
         pull_proc = subprocess.run(
-            ["git", "pull", "--ff-only"],
+            [*git_cmd, "pull", "--ff-only"],
             cwd=REPO_ROOT,
+            env=git_env,
             capture_output=True,
             text=True,
             check=True,
@@ -4341,30 +4650,56 @@ def refresh_settings():
     global ONLINE_MIN_NEXT_RUN_MINUTES, ONLINE_MAX_NEXT_RUN_MINUTES
     global OFFLINE_MIN_NEXT_RUN_MINUTES, OFFLINE_MAX_NEXT_RUN_MINUTES
     global BACKOFF_MIN_NEXT_RUN_MINUTES, BACKOFF_MAX_NEXT_RUN_MINUTES
-    try:
-        MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(MIN_NEXT_RUN_MINUTES)))
-    except (TypeError, ValueError):
-        MIN_NEXT_RUN_MINUTES = 5.0
-    try:
-        MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(MAX_NEXT_RUN_FROM_START_MINUTES)))
-    except (TypeError, ValueError):
-        MAX_NEXT_RUN_FROM_START_MINUTES = 45.0
-    MIN_NEXT_RUN_MINUTES = max(1.0, MIN_NEXT_RUN_MINUTES)
-    MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES)
-    def _env_float(name: str) -> float | None:
-        raw = os.getenv(name)
-        if raw is None or str(raw).strip() == "":
-            return None
+    sched_offline_min, sched_offline_max = strategy.schedule_bounds("offline")
+    sched_online_min, sched_online_max = strategy.schedule_bounds("online")
+    sched_backoff_min, sched_backoff_max = strategy.schedule_bounds("backoff")
+    schedule_spec = getattr(strategy, "SCHEDULE_SPEC", None)
+    has_json_schedule = isinstance(schedule_spec, dict) and any(
+        key in schedule_spec
+        for key in (
+            "offline_min",
+            "offline_max",
+            "online_min",
+            "online_max",
+            "backoff_min",
+            "backoff_max",
+        )
+    )
+    if has_json_schedule:
+        MIN_NEXT_RUN_MINUTES = max(1.0, float(sched_online_min))
+        MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, float(sched_online_max))
+        ONLINE_MIN_NEXT_RUN_MINUTES = float(sched_online_min)
+        ONLINE_MAX_NEXT_RUN_MINUTES = float(sched_online_max)
+        OFFLINE_MIN_NEXT_RUN_MINUTES = float(sched_offline_min)
+        OFFLINE_MAX_NEXT_RUN_MINUTES = float(sched_offline_max)
+        BACKOFF_MIN_NEXT_RUN_MINUTES = float(sched_backoff_min)
+        BACKOFF_MAX_NEXT_RUN_MINUTES = float(sched_backoff_max)
+    else:
+        # Legacy: schedule bounds from .env
         try:
-            return float(raw)
+            MIN_NEXT_RUN_MINUTES = float(os.getenv("MIN_NEXT_RUN_MINUTES", str(MIN_NEXT_RUN_MINUTES)))
         except (TypeError, ValueError):
-            return None
-    ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or 10.0
-    ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or 45.0
-    OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or 5.0
-    OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or 35.0
-    BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or 25.0
-    BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or 55.0
+            MIN_NEXT_RUN_MINUTES = 5.0
+        try:
+            MAX_NEXT_RUN_FROM_START_MINUTES = float(os.getenv("MAX_NEXT_RUN_FROM_START_MINUTES", str(MAX_NEXT_RUN_FROM_START_MINUTES)))
+        except (TypeError, ValueError):
+            MAX_NEXT_RUN_FROM_START_MINUTES = 45.0
+        MIN_NEXT_RUN_MINUTES = max(1.0, MIN_NEXT_RUN_MINUTES)
+        MAX_NEXT_RUN_FROM_START_MINUTES = max(MIN_NEXT_RUN_MINUTES, MAX_NEXT_RUN_FROM_START_MINUTES)
+        def _env_float(name: str) -> float | None:
+            raw = os.getenv(name)
+            if raw is None or str(raw).strip() == "":
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+        ONLINE_MIN_NEXT_RUN_MINUTES = _env_float("ONLINE_MIN_NEXT_RUN_MINUTES") or 10.0
+        ONLINE_MAX_NEXT_RUN_MINUTES = _env_float("ONLINE_MAX_NEXT_RUN_MINUTES") or 45.0
+        OFFLINE_MIN_NEXT_RUN_MINUTES = _env_float("OFFLINE_MIN_NEXT_RUN_MINUTES") or 5.0
+        OFFLINE_MAX_NEXT_RUN_MINUTES = _env_float("OFFLINE_MAX_NEXT_RUN_MINUTES") or 35.0
+        BACKOFF_MIN_NEXT_RUN_MINUTES = _env_float("BACKOFF_MIN_NEXT_RUN_MINUTES") or 25.0
+        BACKOFF_MAX_NEXT_RUN_MINUTES = _env_float("BACKOFF_MAX_NEXT_RUN_MINUTES") or 55.0
     IMMEDIATE_CLOSE_ON_BREACH = env_int("IMMEDIATE_CLOSE_ON_BREACH", 0) != 0
     if not isinstance(protection_engine._TRAIL_PROTECTION, dict):
         protection_engine._TRAIL_PROTECTION = {}
@@ -4662,34 +4997,28 @@ def refresh_settings():
         "on",
     }
     manual_only_execution = bool(STRATEGY_EXECUTION_SPEC.get("manual_only"))
-    if manual_only_execution:
-        OFFLINE_TRADING_ENABLED = False
-        OFFLINE_NEWS_BIAS_ENABLED = False
-        OFFLINE_PAIR_LIMIT = 0
-        OFFLINE_MAX_NEW_POSITIONS = 0
-    else:
-        OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        try:
-            OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
-        except (TypeError, ValueError):
-            OFFLINE_PAIR_LIMIT = 8
-        OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
-        try:
-            OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
-        except (TypeError, ValueError):
-            OFFLINE_MAX_NEW_POSITIONS = 1
-        OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
+    OFFLINE_TRADING_ENABLED = str(os.getenv("OFFLINE_TRADING_ENABLED", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    OFFLINE_NEWS_BIAS_ENABLED = str(os.getenv("OFFLINE_NEWS_BIAS_ENABLED", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        OFFLINE_PAIR_LIMIT = int(float(os.getenv("OFFLINE_PAIR_LIMIT", "8")))
+    except (TypeError, ValueError):
+        OFFLINE_PAIR_LIMIT = 8
+    OFFLINE_PAIR_LIMIT = max(2, min(30, OFFLINE_PAIR_LIMIT))
+    try:
+        OFFLINE_MAX_NEW_POSITIONS = int(float(os.getenv("OFFLINE_MAX_NEW_POSITIONS", "1")))
+    except (TypeError, ValueError):
+        OFFLINE_MAX_NEW_POSITIONS = 1
+    OFFLINE_MAX_NEW_POSITIONS = max(0, min(10, OFFLINE_MAX_NEW_POSITIONS))
     MANUAL_STRATEGY_SYMBOLS = {sym.upper() for sym in strategy.WATCHLIST}
     MANUAL_STRATEGY_FORCE = True
 
@@ -14222,6 +14551,138 @@ def run_cycle():
         )
     except Exception:
         pass
+
+    # Optional: filter out symbols that are not tradeable with current usable margin (keeps open positions).
+    try:
+        mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        affordability = mode.get("affordability") if isinstance(mode.get("affordability"), dict) else {}
+        affordability_enabled = bool(affordability.get("enabled", False))
+        affordability_fill_fallback = bool(affordability.get("fill_from_fallback", True))
+        affordability_max_symbols = int(mode.get("max_symbols") or 8)
+    except Exception:
+        affordability_enabled = False
+        affordability_fill_fallback = True
+        affordability_max_symbols = 8
+
+    if affordability_enabled and manual_universe_built:
+        try:
+            _equity_now, _available_now, _ = fetch_usdt_equity(ex)
+        except Exception:
+            _equity_now, _available_now = None, None
+        usable_margin = None
+        try:
+            if _available_now is not None and math.isfinite(_available_now) and _available_now > 0:
+                usable_margin = float(_available_now) * float(ORDER_MARGIN_UTILIZATION or 1.0)
+        except Exception:
+            usable_margin = None
+        try:
+            leverage_used = float(LEVERAGE or 1.0)
+        except Exception:
+            leverage_used = 1.0
+        if not math.isfinite(leverage_used) or leverage_used <= 0:
+            leverage_used = 1.0
+
+        if usable_margin is not None and math.isfinite(usable_margin) and usable_margin > 0:
+            def _min_required_margin(sym_raw: str) -> float | None:
+                sym_norm = normalize_symbol(sym_raw, record_missing=False) or sym_raw
+                try:
+                    trade_rules = _get_symbol_trade_rules(ex, sym_norm)
+                except Exception:
+                    return None
+                try:
+                    min_qty = float(trade_rules.get("min_qty") or 0.0)
+                except Exception:
+                    min_qty = 0.0
+                try:
+                    min_notional_ex = float(trade_rules.get("min_notional") or 0.0)
+                except Exception:
+                    min_notional_ex = 0.0
+                try:
+                    env_min = float(MIN_NOTIONAL_USDT or 0.0)
+                except Exception:
+                    env_min = 0.0
+                min_notional = max(min_notional_ex, env_min)
+
+                px = None
+                try:
+                    t = ex.fetch_ticker(sym_norm)
+                    if isinstance(t, dict):
+                        px = safe_float(t.get("last") or t.get("close"))
+                        if (px is None or not math.isfinite(px) or px <= 0) and isinstance(t.get("info"), dict):
+                            info = t["info"]
+                            px = safe_float(info.get("lastPrice") or info.get("markPrice") or info.get("price"))
+                except Exception:
+                    px = None
+                try:
+                    if px is not None and math.isfinite(px) and px > 0 and min_qty and min_qty > 0:
+                        min_notional = max(min_notional, float(min_qty) * float(px))
+                except Exception:
+                    pass
+
+                if min_notional <= 0 or not math.isfinite(min_notional):
+                    return None
+                try:
+                    return float(min_notional) / float(leverage_used) if leverage_used else float(min_notional)
+                except Exception:
+                    return None
+
+            kept: list[str] = []
+            kept_set: set[str] = set()
+            dropped: list[tuple[str, float]] = []
+            for sym in manual_universe_built:
+                sym_norm = normalize_symbol(sym, record_missing=False) or sym
+                sym_norm = str(sym_norm).strip()
+                if not sym_norm:
+                    continue
+                sym_norm = sym_norm.upper()
+                if sym_norm in kept_set:
+                    continue
+                if sym_norm in position_symbols:
+                    kept.append(sym_norm)
+                    kept_set.add(sym_norm)
+                    continue
+                req_margin = _min_required_margin(sym_norm)
+                if req_margin is None:
+                    kept.append(sym_norm)
+                    kept_set.add(sym_norm)
+                    continue
+                if req_margin <= usable_margin + 1e-9:
+                    kept.append(sym_norm)
+                    kept_set.add(sym_norm)
+                else:
+                    dropped.append((sym_norm, float(req_margin)))
+
+            if affordability_fill_fallback and len(kept) < affordability_max_symbols:
+                fallback_universe = strategy.CONTEXT_SPEC.get("universe") or []
+                for raw in fallback_universe:
+                    if len(kept) >= affordability_max_symbols:
+                        break
+                    sym_candidate = normalize_symbol(str(raw).strip(), record_missing=False)
+                    if not sym_candidate:
+                        continue
+                    sym_candidate = str(sym_candidate).strip().upper()
+                    if not sym_candidate or sym_candidate in kept_set or sym_candidate in position_symbols:
+                        continue
+                    req_margin = _min_required_margin(sym_candidate)
+                    if req_margin is None or req_margin <= usable_margin + 1e-9:
+                        kept.append(sym_candidate)
+                        kept_set.add(sym_candidate)
+
+            if dropped:
+                dropped_preview = ", ".join(f"{s}({m:.2f})" for s, m in dropped[:6])
+                if len(dropped) > 6:
+                    dropped_preview = f"{dropped_preview}, +{len(dropped) - 6} more"
+                log(
+                    f"[MANUAL] Universe affordability filter: usable={usable_margin:.2f} USDT (avail={_available_now:.2f}, util={ORDER_MARGIN_UTILIZATION}); "
+                    f"lev={leverage_used:.0f}x dropped={len(dropped)} [{dropped_preview}] -> pairs={', '.join(kept) if kept else 'none'}",
+                    Fore.LIGHTBLACK_EX,
+                )
+            manual_universe_built = kept
+
     try:
         MANUAL_STRATEGY_SYMBOLS.clear()
         MANUAL_STRATEGY_SYMBOLS.update({sym.upper() for sym in manual_universe_built})
@@ -14287,11 +14748,10 @@ def run_cycle():
             side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
         px_text = f"{px_ref:.4f}" if isinstance(px_ref, (int, float)) and math.isfinite(px_ref or 0) else "n/a"
         open_orders_symbol_snapshot = open_orders_prefetch.get(sym) or []
-        if sym and sym.upper().startswith("DOGE"):
-            log(
-                f"[DEBUG] {sym}: open_orders(start)={_summarize_open_orders_for_log(open_orders_symbol_snapshot)}",
-                Fore.LIGHTBLACK_EX,
-            )
+        log(
+            f"[DEBUG] {sym}: open_orders(start)={_summarize_open_orders_for_log(open_orders_symbol_snapshot)}",
+            Fore.LIGHTBLACK_EX,
+        )
         prot_orders_snapshot = _extract_protection_orders(open_orders_symbol_snapshot)
         stop_levels: list[float] = []
         take_levels: list[float] = []
@@ -15249,6 +15709,32 @@ def run_cycle():
                     if notional > max_notional + NOTIONAL_EPSILON:
                         qty = _clamp_qty_to_max_notional(qty, price, max_notional, qty_step_rule)
                         if qty <= 0:
+                            try:
+                                min_notional_by_qty = (min_qty_rule * price) if min_qty_rule and price else None
+                            except Exception:
+                                min_notional_by_qty = None
+                            min_notional_candidate = min_notional_required
+                            try:
+                                if min_notional_by_qty is not None and math.isfinite(min_notional_by_qty):
+                                    min_notional_candidate = max(min_notional_candidate, float(min_notional_by_qty))
+                            except Exception:
+                                pass
+                            try:
+                                margin_min_required = (
+                                    float(min_notional_candidate) / float(symbol_leverage)
+                                    if symbol_leverage and min_notional_candidate
+                                    else float(min_notional_candidate or 0.0)
+                                )
+                            except Exception:
+                                margin_min_required = None
+                            detail_msg = (
+                                f"[WARN] {user_tag} {sym}: min order too large for balance "
+                                f"(min_notional≈{min_notional_candidate:.2f} USDT, min_qty={min_qty_rule}, px={price:.4f}, lev={symbol_leverage}x) "
+                                f"requires margin≈{margin_min_required:.2f} USDT; usable={effective_margin:.2f} (avail={available_margin:.2f})"
+                                if margin_min_required is not None and math.isfinite(margin_min_required)
+                                else f"[WARN] {user_tag} {sym}: min order too large for balance; usable={effective_margin:.2f} (avail={available_margin:.2f})"
+                            )
+                            log(detail_msg, Fore.YELLOW)
                             log(f"[WARN] {user_tag} {sym}: usable margin cannot satisfy minimum trade size", Fore.YELLOW)
                             send_tg(f"[WARN] {user_tag} {sym}: margin too small for minimum order")
                             log_open_skip(sym, "margin cannot satisfy minimum size")
@@ -16212,13 +16698,19 @@ def run_cycle():
     schedule_now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_volatility_ratio = safe_float((cycle_state or {}).get("last_volatility_ratio"))
     prev_interval_from_start = safe_float((cycle_state or {}).get("last_interval_from_start_minutes"))
+    prev_news_intensity = safe_float((cycle_state or {}).get("last_news_intensity"))
     current_cycle_no = safe_int(protection_engine._CURRENT_CYCLE_NUMBER)
     ai_offline_active = (
-        OFFLINE_TRADING_ENABLED
-        and current_cycle_no is not None
+        current_cycle_no is not None
         and _AI_OFFLINE_ACTIVE_CYCLE is not None
         and safe_int(_AI_OFFLINE_ACTIVE_CYCLE) == current_cycle_no
     )
+    try:
+        # In manual-only mode we treat scheduling as offline-like even if AI isn't queried.
+        if bool(STRATEGY_EXECUTION_SPEC.get("manual_only")):
+            ai_offline_active = True
+    except Exception:
+        pass
     atr_ratio_median: float | None = None
     vol_source = "hints"
     source_tags: list[str] = []
@@ -16381,57 +16873,113 @@ def run_cycle():
 
     # Prefer explicit next_run_time (absolute timestamp); if missing, use next_run_minutes as an interval
     # anchored to the *start* of this cycle (cycle_start_utc) rather than the end.
-    interval_floor = float(MIN_NEXT_RUN_MINUTES)
-    interval_cap = float(MAX_NEXT_RUN_FROM_START_MINUTES)
+    news_bias = "neutral"
+    try:
+        # Use last known news bias from strategy if available
+        news_bias = str(LATEST_STATUS.get("news_bias") or "").strip().lower() or "neutral"
+    except Exception:
+        news_bias = "neutral"
+
+    # Scheduling: news intensity (frequency + "emotion"), independent of positive/negative direction.
+    # We use the same lightweight keyword heuristics as offline mode, but only for ABS(score).
+    schedule_spec = getattr(strategy, "SCHEDULE_SPEC", None)
+    schedule_spec = schedule_spec if isinstance(schedule_spec, dict) else {}
+    try:
+        news_intensity_enabled = bool(schedule_spec.get("news_intensity_enabled", True))
+    except Exception:
+        news_intensity_enabled = True
+    news_items_total = 0
+    news_emotion_mean = 0.0
+    news_intensity = 0.0
+    try:
+        universe_mode = (
+            (strategy.CONTEXT_SPEC.get("universe_mode") or {})
+            if isinstance(strategy.CONTEXT_SPEC.get("universe_mode"), dict)
+            else {}
+        )
+        universe_max_symbols = max(1, int(universe_mode.get("max_symbols") or 8))
+    except Exception:
+        universe_max_symbols = 8
+    try:
+        digest = news_headlines if isinstance(news_headlines, dict) else {}
+        total_items = 0
+        weighted_abs = 0.0
+        weight_sum = 0.0
+        for _sym, payload in digest.items():
+            if not isinstance(payload, dict):
+                continue
+            items = payload.get("items")
+            try:
+                count = len(items) if isinstance(items, (list, tuple)) else 0
+            except Exception:
+                count = 0
+            total_items += count
+            if count <= 0:
+                continue
+            try:
+                score_val = safe_float(_offline_news_score(payload))
+            except Exception:
+                score_val = None
+            if score_val is None or not math.isfinite(score_val):
+                continue
+            weighted_abs += abs(float(score_val)) * count
+            weight_sum += count
+        news_items_total = int(total_items)
+        news_emotion_mean = float(weighted_abs / weight_sum) if weight_sum > 0 else 0.0
+        items_per_symbol = safe_float(schedule_spec.get("news_intensity_items_per_symbol"))
+        items_per_symbol = (
+            float(items_per_symbol)
+            if items_per_symbol is not None and math.isfinite(items_per_symbol) and items_per_symbol > 0
+            else 3.0
+        )
+        items_norm = min(
+            1.0,
+            float(news_items_total) / float(max(1.0, universe_max_symbols * items_per_symbol)),
+        )
+        w_items = safe_float(schedule_spec.get("news_intensity_weight_items"))
+        w_emotion = safe_float(schedule_spec.get("news_intensity_weight_emotion"))
+        w_items = float(w_items) if w_items is not None and math.isfinite(w_items) and w_items >= 0 else 0.5
+        w_emotion = float(w_emotion) if w_emotion is not None and math.isfinite(w_emotion) and w_emotion >= 0 else 0.5
+        w_total = w_items + w_emotion
+        if w_total <= 0:
+            w_items = 0.5
+            w_emotion = 0.5
+            w_total = 1.0
+        news_intensity = (items_norm * w_items + news_emotion_mean * w_emotion) / w_total
+        news_intensity = max(0.0, min(1.0, float(news_intensity)))
+    except Exception:
+        news_items_total = 0
+        news_emotion_mean = 0.0
+        news_intensity = 0.0
+    schedule_mode = "online"
     if ai_offline_active:
-        # Offline mode: use OFFLINE_* bounds from .env (defaults 5-35m)
-        min_delay_override = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
-        max_delay_override = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
+        schedule_mode = "offline"
+        interval_floor = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
+        interval_cap = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
         log(
-            f"[SCHED] AI offline bounds applied: {min_delay_override:.1f}-{max_delay_override:.1f}m window while offline mode active",
+            f"[SCHED] AI offline bounds applied: {interval_floor:.1f}-{interval_cap:.1f}m window while offline mode active",
             Fore.LIGHTBLACK_EX,
         )
-        interval_floor = max(interval_floor, min_delay_override)
-        interval_cap = min(interval_cap, max_delay_override)
     elif rate_limit_backoff:
-        # Rate-limit backoff (provider still available): use BACKOFF_* bounds (defaults 25-55m)
-        backoff_min = float(os.getenv("BACKOFF_MIN_NEXT_RUN_MINUTES", "25") if BACKOFF_MIN_NEXT_RUN_MINUTES is None else BACKOFF_MIN_NEXT_RUN_MINUTES)
-        backoff_max = float(os.getenv("BACKOFF_MAX_NEXT_RUN_MINUTES", "55") if BACKOFF_MAX_NEXT_RUN_MINUTES is None else BACKOFF_MAX_NEXT_RUN_MINUTES)
-        min_delay_override = backoff_min
-        max_delay_override = backoff_max
-        log(f"[SCHED] rate-limit backoff active: bounds {min_delay_override:.1f}-{max_delay_override:.1f}m", Fore.LIGHTBLACK_EX)
-        interval_floor = max(interval_floor, min_delay_override)
-        interval_cap = min(interval_cap, max_delay_override)
+        schedule_mode = "backoff"
+        interval_floor = float(os.getenv("BACKOFF_MIN_NEXT_RUN_MINUTES", "25") if BACKOFF_MIN_NEXT_RUN_MINUTES is None else BACKOFF_MIN_NEXT_RUN_MINUTES)
+        interval_cap = float(os.getenv("BACKOFF_MAX_NEXT_RUN_MINUTES", "55") if BACKOFF_MAX_NEXT_RUN_MINUTES is None else BACKOFF_MAX_NEXT_RUN_MINUTES)
+        log(f"[SCHED] rate-limit backoff active: bounds {interval_floor:.1f}-{interval_cap:.1f}m", Fore.LIGHTBLACK_EX)
     else:
-        # Online mode: use ONLINE_* bounds from .env (defaults 10-45m)
-        online_min = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
-        online_max = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
-        min_delay_override = online_min
-        max_delay_override = online_max
+        interval_floor = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
+        interval_cap = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
     if interval_cap < interval_floor:
         interval_cap = interval_floor
-        # Offline mode: use OFFLINE_* bounds from .env (defaults 5-35m)
-        min_delay_override = float(OFFLINE_MIN_NEXT_RUN_MINUTES or 5.0)
-        max_delay_override = float(OFFLINE_MAX_NEXT_RUN_MINUTES or 35.0)
-        log(
-            f"[SCHED] AI offline bounds applied: {min_delay_override:.1f}-{max_delay_override:.1f}m window while offline mode active",
-            Fore.LIGHTBLACK_EX,
-        )
-        interval_floor = max(interval_floor, min_delay_override)
-        interval_cap = min(interval_cap, max_delay_override)
-    else:
-        # Online mode: use ONLINE_* bounds from .env (defaults 10-45m)
-        online_min = float(ONLINE_MIN_NEXT_RUN_MINUTES or MIN_NEXT_RUN_MINUTES)
-        online_max = float(ONLINE_MAX_NEXT_RUN_MINUTES or MAX_NEXT_RUN_FROM_START_MINUTES)
-        min_delay_override = online_min
-        max_delay_override = online_max
-    if interval_cap < interval_floor:
-        interval_cap = interval_floor
-    min_delay = max(0.0, min_delay_override)
+    min_delay = max(
+        0.0,
+        (cycle_start_utc + datetime.timedelta(minutes=float(interval_floor)) - schedule_now_utc).total_seconds() / 60.0,
+    )
     max_delay = max(
         0.0,
-        (cycle_start_utc + datetime.timedelta(minutes=float(max_delay_override)) - schedule_now_utc).total_seconds() / 60.0,
+        (cycle_start_utc + datetime.timedelta(minutes=float(interval_cap)) - schedule_now_utc).total_seconds() / 60.0,
     )
+    if max_delay < min_delay:
+        max_delay = min_delay
     timing_debug_parts: list[str] = []
     if next_delay_minutes is None:
         # Fallback: start from previous interval and nudge ±5/±10 minutes based on volatility change.
@@ -16442,10 +16990,12 @@ def run_cycle():
 
         delta = 0.0
         volatility_note = ""
+        volatility_rule = ""
         thresholds_note = ""
         diff_value: float | None = None
         diff_cycle: float | None = None
         diff_intrabar: float | None = None
+        diff_source = "n/a"
         if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
             base_ref = prev_volatility_ratio if prev_volatility_ratio and math.isfinite(prev_volatility_ratio) else atr_ratio_median
             base_tol = max(0.0001, base_ref * 0.03 if base_ref and math.isfinite(base_ref) else 0.0001)
@@ -16459,35 +17009,93 @@ def run_cycle():
                 diff_intrabar = bar_deltas[len(bar_deltas) // 2]
                 thresholds_note += "+intrabar"
             if diff_cycle is not None and math.isfinite(diff_cycle) and diff_intrabar is not None and math.isfinite(diff_intrabar):
-                diff_candidate = diff_cycle if abs(diff_cycle) >= abs(diff_intrabar) else diff_intrabar
+                if abs(diff_cycle) >= abs(diff_intrabar):
+                    diff_candidate = diff_cycle
+                    diff_source = "cycle"
+                else:
+                    diff_candidate = diff_intrabar
+                    diff_source = "intrabar"
             elif diff_cycle is not None and math.isfinite(diff_cycle):
                 diff_candidate = diff_cycle
+                diff_source = "cycle"
             elif diff_intrabar is not None and math.isfinite(diff_intrabar):
                 diff_candidate = diff_intrabar
-            if diff_candidate is not None and math.isfinite(diff_candidate):
-                diff = diff_candidate
-                diff_value = diff
-                if diff > base_tol:
-                    strong = diff >= strong_threshold
-                    delta = -10.0 if strong else -5.0
-                    volatility_note = "vol↑↑" if strong else "vol↑"
-                elif diff < -base_tol:
-                    strong = diff <= -strong_threshold
-                    delta = 10.0 if strong else 5.0
-                    volatility_note = "vol↓↓" if strong else "vol↓"
+                diff_source = "intrabar"
+        if diff_candidate is not None and math.isfinite(diff_candidate):
+            diff = diff_candidate
+            diff_value = diff
+            if diff > base_tol:
+                strong = diff >= strong_threshold
+                delta = -10.0 if strong else -5.0
+                volatility_note = "vol↑↑" if strong else "vol↑"
+                thr_text = f"{strong_threshold:.4f}" if strong else f"{base_tol:.4f}"
+                volatility_rule = f"X={delta:+.0f}m (vol↑ diff={diff:.4f} {diff_source} >= {thr_text})"
+            elif diff < -base_tol:
+                strong = diff <= -strong_threshold
+                delta = 10.0 if strong else 5.0
+                volatility_note = "vol↓↓" if strong else "vol↓"
+                thr_text = f"{strong_threshold:.4f}" if strong else f"{base_tol:.4f}"
+                volatility_rule = f"X={delta:+.0f}m (vol↓ diff={diff:.4f} {diff_source} <= -{thr_text})"
             else:
-                volatility_note = "vol=init"
+                volatility_note = "vol≈"
+                volatility_rule = f"X={delta:+.0f}m (vol≈ diff={diff:.4f} {diff_source} within ±{base_tol:.4f})"
+        else:
+            volatility_note = "vol=init"
+            volatility_rule = "X=+0m (vol n/a)"
 
-        target_interval = prev_interval + delta
-        target_interval = round(target_interval / 5.0) * 5.0
-        target_interval = min(max(target_interval, interval_floor), interval_cap)
-        fallback_interval_from_start = target_interval
+        news_delta_minutes = 0.0
+        news_note = "news_intensity=off"
+        news_rule = "Y=+0m (news_intensity=off)"
+        if news_intensity_enabled:
+            try:
+                big_thr = safe_float(schedule_spec.get("news_intensity_shorten_10_at"))
+                small_thr = safe_float(schedule_spec.get("news_intensity_shorten_5_at"))
+                len_small_thr = safe_float(schedule_spec.get("news_intensity_lengthen_5_below"))
+                len_big_thr = safe_float(schedule_spec.get("news_intensity_lengthen_10_below"))
+                big_thr = float(big_thr) if big_thr is not None and math.isfinite(big_thr) else 0.6
+                small_thr = float(small_thr) if small_thr is not None and math.isfinite(small_thr) else 0.35
+                len_small_thr = float(len_small_thr) if len_small_thr is not None and math.isfinite(len_small_thr) else 0.2
+                len_big_thr = float(len_big_thr) if len_big_thr is not None and math.isfinite(len_big_thr) else 0.1
+            except Exception:
+                big_thr, small_thr, len_small_thr, len_big_thr = (0.6, 0.35, 0.2, 0.1)
+            if news_intensity >= big_thr:
+                news_delta_minutes = -10.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} >= shorten_10_at={big_thr:.2f})"
+            elif news_intensity >= small_thr:
+                news_delta_minutes = -5.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} >= shorten_5_at={small_thr:.2f})"
+            elif news_intensity <= len_big_thr:
+                news_delta_minutes = 10.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} <= lengthen_10_below={len_big_thr:.2f})"
+            elif news_intensity <= len_small_thr:
+                news_delta_minutes = 5.0
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} <= lengthen_5_below={len_small_thr:.2f})"
+            else:
+                news_rule = f"Y={news_delta_minutes:+.0f}m (news_intensity={news_intensity:.2f} within neutral band)"
+            prev_note = f" prev={prev_news_intensity:.2f}" if prev_news_intensity is not None and math.isfinite(prev_news_intensity) else ""
+            news_note = (
+                f"news_intensity={news_intensity:.2f}{prev_note} items={news_items_total} "
+                f"items_norm={items_norm:.2f} per_symbol={items_per_symbol:.1f} "
+                f"emotion={news_emotion_mean:.2f} -> {news_delta_minutes:+.0f}m"
+            )
+
+        interval_a = prev_interval
+        vol_minutes = float(delta)
+        news_minutes = float(news_delta_minutes)
+        interval_raw = interval_a + vol_minutes + news_minutes
+
+        interval_after_round = round(interval_raw / 5.0) * 5.0
+        fallback_interval_from_start = min(max(interval_after_round, interval_floor), interval_cap)
         vol_text = f"{atr_ratio_median:.4f}" if atr_ratio_median is not None and math.isfinite(atr_ratio_median) else "n/a"
         diff_text = f"{diff_value:.4f}" if diff_value is not None and math.isfinite(diff_value) else "n/a"
         cycle_diff_text = f"{diff_cycle:.4f}" if diff_cycle is not None and math.isfinite(diff_cycle) else "n/a"
         intrabar_diff_text = f"{diff_intrabar:.4f}" if diff_intrabar is not None and math.isfinite(diff_intrabar) else "n/a"
+        eq_text = (
+            f"A={interval_a:.2f} + X={vol_minutes:+.0f} + Y={news_minutes:+.0f} = {interval_raw:.2f} "
+            f"-> round5 {interval_after_round:.2f} -> clamp[{interval_floor:.1f}-{interval_cap:.1f}] B={fallback_interval_from_start:.2f}"
+        )
         timing_debug_parts.append(
-            f"fallback=adaptive prev={prev_interval:.2f}m delta={delta:+.1f}m -> {fallback_interval_from_start:.2f}m {volatility_note or ''} "
+            f"fallback=adaptive {eq_text}; {volatility_rule}; {news_rule}; {news_note}; {volatility_note or ''} "
             f"(prev_vol={prev_volatility_ratio if prev_volatility_ratio is not None else 'n/a'}, vol={vol_text}, diff={diff_text}; "
             f"diff_cycle={cycle_diff_text}, diff_intrabar={intrabar_diff_text}; {thresholds_note})"
         )
@@ -16546,6 +17154,10 @@ def run_cycle():
                 )
                 if atr_ratio_median is not None and math.isfinite(atr_ratio_median):
                     cycle_state["last_volatility_ratio"] = float(atr_ratio_median)
+                if news_intensity_enabled:
+                    cycle_state["last_news_intensity"] = float(news_intensity)
+                    cycle_state["last_news_items_total"] = int(news_items_total)
+                    cycle_state["last_news_emotion_mean"] = float(news_emotion_mean)
                 cycle_state["rate_limit_backoff"] = bool(rate_limit_backoff)
         except Exception:
             pass
@@ -16934,6 +17546,16 @@ _bind_module_exports()
 
 
 def main():
+    try:
+        _install_process_diagnostics()
+        boot_id = _read_proc_text("/proc/sys/kernel/random/boot_id")
+        boot_note = f" boot_id={boot_id}" if boot_id else ""
+        log(
+            f"[BOOT] pid={os.getpid()} ppid={os.getppid()} python={sys.executable} cwd={os.getcwd()}{boot_note}",
+            Fore.LIGHTBLACK_EX,
+        )
+    except Exception:
+        pass
     # If we are running from a backup script but the repo is reachable, jump back to the latest code.
     try:
         script_path = Path(__file__).resolve()
@@ -16943,6 +17565,9 @@ def main():
         pass
     ensure_version_backup()
     refresh_settings()
+    if not _acquire_lock():
+        _write_runtime_status(None, None, "stopped")
+        return
     base_margin_utilization = ORDER_MARGIN_UTILIZATION
     base_auto_margin_ratio = AUTO_MARGIN_SCALE_RATIO
     configure_telegram_bot()
@@ -16990,9 +17615,24 @@ def main():
                 f"ℹ️ Следующая сессия запланирована на {next_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
                 f"(~{delay_minutes:.1f} мин)"
             )
-            log(eta_msg, Fore.LIGHTBLACK_EX)
-            send_tg(eta_msg)
-            _write_runtime_status(delay_minutes, target_dt, "sleeping")
+            try:
+                log(eta_msg, Fore.LIGHTBLACK_EX)
+            except Exception:
+                pass
+            try:
+                send_tg(eta_msg)
+            except Exception as exc:
+                try:
+                    log(f"[WARN] Telegram send failed during sleep setup: {exc}", Fore.YELLOW)
+                except Exception:
+                    pass
+            try:
+                _write_runtime_status(delay_minutes, target_dt, "sleeping")
+            except Exception as exc:
+                try:
+                    log(f"[WARN] Failed to write runtime status during sleep setup: {exc}", Fore.YELLOW)
+                except Exception:
+                    pass
 
             progress_enabled = remaining_seconds >= 180
             progress_interval = (
@@ -17022,12 +17662,24 @@ def main():
                         f"ℹ️ Осталось ~{minutes_left:.1f} мин до следующей сессии "
                         f"({eta_local.strftime('%H:%M:%S %Z')})"
                     )
-                    log(progress_msg, Fore.LIGHTBLACK_EX)
-                    send_tg(progress_msg)
+                    try:
+                        log(progress_msg, Fore.LIGHTBLACK_EX)
+                    except Exception:
+                        pass
+                    try:
+                        send_tg(progress_msg)
+                    except Exception:
+                        pass
             except KeyboardInterrupt:
                 log("Interrupted during sleep.", Fore.YELLOW)
                 _write_runtime_status(None, None, "stopped")
                 break
+            except Exception as exc:
+                try:
+                    log(f"[WARN] Sleep loop error (will retry scheduling): {exc}", Fore.YELLOW)
+                except Exception:
+                    pass
+                interrupted = True
             if interrupted:
                 continue
             break

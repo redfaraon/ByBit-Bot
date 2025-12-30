@@ -1193,6 +1193,18 @@ def _update_current_branch() -> tuple[str | None, bool]:
     return branch, bool(before_head and after_head and before_head != after_head)
 
 
+def _restart_self(reason: str) -> None:
+    print(f"[BOOT] Restarting launcher: {reason}", file=sys.stderr)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    python_exec = sys.executable or "python"
+    args = [python_exec, *sys.argv]
+    os.execv(python_exec, args)
+
+
 def _run_script_candidate(
     script_path: Path,
     version_label: str,
@@ -1454,6 +1466,8 @@ def main():
         new_head = _current_head()
         if new_head:
             print(f"[BOOT] Pulled latest {branch_name or 'HEAD'} -> {new_head[:8]}", file=sys.stderr)
+        # Restart launcher to ensure fresh imports of updated modules (no manual restart needed).
+        _restart_self("new commit pulled")
     history = _load_fallback_history()
     history.setdefault("branches", {})
     cycle_state = _load_cycle_state()
@@ -1502,6 +1516,17 @@ def main():
             _save_fallback_history(history)
             print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", file=sys.stderr)
             # Run the freshly pulled current version once, then continue normal flow
+            _run_current()
+            return
+        # If HEAD advanced beyond the fallback snapshot, try the fresh HEAD once.
+        if current_head and fallback_head and current_head != fallback_head:
+            history["fallback_active"] = False
+            history["fallback_cycles"] = 0
+            history["fallback_last_head"] = None
+            history["fallback_source"] = None
+            history["fallback_target"] = None
+            _save_fallback_history(history)
+            print(f"[BOOT] HEAD advanced to {current_head[:8]} (fallback was {fallback_head[:8]}), attempting fresh HEAD.", file=sys.stderr)
             _run_current()
             return
         fallback_cycles_recorded = int(history.get("fallback_cycles") or 0)

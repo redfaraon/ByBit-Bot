@@ -1,15 +1,15 @@
 {
-  "version": "1.1.4",
+  "version": "1.1.6",
   "context": {
     "universe": [
-      "XRP/USDT",
-      "DOGE/USDT",
-      "ADA/USDT",
-      "TON/USDT",
-      "SOL/USDT",
-      "AVAX/USDT",
-      "LINK/USDT",
-      "TRX/USDT"
+      "XRP/USDT:USDT",
+      "DOGE/USDT:USDT",
+      "ADA/USDT:USDT",
+      "TON/USDT:USDT",
+      "SOL/USDT:USDT",
+      "AVAX/USDT:USDT",
+      "LINK/USDT:USDT",
+      "TRX/USDT:USDT"
     ],
     "timeframes": {
       "primary": "30m",
@@ -23,6 +23,22 @@
       "neutral_band": 0.44
     },
     "schedule_minutes": 10,
+    "schedule": {
+      "offline_min": 4,
+      "offline_max": 35,
+      "online_min": 10,
+      "online_max": 45,
+      "backoff_min": 25,
+      "backoff_max": 55,
+      "news_intensity_enabled": true,
+      "news_intensity_weight_items": 0.35,
+      "news_intensity_weight_emotion": 0.65,
+      "news_intensity_items_per_symbol": 7,
+      "news_intensity_shorten_5_at": 0.55,
+      "news_intensity_shorten_10_at": 0.85,
+      "news_intensity_lengthen_5_below": 0.15,
+      "news_intensity_lengthen_10_below": 0.05
+    },
     "env_vars": [
       "RISK_PCT",
       "MIN_DYNAMIC_RISK_PCT",
@@ -32,6 +48,11 @@
       "source": "news",
       "max_symbols": 8,
       "include_positions": true,
+      "fill_from_fallback": true,
+      "affordability": {
+        "enabled": true,
+        "fill_from_fallback": true
+      },
       "news_priority": {
         "min_items": 1
       }
@@ -60,8 +81,11 @@
   },
   "rules": {
     "trend": {
+      "require_secondary_tf": false,
+      "min_ema_spread_pct": 0.0008,
       "long": {
-        "rsi_max": 68,
+        "rsi_max": 67,
+        "rsi4h_min": 40,
         "funding_min": -0.0004,
         "news_block": [
           "negative"
@@ -73,7 +97,8 @@
         }
       },
       "short": {
-        "rsi_min": 32,
+        "rsi_min": 33,
+        "rsi4h_max": 60,
         "funding_max": 0.0004,
         "news_block": [
           "positive"
@@ -86,18 +111,18 @@
       }
     },
     "countertrend": {
+      "require_atr_calm": false,
+      "require_oi_flat": true,
       "long": {
-        "rsi_max": 28,
+        "rsi_max": 30,
         "news_block": [
-          "negative",
-          "positive"
+          "negative"
         ],
         "confidence": 0.45
       },
       "short": {
-        "rsi_min": 72,
+        "rsi_min": 70,
         "news_block": [
-          "negative",
           "positive"
         ],
         "confidence": 0.45
@@ -141,15 +166,23 @@
       "rsi_long": 70,
       "rsi_short": 30
     },
-    "hedge": {
-      "funding_flip": 0.0001,
-      "size_pct": 0.5
-    },
-    "modify_position": {
-      "rsi_long": [
-        42,
-        65
-      ],
+  "hedge": {
+    "funding_flip": 0.0001,
+    "size_pct": 0.5
+  },
+  "close": {
+    "confidence": 0.84,
+    "oi_reverse": true,
+    "oi_reverse_confirm": {
+      "price_weak": true,
+      "atr_hot": true
+    }
+  },
+  "modify_position": {
+    "rsi_long": [
+      42,
+      65
+    ],
       "rsi_short": [
         35,
         58
