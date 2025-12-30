@@ -205,7 +205,15 @@ python manage_update.py status
 
 # Auto-update across branches
 
-Before each cycle the bot:
+By default, auto-update stays on the **current branch** (the same behavior as before): it fetches and fast-forwards without switching branches.
+
+If you want instances to automatically follow whatever branch the remote `HEAD` points at, enable it explicitly:
+
+```bash
+export GIT_FOLLOW_REMOTE_HEAD=1
+```
+
+With `GIT_FOLLOW_REMOTE_HEAD=1`, before each cycle the bot:
 
 1. Fetches the configured remote (`git fetch --prune`).
 2. Reads `refs/remotes/<remote>/HEAD` and checks out whichever branch it currently points at (`git checkout -B <branch> <remote>/<branch>`).

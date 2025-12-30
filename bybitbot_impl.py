@@ -2277,36 +2277,35 @@ def _sync_with_remote() -> None:
                 _GIT_AUTH_HINT_LOGGED = True
         log(f"[WARN] Git fetch failed: {details}", Fore.YELLOW)
         return
-    remote_head_branch, remote_head_commit = _resolve_remote_head(remote, git_env)
-    local_branch = _git_current_branch(git_env)
-    local_commit = _git_current_commit(git_env)
-    switched = False
-    if remote_head_branch and remote_head_commit:
-        needs_switch = (
-            remote_head_branch != local_branch
-            or (local_commit is not None and local_commit != remote_head_commit)
-        )
-        if needs_switch:
-            checkout_target = f"{remote}/{remote_head_branch}"
-            try:
-                switch_proc = subprocess.run(
-                    [*git_cmd, "checkout", "-B", remote_head_branch, checkout_target],
-                    cwd=REPO_ROOT,
-                    env=git_env,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                log(
-                    f"[GIT] switched to {remote_head_branch} ({remote_head_commit[:7]}) to follow remote HEAD",
-                    Fore.LIGHTBLACK_EX,
-                )
-                switched = True
-                # refresh local_branch after checkout
-                local_branch = remote_head_branch
-            except subprocess.CalledProcessError as exc:
-                details = exc.stderr or exc.stdout or str(exc)
-                log(f"[WARN] Git checkout failed: {details}", Fore.YELLOW)
+    follow_remote_head = (os.getenv("GIT_FOLLOW_REMOTE_HEAD") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if follow_remote_head:
+        remote_head_branch, remote_head_commit = _resolve_remote_head(remote, git_env)
+        local_branch = _git_current_branch(git_env)
+        local_commit = _git_current_commit(git_env)
+        if remote_head_branch and remote_head_commit:
+            needs_switch = (
+                remote_head_branch != local_branch
+                or (local_commit is not None and local_commit != remote_head_commit)
+            )
+            if needs_switch:
+                checkout_target = f"{remote}/{remote_head_branch}"
+                try:
+                    subprocess.run(
+                        [*git_cmd, "checkout", "-B", remote_head_branch, checkout_target],
+                        cwd=REPO_ROOT,
+                        env=git_env,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    log(
+                        f"[GIT] switched to {remote_head_branch} ({remote_head_commit[:7]}) to follow remote HEAD "
+                        f"(GIT_FOLLOW_REMOTE_HEAD=1)",
+                        Fore.LIGHTBLACK_EX,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    details = exc.stderr or exc.stdout or str(exc)
+                    log(f"[WARN] Git checkout failed: {details}", Fore.YELLOW)
     if working_tree_dirty:
         log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
         return
