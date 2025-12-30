@@ -111,12 +111,63 @@ If you're deploying on a Linux server (Ubuntu/Debian), run the bot under `system
    ```
 
 4. Useful commands:
-   ```bash
-   sudo systemctl status bybitbot --no-pager
-   sudo systemctl restart bybitbot
-   sudo journalctl -u bybitbot -f
-   tail -f /var/log/bybitbot/console.log
-   ```
+    ```bash
+    sudo systemctl status bybitbot --no-pager
+    sudo systemctl restart bybitbot
+    sudo journalctl -u bybitbot -f
+    tail -f /var/log/bybitbot/console.log
+    ```
+
+## Demo trading (Bybit testnet) — recommended workflow
+
+Fast and safe option: run **a second bot instance** on Bybit testnet (demo) as a separate user + separate `systemd` unit. This way you can test strategy changes without risking the real account, and you can stop/start demo independently.
+
+### 1) Create a demo user
+
+- Start a separate process: `python bybitbot.py --user demo`
+- Put demo keys into `users/demo/secrets.env`:
+  ```env
+  BYBIT_API_KEY=...        # testnet keys
+  BYBIT_API_SECRET=...
+  BYBIT_SANDBOX=1          # enables ccxt sandbox/testnet mode
+  ```
+
+### 2) Create a demo systemd unit
+
+Example: `/etc/systemd/system/bybitbot-demo.service`:
+
+```ini
+[Unit]
+Description=ByBit Bot (demo/testnet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/bot/ByBit-Bot
+Environment=PY_COLORS=1
+Environment=FORCE_COLOR=1
+Environment=BYBITBOT_LOCK_FILE=/var/run/bybitbot-demo.lock
+ExecStart=/usr/bin/python3 /root/bot/ByBit-Bot/bybitbot.py --user demo
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/bybitbot/demo.console.log
+StandardError=append:/var/log/bybitbot/demo.console.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now bybitbot-demo
+```
+
+### 3) Telegram control
+
+- Use `/demo` in Telegram to see hints and control the demo unit (`/demo status|start|stop|restart`).
+- The bot manages `bybitbot-demo.service` by default (override via `BYBITBOT_DEMO_SERVICE`).
 
 # Scheduled restart & update workflow
 

@@ -13,6 +13,7 @@ import faulthandler
 import shutil
 import stat
 import subprocess
+import platform
 import sys
 import threading
 import time
@@ -1188,6 +1189,7 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("adduser", "Создать нового юзер-бота (DM)"),
     ("config", "Настройки бота и окружения"),
     ("sandbox", "Управление песочницами"),
+    ("demo", "Демо-режим (Bybit testnet)"),
     ("version", "Текущая версия и changelog"),
     ("stable", "Переключиться на stable/backup"),
     ("head", "Переключиться на последний коммит текущей ветки"),
@@ -1214,6 +1216,7 @@ COMMANDS_HELP_SECTIONS = [
             "/tokens — бюджет токенов OpenAI и текущий расход",
             "/ai payload [universe|trade] — показать последний запрос/ответ модели",
             "/sandbox — управление песочницами",
+            "/demo — демо-бот/Bybit testnet (подсказки + управление сервисом)",
         ],
     },
     {
@@ -8509,6 +8512,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_sandbox_command(args, user_id=user_id)
         if reply is None:
             return
+    elif command == "demo":
+        reply = _handle_demo_command(args, user_id=user_id)
+        if reply is None:
+            return
     elif command in {"stable", "backup"}:
         reply = _set_target_and_restart("branch:stable", "[RESTART] /stable -> switching to stable/backup", chat_id=chat_id, thread_id=response_thread)
     elif command in {"head", "normal"}:
@@ -9849,6 +9856,16 @@ def _init_exchange_enhanced() -> Any:
             "hedgeMode": HEDGE_MODE,
         },
     })
+    sandbox_flag = (os.getenv("BYBIT_SANDBOX") or os.getenv("BYBIT_TESTNET") or "").strip()
+    if sandbox_flag in {"1", "true", "yes", "on"}:
+        try:
+            if hasattr(exchange, "set_sandbox_mode"):
+                exchange.set_sandbox_mode(True)  # type: ignore[attr-defined]
+                log("[CONFIG] BYBIT_SANDBOX enabled (ccxt sandbox mode)", Fore.LIGHTBLACK_EX)
+            else:
+                log("[WARN] BYBIT_SANDBOX requested but ccxt exchange has no set_sandbox_mode()", Fore.YELLOW)
+        except Exception as exc:
+            log(f"[WARN] Failed to enable ccxt sandbox mode: {exc}", Fore.YELLOW)
     try:
         exchange.options["recvWindow"] = recv_window_ms
         exchange.options["adjustForTimeDifference"] = True
@@ -18086,6 +18103,75 @@ def _handle_sandbox_command(args: list[str], *, user_id: Optional[int]) -> Optio
         "Использование: /sandbox list, /sandbox delete <id>, /sandbox promote <id>\n"
         "Песочницы создаются автоматически через Support."
     )
+
+
+def _is_root_user() -> bool:
+    try:
+        return os.geteuid() == 0  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+def _run_systemctl(action: str, unit: str) -> tuple[bool, str]:
+    if platform.system().lower() != "linux":
+        return False, "systemctl доступен только на Linux."
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return False, "systemctl не найден."
+    cmd = [systemctl, action, unit]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"systemctl error: {exc}"
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    msg = "\n".join([line for line in [out, err] if line]) or f"exit={proc.returncode}"
+    return proc.returncode == 0, msg
+
+
+def _demo_unit_name() -> str:
+    return (os.getenv("BYBITBOT_DEMO_SERVICE") or "bybitbot-demo").strip() + ".service"
+
+
+def _handle_demo_command(args: list[str], *, user_id: Optional[int]) -> Optional[str]:
+    action = (args[0].lower() if args else "help").strip()
+    unit = _demo_unit_name()
+    if action in {"help", "h", "?"}:
+        return (
+            "Демо-режим = отдельный процесс бота с ключами Bybit testnet.\n"
+            "\n"
+            "Рекомендуемый вариант: второй systemd unit (не мешает real-боту).\n"
+            f"- Статус: /demo status\n"
+            f"- Старт: /demo start\n"
+            f"- Стоп: /demo stop\n"
+            f"- Рестарт: /demo restart\n"
+            "\n"
+            "Как включить testnet в конфиге демо-бота:\n"
+            "- В `users/<demo_id>/secrets.env` добавить `BYBIT_SANDBOX=1` + testnet ключи.\n"
+            "- Для демо-юнита задать отдельный lock: `BYBITBOT_LOCK_FILE=/var/run/bybitbot-demo.lock`.\n"
+            "\n"
+            f"Unit по умолчанию: `{unit}` (переопределяется `BYBITBOT_DEMO_SERVICE`)."
+        )
+    if action in {"status", "st"}:
+        ok, msg = _run_systemctl("status", unit)
+        prefix = "✅" if ok else "⚠️"
+        return f"{prefix} {unit}\n{msg}"
+    if action in {"start", "stop", "restart"}:
+        if not _is_root_user():
+            return (
+                f"🚫 Недостаточно прав для управления `{unit}` (нужно root или sudo без пароля).\n"
+                f"Ручной запуск: `sudo systemctl {action} {unit}`"
+            )
+        ok, msg = _run_systemctl(action, unit)
+        prefix = "✅" if ok else "⚠️"
+        return f"{prefix} systemctl {action} {unit}\n{msg}"
+    return "Использование: /demo, /demo status, /demo start|stop|restart"
 
 
 
