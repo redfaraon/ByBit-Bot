@@ -2219,8 +2219,9 @@ def _git_newest_remote_branch(remote: str, git_env: Mapping[str, str]) -> tuple[
     """
     Return (branch_name, commit_hash, commit_ts) for the most recent commit across all remote branches.
 
-    Uses committer timestamp; excludes refs/remotes/<remote>/HEAD.
+    Uses committer timestamp; excludes refs/remotes/<remote>/HEAD and the stable branch.
     """
+    stable_branch = (os.getenv("BYBITBOT_STABLE_BRANCH") or "stable").strip() or "stable"
     try:
         proc = subprocess.run(
             [
@@ -2250,6 +2251,8 @@ def _git_newest_remote_branch(remote: str, git_env: Mapping[str, str]) -> tuple[
         if not ref_short.startswith(f"{remote}/"):
             continue
         branch_name = ref_short.split("/", 1)[1]
+        if branch_name == stable_branch:
+            continue
         try:
             ts = int(ts_raw)
         except Exception:
