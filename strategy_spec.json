@@ -2,14 +2,9 @@
   "version": "1.1.6",
   "context": {
     "universe": [
-      "XRP/USDT:USDT",
-      "DOGE/USDT:USDT",
-      "ADA/USDT:USDT",
-      "TON/USDT:USDT",
-      "SOL/USDT:USDT",
-      "AVAX/USDT:USDT",
-      "LINK/USDT:USDT",
-      "TRX/USDT:USDT"
+      "1000BONK/USDT:USDT",
+      "1000PEPE/USDT:USDT",
+      "1000FLOKI/USDT:USDT"
     ],
     "timeframes": {
       "primary": "30m",
@@ -76,7 +71,7 @@
       "counter": 0.6,
       "flat": 0.4
     },
-    "min_pct": 0.01,
+    "min_pct": 0.001,
     "max_pct": 0.15
   },
   "rules": {
@@ -222,7 +217,7 @@
     "trailing_per_regime": {},
     "max_trailing_loss_pct": 0.0,
     "min_position_size": 0.0,
-    "min_notional_usdt": 0.1,
+    "min_notional_usdt": 0.0001,
     "news_weight": 1.0,
     "max_open_positions": 4,
     "max_positions_per_base": 1,

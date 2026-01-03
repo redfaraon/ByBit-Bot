@@ -14719,47 +14719,56 @@ def run_cycle():
         if missing_from_ai:
             send_tg(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}")
 
+    # Per-cycle symbol selection:
+    #   A) Always process open positions and non-reduce orders.
+    #   B) Plus N symbols from config universe (PAIR_LIST).
+    #   C) Plus N symbols from the dynamic universe/news.
+    config_symbols_per_cycle = 3
+    universe_symbols_per_cycle = 3
+
     symbols_sequence: list[str] = []
     seen_symbols: set[str] = set()
-    for sym_sel in selected_symbols:
-        if sym_sel and sym_sel not in seen_symbols:
-            symbols_sequence.append(sym_sel)
-            seen_symbols.add(sym_sel)
 
-    for sym_candidate in sorted(position_symbols):
-        if sym_candidate not in seen_symbols:
-            symbols_sequence.append(sym_candidate)
-            seen_symbols.add(sym_candidate)
+    def _append_cycle_symbols(values, *, limit: int | None = None) -> None:
+        added = 0
+        for value in values:
+            if not value:
+                continue
+            if value in seen_symbols:
+                continue
+            symbols_sequence.append(value)
+            seen_symbols.add(value)
+            added += 1
+            if limit is not None and added >= limit:
+                break
 
-    for sym_candidate in sorted(order_symbols):
-        if sym_candidate not in seen_symbols:
-            symbols_sequence.append(sym_candidate)
-            seen_symbols.add(sym_candidate)
+    # A) Exposure first (positions + non-reduce orders)
+    if position_symbols:
+        prioritized_positions = sorted(
+            position_symbols,
+            key=lambda sym: (0 if sym in spot_position_symbols else 1, sym),
+        )
+        _append_cycle_symbols(prioritized_positions)
+    if order_symbols_non_reduce:
+        _append_cycle_symbols(sorted(order_symbols_non_reduce))
 
-    for sym_candidate in available_pairs:
-        if sym_candidate not in seen_symbols:
-            symbols_sequence.append(sym_candidate)
-            seen_symbols.add(sym_candidate)
+    # B) Fixed config universe
+    config_candidates = [p for p in normalized_pair_list if p in markets_set and p not in seen_symbols]
+    _append_cycle_symbols(config_candidates, limit=config_symbols_per_cycle)
 
-    priority_sequence = []
-    seen_priority: set[str] = set()
-    for sym_order in symbols_sequence:
-        if sym_order in position_symbols and sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    for sym_order in symbols_sequence:
-        if sym_order in new_universe_set and sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    for sym_order in symbols_sequence:
-        if sym_order in order_symbols_non_reduce and sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    for sym_order in symbols_sequence:
-        if sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    symbols_sequence = priority_sequence
+    # C) Dynamic universe/news (reuse already computed candidates)
+    dynamic_candidates: list[str] = []
+    for candidate in list(news_sorted or []) + list(new_universe_candidates or []):
+        if candidate and candidate in markets_set and candidate not in seen_symbols:
+            dynamic_candidates.append(candidate)
+    _append_cycle_symbols(dynamic_candidates, limit=universe_symbols_per_cycle)
+
+    # Fallback: keep the legacy selection if everything above produced nothing.
+    if not symbols_sequence:
+        _append_cycle_symbols(selected_symbols)
+        _append_cycle_symbols(sorted(position_symbols))
+        _append_cycle_symbols(sorted(order_symbols))
+        _append_cycle_symbols(available_pairs)
     if len(symbols_sequence) > symbol_processing_limit:
         protected_symbols = [sym for sym in symbols_sequence if sym in position_symbols]
         trimmed_sequence = protected_symbols[:]
