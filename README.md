@@ -217,6 +217,17 @@ Practical behavior:
 - If you manually switch to an older branch/commit, the bot will automatically jump back to the newest commit.
 - If backup mode is active, the bot stays on stable/backup until a **newer** commit appears, then exits backup mode automatically.
 
+Manual switch after stable fallback (pick a newer non-stable commit):
+
+```bash
+git fetch --prune
+git for-each-ref refs/remotes/origin --sort=-committerdate --format="%(refname:short) %(committerdate:iso8601) %(objectname:short)" \
+  | grep -v "origin/stable" | head -n 1
+git checkout -B <branch> origin/<branch>
+git pull --ff-only
+# Restart the bot (systemd/pm2/docker/etc or: python bybitbot.py --user <id>)
+```
+
 ## Bybit timing/nonce errors
 
 If you see InvalidNonce / retCode 10002 from Bybit complaining about timestamp/recv_window, set a larger receive window and let CCXT adjust for server time:

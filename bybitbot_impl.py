@@ -372,9 +372,9 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.9-legacy"
+BOT_VERSION = "1.3.10-legacy"
 BOT_CHANGELOG = (
-    "Strategy: tighten trend entries (4h confirmation, EMA spread floor, OI/RSI4h filters) and improve git auto-pull auth after reboot."
+    "Git auto-switch now ignores stable branch and docs explain manual switch steps after fallback."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
