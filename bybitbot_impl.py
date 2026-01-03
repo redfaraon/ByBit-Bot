@@ -2385,12 +2385,63 @@ def _sync_with_remote() -> None:
                 except subprocess.CalledProcessError as exc:
                     details = exc.stderr or exc.stdout or str(exc)
                     log(f"[WARN] Git checkout failed: {details}", Fore.YELLOW)
+    def _pull_with_manual_stash() -> bool:
+        stash_cmd = [*git_cmd, "stash", "push", "-u"]
+        try:
+            stash_proc = subprocess.run(
+                stash_cmd,
+                cwd=REPO_ROOT,
+                env=git_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            details = exc.stderr or exc.stdout or str(exc)
+            log(f"[WARN] Git stash push failed: {details}", Fore.YELLOW)
+            return False
+        stash_output = (stash_proc.stdout or stash_proc.stderr or "").strip()
+        if "no local changes to save" in stash_output.lower():
+            log("[GIT] Stash push reported no local changes; skipping manual stash pull.", Fore.LIGHTBLACK_EX)
+            return False
+        pulled = False
+        try:
+            pull_proc = subprocess.run(
+                [*git_cmd, "pull", "--ff-only"],
+                cwd=REPO_ROOT,
+                env=git_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            pull_output = (pull_proc.stdout or pull_proc.stderr or "").strip()
+            if pull_output:
+                log(f"[GIT] manual pull: {pull_output}", Fore.LIGHTBLACK_EX)
+            pulled = True
+        except subprocess.CalledProcessError as exc:
+            details = exc.stderr or exc.stdout or str(exc)
+            log(f"[WARN] Manual git pull failed: {details}", Fore.YELLOW)
+        finally:
+            pop_proc = subprocess.run(
+                [*git_cmd, "stash", "pop"],
+                cwd=REPO_ROOT,
+                env=git_env,
+                capture_output=True,
+                text=True,
+            )
+            pop_output = (pop_proc.stdout or pop_proc.stderr or "").strip()
+            if pop_output:
+                pop_colour = Fore.LIGHTBLACK_EX if pop_proc.returncode == 0 else Fore.YELLOW
+                log(f"[GIT] stash pop: {pop_output}", pop_colour)
+        return pulled
+
+    pull_cmd = [*git_cmd, "pull", "--ff-only"]
     if working_tree_dirty:
-        log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
-        return
+        pull_cmd.append("--autostash")
+        log("[GIT] Working tree has local changes; pulling with --autostash.", Fore.LIGHTBLACK_EX)
     try:
         pull_proc = subprocess.run(
-            [*git_cmd, "pull", "--ff-only"],
+            pull_cmd,
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,
@@ -2402,7 +2453,15 @@ def _sync_with_remote() -> None:
             log(f"[GIT] pull: {pull_output}", Fore.LIGHTBLACK_EX)
     except subprocess.CalledProcessError as exc:
         details = exc.stderr or exc.stdout or str(exc)
+        details_lower = (details or "").lower()
         log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
+        if (
+            working_tree_dirty
+            and "--autostash" in pull_cmd
+            and "autostash" in details_lower
+            and _pull_with_manual_stash()
+        ):
+            return
 
 
 def _format_commit_timestamp(iso_text: str | None) -> str | None:
