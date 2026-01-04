@@ -380,9 +380,10 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.10-legacy"
+BOT_VERSION = "1.3.11-legacy"
 BOT_CHANGELOG = (
-    "Git auto-switch now ignores stable branch and docs explain manual switch steps after fallback."
+    "Добавлен demo-режим Bybit (api-demo) в дополнение к prod/testnet; "
+    "dotenv больше не перетирает внешние переменные."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -10093,6 +10094,15 @@ def _init_exchange_enhanced() -> Any:
         return max(1000, min(60000, v))
 
     recv_window_ms = _env_int("BYBIT_RECV_WINDOW_MS", 15000)
+    mode_raw = (os.getenv("BYBIT_ENV") or "").strip().lower()
+    demo_flag = env_bool("BYBIT_DEMO", False) or mode_raw == "demo"
+    sandbox_flag = False
+    if not demo_flag:
+        sandbox_raw = (os.getenv("BYBIT_SANDBOX") or os.getenv("BYBIT_TESTNET") or "").strip().lower()
+        sandbox_flag = sandbox_raw in {"1", "true", "yes", "on"}
+    api_base_override = os.getenv("BYBIT_API_BASE") or os.getenv("BYBIT_API_HOST")
+    if demo_flag and not api_base_override:
+        api_base_override = "https://api-demo.bybit.com"
 
     exchange = ccxt.bybit({
         "apiKey": api_key,
@@ -10105,8 +10115,15 @@ def _init_exchange_enhanced() -> Any:
             "hedgeMode": HEDGE_MODE,
         },
     })
-    sandbox_flag = (os.getenv("BYBIT_SANDBOX") or os.getenv("BYBIT_TESTNET") or "").strip()
-    if sandbox_flag in {"1", "true", "yes", "on"}:
+    if demo_flag and api_base_override:
+        try:
+            if isinstance(exchange.urls.get("api"), dict):
+                exchange.urls["api"]["public"] = api_base_override
+                exchange.urls["api"]["private"] = api_base_override
+            log(f"[CONFIG] BYBIT_DEMO enabled (API {api_base_override})", Fore.LIGHTBLACK_EX)
+        except Exception as exc:
+            log(f"[WARN] Failed to apply demo API base {api_base_override}: {exc}", Fore.YELLOW)
+    elif sandbox_flag:
         try:
             if hasattr(exchange, "set_sandbox_mode"):
                 exchange.set_sandbox_mode(True)  # type: ignore[attr-defined]
@@ -10115,6 +10132,14 @@ def _init_exchange_enhanced() -> Any:
                 log("[WARN] BYBIT_SANDBOX requested but ccxt exchange has no set_sandbox_mode()", Fore.YELLOW)
         except Exception as exc:
             log(f"[WARN] Failed to enable ccxt sandbox mode: {exc}", Fore.YELLOW)
+    elif api_base_override:
+        try:
+            if isinstance(exchange.urls.get("api"), dict):
+                exchange.urls["api"]["public"] = api_base_override
+                exchange.urls["api"]["private"] = api_base_override
+            log(f"[CONFIG] BYBIT_API_BASE override -> {api_base_override}", Fore.LIGHTBLACK_EX)
+        except Exception as exc:
+            log(f"[WARN] Failed to apply BYBIT_API_BASE {api_base_override}: {exc}", Fore.YELLOW)
     try:
         exchange.options["recvWindow"] = recv_window_ms
         exchange.options["adjustForTimeDifference"] = True
