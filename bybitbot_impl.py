@@ -4558,11 +4558,15 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     return 1, positions_map, open_orders_cache
 
 
+_DOTENV_LAST_VALUES: dict[str, str] = {}
+
+
 def load_environment():
     env_paths = [
         SCRIPT_DIR / ".env",
         SCRIPT_DIR / ".env.local",
     ]
+    global _DOTENV_LAST_VALUES
     merged: dict[str, str] = {}
     for path in env_paths:
         if not path.exists():
@@ -4573,7 +4577,14 @@ def load_environment():
                 continue
             merged[key] = value
     for key, value in merged.items():
+        existing = os.environ.get(key)
+        if existing not in (None, ""):
+            previous = _DOTENV_LAST_VALUES.get(key)
+            if previous is None or existing != previous:
+                continue
         os.environ[key] = value
+    if merged:
+        _DOTENV_LAST_VALUES.update(merged)
 
 
 def env_int(name: str, default: int) -> int:
