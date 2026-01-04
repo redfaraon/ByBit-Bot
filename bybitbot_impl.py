@@ -129,12 +129,20 @@ def _acquire_lock() -> bool:
         if isinstance(existing, dict):
             existing_pid = safe_int(existing.get("pid") or 0)
             existing_boot_id = existing.get("boot_id")
+            existing_script = existing.get("script") if isinstance(existing.get("script"), str) else None
+            if existing_pid and existing_pid == os.getpid():
+                _LOCK_OWNED = True
+                return True
             cmdline = _pid_cmdline(existing_pid) if existing_pid else None
             alive = _is_pid_running(existing_pid)
+            cmdline_l = cmdline.lower() if isinstance(cmdline, str) else ""
+            script_l = existing_script.lower() if isinstance(existing_script, str) else ""
+            is_bot_cmd = (not cmdline) or ("bybitbot" in cmdline_l) or ("bybit-bot" in cmdline_l)
+            is_bot = is_bot_cmd or ("bybitbot" in script_l) or ("bybit-bot" in script_l)
             if (
                 alive
                 and (not current_boot_id or not existing_boot_id or existing_boot_id == current_boot_id)
-                and (not cmdline or "bybitbot.py" in cmdline or "bybitbot_impl.py" in cmdline)
+                and is_bot
             ):
                 log(
                     f"[LOCK] Another instance is running (pid={existing_pid}, boot_id={existing_boot_id or 'n/a'}). Exiting.",

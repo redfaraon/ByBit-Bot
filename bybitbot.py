@@ -123,6 +123,38 @@ def _refresh_state_paths() -> None:
 
 _refresh_state_paths()
 
+def _lock_path() -> Path:
+    lock_override = os.getenv("BYBITBOT_LOCK_FILE")
+    if lock_override:
+        try:
+            return Path(lock_override).expanduser().resolve()
+        except Exception:
+            return Path(lock_override)
+    return STATE_DIR / "bybitbot.lock"
+
+
+def _release_owned_lock_file() -> None:
+    """Allow fallback subprocess to start by releasing our own lock file (if held)."""
+    lock_path = _lock_path()
+    if not lock_path.exists():
+        return
+    try:
+        existing = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(existing, dict):
+        return
+    try:
+        existing_pid = int(existing.get("pid") or 0)
+    except Exception:
+        existing_pid = 0
+    if existing_pid != os.getpid():
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 USERS_DIR = REPO_ROOT / "users"
 USERS_CONFIG_FILE = USERS_DIR / "users.json"
 USERS_DEFAULT_SECRET = "secrets.env"
@@ -1292,6 +1324,7 @@ def _run_script_candidate(
     if parts and "backups" in parts and "snapshots" in parts:
         snapshot_dir = script_path.parent
         print(f"[BOOT] Using snapshot dir: {snapshot_dir}", file=sys.stderr)
+    _release_owned_lock_file()
     result = subprocess.run([sys.executable, str(script_path)], env=env)
     return result.returncode == 0
 
@@ -1516,7 +1549,15 @@ def main():
             _save_fallback_history(history)
             print(f"[BOOT] New commit {current_head[:8]} detected; resuming HEAD.", file=sys.stderr)
             # Run the freshly pulled current version once, then continue normal flow
-            _run_current()
+            try:
+                _run_current()
+            except Exception as exc:
+                traceback.print_exc()
+                history.setdefault("commits", {})[current_head] = "failed"
+                history["fallback_failed_head"] = current_head
+                _save_fallback_history(history)
+                if not _run_backups(str(exc)):
+                    raise
             return
         # If HEAD advanced beyond the fallback snapshot, try the fresh HEAD once.
         if current_head and fallback_head and current_head != fallback_head:
@@ -1527,7 +1568,15 @@ def main():
             history["fallback_target"] = None
             _save_fallback_history(history)
             print(f"[BOOT] HEAD advanced to {current_head[:8]} (fallback was {fallback_head[:8]}), attempting fresh HEAD.", file=sys.stderr)
-            _run_current()
+            try:
+                _run_current()
+            except Exception as exc:
+                traceback.print_exc()
+                history.setdefault("commits", {})[current_head] = "failed"
+                history["fallback_failed_head"] = current_head
+                _save_fallback_history(history)
+                if not _run_backups(str(exc)):
+                    raise
             return
         fallback_cycles_recorded = int(history.get("fallback_cycles") or 0)
         if fallback_cycles_recorded != completed_fallback_cycles:
