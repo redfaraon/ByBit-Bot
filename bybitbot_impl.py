@@ -380,10 +380,11 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.11-legacy"
+BOT_VERSION = "1.3.12-legacy"
 BOT_CHANGELOG = (
     "Добавлен demo-режим Bybit (api-demo) в дополнение к prod/testnet; "
-    "dotenv больше не перетирает внешние переменные."
+    "dotenv больше не перетирает внешние переменные; "
+    "для demo отключён fetchCurrencies в ccxt (Bybit demo API ограничен)."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -10121,6 +10122,12 @@ def _init_exchange_enhanced() -> Any:
                 exchange.urls["api"]["public"] = api_base_override
                 exchange.urls["api"]["private"] = api_base_override
             log(f"[CONFIG] BYBIT_DEMO enabled (API {api_base_override})", Fore.LIGHTBLACK_EX)
+            try:
+                if isinstance(getattr(exchange, "has", None), dict):
+                    exchange.has["fetchCurrencies"] = False
+                    log("[CONFIG] BYBIT_DEMO: disabled fetchCurrencies (demo API limitation)", Fore.LIGHTBLACK_EX)
+            except Exception:
+                pass
         except Exception as exc:
             log(f"[WARN] Failed to apply demo API base {api_base_override}: {exc}", Fore.YELLOW)
     elif sandbox_flag:
