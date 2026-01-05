@@ -4,7 +4,10 @@
     "universe": [
       "1000BONK/USDT:USDT",
       "1000PEPE/USDT:USDT",
-      "1000FLOKI/USDT:USDT"
+      "1000FLOKI/USDT:USDT",
+      "BTC/USDT:USDT",
+      "ETH/USDT:USDT",
+      "SOL/USDT:USDT"
     ],
     "timeframes": {
       "primary": "30m",
@@ -54,9 +57,9 @@
     }
   },
   "risk": {
-    "base_pct": 0.05,
-    "min_pct": 0.03,
-    "max_pct": 0.12
+    "base_pct": 0.04,
+    "min_pct": 0.02,
+    "max_pct": 0.10
   },
   "thresholds": {
     "atr_sigma_hot": 3.5,
@@ -205,14 +208,14 @@
   "execution": {
     "market_type": "linear",
     "manual_only": true,
-    "leverage": 27,
+    "leverage": 20,
     "order_margin_utilization": 0.95,
-    "sl_atr": 1.4,
-    "tp_atr": 2.2,
-    "trailing_atr_mult": 0.8,
-    "trailing_dynamic_trigger_atr": 1.4,
-    "trailing_dynamic_factor": 0.65,
-    "trailing_dynamic_min_atr": 0.35,
+    "sl_atr": 2.0,
+    "tp_atr": 2.4,
+    "trailing_atr_mult": 0.9,
+    "trailing_dynamic_trigger_atr": 2.0,
+    "trailing_dynamic_factor": 0.4,
+    "trailing_dynamic_min_atr": 0.55,
     "trailing_per_symbol": {},
     "trailing_per_regime": {},
     "max_trailing_loss_pct": 0.0,
@@ -229,9 +232,9 @@
       "market_on_timeout": true,
       "cancel_on_conflict": true
     },
-    "pseudotrail_min_improve_atr": 0.35,
-    "pseudotrail_min_stop_gap_atr": 0.6,
-    "pseudotrail_stop_lock_factor": 0.35,
+    "pseudotrail_min_improve_atr": 0.5,
+    "pseudotrail_min_stop_gap_atr": 1.0,
+    "pseudotrail_stop_lock_factor": 0.15,
     "pseudotrail_tp_extend_factor": 0.25
   }
 }
