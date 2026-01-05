@@ -4813,14 +4813,22 @@ def refresh_settings():
         BREAKEVEN_ENABLED = env_int("BREAKEVEN_ENABLED", env_int("MOVE_STOP_TO_BREAKEVEN", 1)) != 0
     except Exception:
         BREAKEVEN_ENABLED = True
-    try:
-        BREAKEVEN_ATR_MULT = float(os.getenv("BREAKEVEN_ATR_MULT", str(BREAKEVEN_ATR_MULT)))
-    except (TypeError, ValueError):
-        BREAKEVEN_ATR_MULT = 0.6
-    try:
-        BREAKEVEN_BUFFER_ATR = float(os.getenv("BREAKEVEN_BUFFER_ATR", str(BREAKEVEN_BUFFER_ATR)))
-    except (TypeError, ValueError):
-        BREAKEVEN_BUFFER_ATR = 0.15
+    breakeven_spec = STRATEGY_EXECUTION_SPEC.get("breakeven_atr_mult")
+    if breakeven_spec is not None:
+        BREAKEVEN_ATR_MULT = float(breakeven_spec)
+    else:
+        try:
+            BREAKEVEN_ATR_MULT = float(os.getenv("BREAKEVEN_ATR_MULT", str(BREAKEVEN_ATR_MULT)))
+        except (TypeError, ValueError):
+            BREAKEVEN_ATR_MULT = 0.6
+    breakeven_buffer_spec = STRATEGY_EXECUTION_SPEC.get("breakeven_buffer_atr")
+    if breakeven_buffer_spec is not None:
+        BREAKEVEN_BUFFER_ATR = float(breakeven_buffer_spec)
+    else:
+        try:
+            BREAKEVEN_BUFFER_ATR = float(os.getenv("BREAKEVEN_BUFFER_ATR", str(BREAKEVEN_BUFFER_ATR)))
+        except (TypeError, ValueError):
+            BREAKEVEN_BUFFER_ATR = 0.15
     BREAKEVEN_ATR_MULT = max(0.0, BREAKEVEN_ATR_MULT)
     BREAKEVEN_BUFFER_ATR = max(0.0, BREAKEVEN_BUFFER_ATR)
     sl_spec = STRATEGY_EXECUTION_SPEC.get("sl_atr")
@@ -4830,18 +4838,32 @@ def refresh_settings():
     TP_ATR = float(tp_spec) if tp_spec is not None else float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(trailing_spec) if trailing_spec is not None else float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
-    try:
-        TRAILING_DYNAMIC_TRIGGER_ATR = float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
-    except (TypeError, ValueError):
-        TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
-    try:
-        TRAILING_DYNAMIC_FACTOR = float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
-    except (TypeError, ValueError):
-        TRAILING_DYNAMIC_FACTOR = 0.65
-    try:
-        TRAILING_DYNAMIC_MIN_ATR = float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
-    except (TypeError, ValueError):
-        TRAILING_DYNAMIC_MIN_ATR = 0.35
+    trailing_dynamic_trigger_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_trigger_atr")
+    if trailing_dynamic_trigger_spec is not None:
+        TRAILING_DYNAMIC_TRIGGER_ATR = float(trailing_dynamic_trigger_spec)
+    else:
+        try:
+            TRAILING_DYNAMIC_TRIGGER_ATR = float(
+                os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR))
+            )
+        except (TypeError, ValueError):
+            TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
+    trailing_dynamic_factor_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_factor")
+    if trailing_dynamic_factor_spec is not None:
+        TRAILING_DYNAMIC_FACTOR = float(trailing_dynamic_factor_spec)
+    else:
+        try:
+            TRAILING_DYNAMIC_FACTOR = float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
+        except (TypeError, ValueError):
+            TRAILING_DYNAMIC_FACTOR = 0.65
+    trailing_dynamic_min_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_min_atr")
+    if trailing_dynamic_min_spec is not None:
+        TRAILING_DYNAMIC_MIN_ATR = float(trailing_dynamic_min_spec)
+    else:
+        try:
+            TRAILING_DYNAMIC_MIN_ATR = float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
+        except (TypeError, ValueError):
+            TRAILING_DYNAMIC_MIN_ATR = 0.35
     TRAILING_DYNAMIC_TRIGGER_ATR = max(0.0, TRAILING_DYNAMIC_TRIGGER_ATR)
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
