@@ -322,6 +322,27 @@ def _install_process_diagnostics() -> None:
 def _refresh_strategy_specs() -> None:
     global STRATEGY_ENV_WHITELIST, STRATEGY_RISK_SPEC, STRATEGY_EXECUTION_SPEC, STRATEGY_PROVIDERS_SPEC
     try:
+        loader = getattr(strategy, "_load_spec", None)
+        if callable(loader):
+            refreshed = loader()
+        else:
+            refreshed = None
+        if not isinstance(refreshed, dict):
+            spec_path = Path(getattr(strategy, "__file__", "")).with_name("strategy_spec.json")
+            if spec_path.exists():
+                refreshed = json.loads(spec_path.read_text(encoding="utf-8"))
+        if isinstance(refreshed, dict):
+            strategy.SPEC = refreshed
+            strategy.CONTEXT_SPEC = refreshed.get("context", {})
+            strategy.THRESHOLDS = refreshed.get("thresholds", {})
+            strategy.RULES_SPEC = refreshed.get("rules", {})
+            strategy.SIZE_SPEC = refreshed.get("sizing", {})
+            strategy.EVENTS_SPEC = refreshed.get("events", {})
+            strategy.ENTRY_LADDER = strategy.EVENTS_SPEC.get("entry_ladder") or []
+            strategy.TP_LADDER = strategy.EVENTS_SPEC.get("tp_ladder") or []
+    except Exception:
+        pass
+    try:
         context_spec = getattr(strategy, "CONTEXT_SPEC", None)
     except Exception:
         context_spec = None
@@ -380,11 +401,12 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.12-legacy"
+BOT_VERSION = "1.3.13-legacy"
 BOT_CHANGELOG = (
     "Добавлен demo-режим Bybit (api-demo) в дополнение к prod/testnet; "
     "dotenv больше не перетирает внешние переменные; "
-    "для demo отключён fetchCurrencies в ccxt (Bybit demo API ограничен)."
+    "для demo отключён fetchCurrencies в ccxt (Bybit demo API ограничен); "
+    "strategy_spec.json теперь перечитывается с диска при refresh_settings/hotreload, чтобы параметры трейлинга/защит реально применялись."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.1.6",
+  "version": "1.1.7",
   "context": {
     "universe": [
       "1000BONK/USDT:USDT",
@@ -210,11 +210,11 @@
     "manual_only": true,
     "leverage": 20,
     "order_margin_utilization": 0.95,
-    "sl_atr": 2.0,
+    "sl_atr": 1.6,
     "tp_atr": 2.4,
     "trailing_atr_mult": 0.9,
-    "trailing_dynamic_trigger_atr": 2.0,
-    "trailing_dynamic_factor": 0.4,
+    "trailing_dynamic_trigger_atr": 2.1,
+    "trailing_dynamic_factor": 0.40,
     "trailing_dynamic_min_atr": 0.55,
     "breakeven_atr_mult": 1.0,
     "breakeven_buffer_atr": 0.25,
@@ -235,8 +235,8 @@
       "cancel_on_conflict": true
     },
     "pseudotrail_min_improve_atr": 0.5,
-    "pseudotrail_min_stop_gap_atr": 1.0,
-    "pseudotrail_stop_lock_factor": 0.15,
-    "pseudotrail_tp_extend_factor": 0.25
+    "pseudotrail_min_stop_gap_atr": 0.9,
+    "pseudotrail_stop_lock_factor": 0.25,
+    "pseudotrail_tp_extend_factor": 0.30
   }
 }
