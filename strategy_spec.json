@@ -1,15 +1,13 @@
 {
-  "version": "1.1.6",
+  "version": "1.1.7",
   "context": {
     "universe": [
-      "XRP/USDT:USDT",
-      "DOGE/USDT:USDT",
-      "ADA/USDT:USDT",
-      "TON/USDT:USDT",
-      "SOL/USDT:USDT",
-      "AVAX/USDT:USDT",
-      "LINK/USDT:USDT",
-      "TRX/USDT:USDT"
+      "1000BONK/USDT:USDT",
+      "1000PEPE/USDT:USDT",
+      "1000FLOKI/USDT:USDT",
+      "BTC/USDT:USDT",
+      "ETH/USDT:USDT",
+      "SOL/USDT:USDT"
     ],
     "timeframes": {
       "primary": "30m",
@@ -59,9 +57,9 @@
     }
   },
   "risk": {
-    "base_pct": 0.05,
-    "min_pct": 0.03,
-    "max_pct": 0.12
+    "base_pct": 0.04,
+    "min_pct": 0.02,
+    "max_pct": 0.10
   },
   "thresholds": {
     "atr_sigma_hot": 3.5,
@@ -76,7 +74,7 @@
       "counter": 0.6,
       "flat": 0.4
     },
-    "min_pct": 0.01,
+    "min_pct": 0.001,
     "max_pct": 0.15
   },
   "rules": {
@@ -210,19 +208,21 @@
   "execution": {
     "market_type": "linear",
     "manual_only": true,
-    "leverage": 27,
+    "leverage": 20,
     "order_margin_utilization": 0.95,
-    "sl_atr": 1.4,
-    "tp_atr": 2.2,
-    "trailing_atr_mult": 0.8,
-    "trailing_dynamic_trigger_atr": 1.4,
-    "trailing_dynamic_factor": 0.65,
-    "trailing_dynamic_min_atr": 0.35,
+    "sl_atr": 1.6,
+    "tp_atr": 2.4,
+    "trailing_atr_mult": 0.9,
+    "trailing_dynamic_trigger_atr": 2.1,
+    "trailing_dynamic_factor": 0.40,
+    "trailing_dynamic_min_atr": 0.55,
+    "breakeven_atr_mult": 1.0,
+    "breakeven_buffer_atr": 0.25,
     "trailing_per_symbol": {},
     "trailing_per_regime": {},
     "max_trailing_loss_pct": 0.0,
     "min_position_size": 0.0,
-    "min_notional_usdt": 0.1,
+    "min_notional_usdt": 0.0001,
     "news_weight": 1.0,
     "max_open_positions": 4,
     "max_positions_per_base": 1,
@@ -234,9 +234,9 @@
       "market_on_timeout": true,
       "cancel_on_conflict": true
     },
-    "pseudotrail_min_improve_atr": 0.35,
-    "pseudotrail_min_stop_gap_atr": 0.6,
-    "pseudotrail_stop_lock_factor": 0.35,
-    "pseudotrail_tp_extend_factor": 0.25
+    "pseudotrail_min_improve_atr": 0.5,
+    "pseudotrail_min_stop_gap_atr": 0.9,
+    "pseudotrail_stop_lock_factor": 0.25,
+    "pseudotrail_tp_extend_factor": 0.30
   }
 }

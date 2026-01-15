@@ -13,6 +13,7 @@ import faulthandler
 import shutil
 import stat
 import subprocess
+import platform
 import sys
 import threading
 import time
@@ -128,12 +129,20 @@ def _acquire_lock() -> bool:
         if isinstance(existing, dict):
             existing_pid = safe_int(existing.get("pid") or 0)
             existing_boot_id = existing.get("boot_id")
+            existing_script = existing.get("script") if isinstance(existing.get("script"), str) else None
+            if existing_pid and existing_pid == os.getpid():
+                _LOCK_OWNED = True
+                return True
             cmdline = _pid_cmdline(existing_pid) if existing_pid else None
             alive = _is_pid_running(existing_pid)
+            cmdline_l = cmdline.lower() if isinstance(cmdline, str) else ""
+            script_l = existing_script.lower() if isinstance(existing_script, str) else ""
+            is_bot_cmd = (not cmdline) or ("bybitbot" in cmdline_l) or ("bybit-bot" in cmdline_l)
+            is_bot = is_bot_cmd or ("bybitbot" in script_l) or ("bybit-bot" in script_l)
             if (
                 alive
                 and (not current_boot_id or not existing_boot_id or existing_boot_id == current_boot_id)
-                and (not cmdline or "bybitbot.py" in cmdline or "bybitbot_impl.py" in cmdline)
+                and is_bot
             ):
                 log(
                     f"[LOCK] Another instance is running (pid={existing_pid}, boot_id={existing_boot_id or 'n/a'}). Exiting.",
@@ -313,6 +322,27 @@ def _install_process_diagnostics() -> None:
 def _refresh_strategy_specs() -> None:
     global STRATEGY_ENV_WHITELIST, STRATEGY_RISK_SPEC, STRATEGY_EXECUTION_SPEC, STRATEGY_PROVIDERS_SPEC
     try:
+        loader = getattr(strategy, "_load_spec", None)
+        if callable(loader):
+            refreshed = loader()
+        else:
+            refreshed = None
+        if not isinstance(refreshed, dict):
+            spec_path = Path(getattr(strategy, "__file__", "")).with_name("strategy_spec.json")
+            if spec_path.exists():
+                refreshed = json.loads(spec_path.read_text(encoding="utf-8"))
+        if isinstance(refreshed, dict):
+            strategy.SPEC = refreshed
+            strategy.CONTEXT_SPEC = refreshed.get("context", {})
+            strategy.THRESHOLDS = refreshed.get("thresholds", {})
+            strategy.RULES_SPEC = refreshed.get("rules", {})
+            strategy.SIZE_SPEC = refreshed.get("sizing", {})
+            strategy.EVENTS_SPEC = refreshed.get("events", {})
+            strategy.ENTRY_LADDER = strategy.EVENTS_SPEC.get("entry_ladder") or []
+            strategy.TP_LADDER = strategy.EVENTS_SPEC.get("tp_ladder") or []
+    except Exception:
+        pass
+    try:
         context_spec = getattr(strategy, "CONTEXT_SPEC", None)
     except Exception:
         context_spec = None
@@ -371,9 +401,12 @@ except Exception:
     pass
 
 # Версия бота: обновляйте при каждом релизе/значимых изменениях
-BOT_VERSION = "1.3.9-legacy"
+BOT_VERSION = "1.3.13-legacy"
 BOT_CHANGELOG = (
-    "Strategy: tighten trend entries (4h confirmation, EMA spread floor, OI/RSI4h filters) and improve git auto-pull auth after reboot."
+    "Добавлен demo-режим Bybit (api-demo) в дополнение к prod/testnet; "
+    "dotenv больше не перетирает внешние переменные; "
+    "для demo отключён fetchCurrencies в ccxt (Bybit demo API ограничен); "
+    "strategy_spec.json теперь перечитывается с диска при refresh_settings/hotreload, чтобы параметры трейлинга/защит реально применялись."
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -1188,6 +1221,7 @@ TELEGRAM_DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("adduser", "Создать нового юзер-бота (DM)"),
     ("config", "Настройки бота и окружения"),
     ("sandbox", "Управление песочницами"),
+    ("demo", "Демо-режим (Bybit testnet)"),
     ("version", "Текущая версия и changelog"),
     ("stable", "Переключиться на stable/backup"),
     ("head", "Переключиться на последний коммит текущей ветки"),
@@ -1214,6 +1248,7 @@ COMMANDS_HELP_SECTIONS = [
             "/tokens — бюджет токенов OpenAI и текущий расход",
             "/ai payload [universe|trade] — показать последний запрос/ответ модели",
             "/sandbox — управление песочницами",
+            "/demo — демо-бот/Bybit testnet (подсказки + управление сервисом)",
         ],
     },
     {
@@ -2166,6 +2201,132 @@ def _git_default_remote() -> str | None:
     return remotes[0]
 
 
+def _git_current_branch(git_env: Mapping[str, str]) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=REPO_ROOT,
+            env=git_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return (proc.stdout or "").strip()
+    except Exception:
+        return None
+
+
+def _git_current_commit(git_env: Mapping[str, str]) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            env=git_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return (proc.stdout or "").strip()
+    except Exception:
+        return None
+
+
+def _git_commit_timestamp(commit_hash: str, git_env: Mapping[str, str]) -> int | None:
+    try:
+        proc = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", commit_hash],
+            cwd=REPO_ROOT,
+            env=git_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        raw = (proc.stdout or "").strip()
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _git_newest_remote_branch(remote: str, git_env: Mapping[str, str]) -> tuple[str | None, str | None, int | None]:
+    """
+    Return (branch_name, commit_hash, commit_ts) for the most recent commit across all remote branches.
+
+    Uses committer timestamp; excludes refs/remotes/<remote>/HEAD and the stable branch.
+    """
+    stable_branch = (os.getenv("BYBITBOT_STABLE_BRANCH") or "stable").strip() or "stable"
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "for-each-ref",
+                f"refs/remotes/{remote}",
+                "--format=%(refname:short)\t%(committerdate:unix)\t%(objectname)",
+            ],
+            cwd=REPO_ROOT,
+            env=git_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return None, None, None
+    best_branch: str | None = None
+    best_commit: str | None = None
+    best_ts: int | None = None
+    for line in (proc.stdout or "").splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 3:
+            continue
+        ref_short, ts_raw, commit_hash = parts
+        if ref_short == f"{remote}/HEAD":
+            continue
+        if not ref_short.startswith(f"{remote}/"):
+            continue
+        branch_name = ref_short.split("/", 1)[1]
+        if branch_name == stable_branch:
+            continue
+        try:
+            ts = int(ts_raw)
+        except Exception:
+            continue
+        if best_ts is None or ts > best_ts:
+            best_ts = ts
+            best_commit = commit_hash
+            best_branch = branch_name
+    return best_branch, best_commit, best_ts
+
+
+def _read_fallback_history() -> dict[str, Any]:
+    try:
+        path = FALLBACK_HISTORY_FILE
+    except Exception:
+        return {}
+    if not path:
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_fallback_history(state: dict[str, Any]) -> None:
+    try:
+        path = FALLBACK_HISTORY_FILE
+    except Exception:
+        return
+    if not path:
+        return
+    try:
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _sync_with_remote() -> None:
     git_dir = REPO_ROOT / ".git"
     if not git_dir.exists():
@@ -2211,12 +2372,108 @@ def _sync_with_remote() -> None:
                 _GIT_AUTH_HINT_LOGGED = True
         log(f"[WARN] Git fetch failed: {details}", Fore.YELLOW)
         return
+    newest_branch, newest_commit, newest_ts = _git_newest_remote_branch(remote, git_env)
+    current_commit = _git_current_commit(git_env)
+    if newest_branch and newest_commit and newest_ts:
+        fallback_state = _read_fallback_history()
+        in_fallback = bool(fallback_state.get("fallback_active"))
+        failed_head = fallback_state.get("fallback_failed_head")
+        failed_ts = None
+        if in_fallback and isinstance(failed_head, str) and failed_head:
+            failed_ts = _git_commit_timestamp(failed_head, git_env)
+        if in_fallback and failed_ts is not None and newest_ts <= failed_ts:
+            log(
+                f"[GIT] Backup mode active; staying on current branch until a newer commit appears "
+                f"(failed={failed_head[:7]} ts={failed_ts}, newest={newest_commit[:7]} ts={newest_ts}).",
+                Fore.LIGHTBLACK_EX,
+            )
+        else:
+            if in_fallback and failed_ts is not None and newest_ts > failed_ts:
+                log(
+                    f"[RECOVER] Newer commit detected; exiting backup mode -> {newest_branch} {newest_commit[:7]}",
+                    Fore.LIGHTBLUE_EX,
+                )
+                try:
+                    fallback_state["fallback_active"] = False
+                    fallback_state["fallback_branch_next"] = newest_branch
+                    _write_fallback_history(fallback_state)
+                except Exception:
+                    pass
+            if current_commit and current_commit != newest_commit:
+                checkout_target = f"{remote}/{newest_branch}"
+                try:
+                    subprocess.run(
+                        [*git_cmd, "checkout", "-B", newest_branch, checkout_target],
+                        cwd=REPO_ROOT,
+                        env=git_env,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    log(
+                        f"[GIT] switched to newest commit {newest_commit[:7]} on branch {newest_branch}",
+                        Fore.LIGHTBLACK_EX,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    details = exc.stderr or exc.stdout or str(exc)
+                    log(f"[WARN] Git checkout failed: {details}", Fore.YELLOW)
+    def _pull_with_manual_stash() -> bool:
+        stash_cmd = [*git_cmd, "stash", "push", "-u"]
+        try:
+            stash_proc = subprocess.run(
+                stash_cmd,
+                cwd=REPO_ROOT,
+                env=git_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            details = exc.stderr or exc.stdout or str(exc)
+            log(f"[WARN] Git stash push failed: {details}", Fore.YELLOW)
+            return False
+        stash_output = (stash_proc.stdout or stash_proc.stderr or "").strip()
+        if "no local changes to save" in stash_output.lower():
+            log("[GIT] Stash push reported no local changes; skipping manual stash pull.", Fore.LIGHTBLACK_EX)
+            return False
+        pulled = False
+        try:
+            pull_proc = subprocess.run(
+                [*git_cmd, "pull", "--ff-only"],
+                cwd=REPO_ROOT,
+                env=git_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            pull_output = (pull_proc.stdout or pull_proc.stderr or "").strip()
+            if pull_output:
+                log(f"[GIT] manual pull: {pull_output}", Fore.LIGHTBLACK_EX)
+            pulled = True
+        except subprocess.CalledProcessError as exc:
+            details = exc.stderr or exc.stdout or str(exc)
+            log(f"[WARN] Manual git pull failed: {details}", Fore.YELLOW)
+        finally:
+            pop_proc = subprocess.run(
+                [*git_cmd, "stash", "pop"],
+                cwd=REPO_ROOT,
+                env=git_env,
+                capture_output=True,
+                text=True,
+            )
+            pop_output = (pop_proc.stdout or pop_proc.stderr or "").strip()
+            if pop_output:
+                pop_colour = Fore.LIGHTBLACK_EX if pop_proc.returncode == 0 else Fore.YELLOW
+                log(f"[GIT] stash pop: {pop_output}", pop_colour)
+        return pulled
+
+    pull_cmd = [*git_cmd, "pull", "--ff-only"]
     if working_tree_dirty:
-        log("[GIT] Skipping pull (working tree has local changes).", Fore.LIGHTBLACK_EX)
-        return
+        pull_cmd.append("--autostash")
+        log("[GIT] Working tree has local changes; pulling with --autostash.", Fore.LIGHTBLACK_EX)
     try:
         pull_proc = subprocess.run(
-            [*git_cmd, "pull", "--ff-only"],
+            pull_cmd,
             cwd=REPO_ROOT,
             env=git_env,
             capture_output=True,
@@ -2228,7 +2485,15 @@ def _sync_with_remote() -> None:
             log(f"[GIT] pull: {pull_output}", Fore.LIGHTBLACK_EX)
     except subprocess.CalledProcessError as exc:
         details = exc.stderr or exc.stdout or str(exc)
+        details_lower = (details or "").lower()
         log(f"[WARN] Git pull failed: {details}", Fore.YELLOW)
+        if (
+            working_tree_dirty
+            and "--autostash" in pull_cmd
+            and "autostash" in details_lower
+            and _pull_with_manual_stash()
+        ):
+            return
 
 
 def _format_commit_timestamp(iso_text: str | None) -> str | None:
@@ -4317,11 +4582,15 @@ def execute_symbol_decision(exchange, decision, positions_map, open_orders_cache
     return 1, positions_map, open_orders_cache
 
 
+_DOTENV_LAST_VALUES: dict[str, str] = {}
+
+
 def load_environment():
     env_paths = [
         SCRIPT_DIR / ".env",
         SCRIPT_DIR / ".env.local",
     ]
+    global _DOTENV_LAST_VALUES
     merged: dict[str, str] = {}
     for path in env_paths:
         if not path.exists():
@@ -4332,7 +4601,14 @@ def load_environment():
                 continue
             merged[key] = value
     for key, value in merged.items():
+        existing = os.environ.get(key)
+        if existing not in (None, ""):
+            previous = _DOTENV_LAST_VALUES.get(key)
+            if previous is None or existing != previous:
+                continue
         os.environ[key] = value
+    if merged:
+        _DOTENV_LAST_VALUES.update(merged)
 
 
 def env_int(name: str, default: int) -> int:
@@ -4559,14 +4835,22 @@ def refresh_settings():
         BREAKEVEN_ENABLED = env_int("BREAKEVEN_ENABLED", env_int("MOVE_STOP_TO_BREAKEVEN", 1)) != 0
     except Exception:
         BREAKEVEN_ENABLED = True
-    try:
-        BREAKEVEN_ATR_MULT = float(os.getenv("BREAKEVEN_ATR_MULT", str(BREAKEVEN_ATR_MULT)))
-    except (TypeError, ValueError):
-        BREAKEVEN_ATR_MULT = 0.6
-    try:
-        BREAKEVEN_BUFFER_ATR = float(os.getenv("BREAKEVEN_BUFFER_ATR", str(BREAKEVEN_BUFFER_ATR)))
-    except (TypeError, ValueError):
-        BREAKEVEN_BUFFER_ATR = 0.15
+    breakeven_spec = STRATEGY_EXECUTION_SPEC.get("breakeven_atr_mult")
+    if breakeven_spec is not None:
+        BREAKEVEN_ATR_MULT = float(breakeven_spec)
+    else:
+        try:
+            BREAKEVEN_ATR_MULT = float(os.getenv("BREAKEVEN_ATR_MULT", str(BREAKEVEN_ATR_MULT)))
+        except (TypeError, ValueError):
+            BREAKEVEN_ATR_MULT = 0.6
+    breakeven_buffer_spec = STRATEGY_EXECUTION_SPEC.get("breakeven_buffer_atr")
+    if breakeven_buffer_spec is not None:
+        BREAKEVEN_BUFFER_ATR = float(breakeven_buffer_spec)
+    else:
+        try:
+            BREAKEVEN_BUFFER_ATR = float(os.getenv("BREAKEVEN_BUFFER_ATR", str(BREAKEVEN_BUFFER_ATR)))
+        except (TypeError, ValueError):
+            BREAKEVEN_BUFFER_ATR = 0.15
     BREAKEVEN_ATR_MULT = max(0.0, BREAKEVEN_ATR_MULT)
     BREAKEVEN_BUFFER_ATR = max(0.0, BREAKEVEN_BUFFER_ATR)
     sl_spec = STRATEGY_EXECUTION_SPEC.get("sl_atr")
@@ -4576,18 +4860,32 @@ def refresh_settings():
     TP_ATR = float(tp_spec) if tp_spec is not None else float(os.getenv("TP_ATR", os.getenv("TP_ATR_MULT", 1.6)))
     TRAILING_ATR_MULT = float(trailing_spec) if trailing_spec is not None else float(os.getenv("TRAILING_ATR_MULT", os.getenv("TRAILING_ATR", "1.0")))
     TRAILING_ATR_MULT = max(0.0, TRAILING_ATR_MULT)
-    try:
-        TRAILING_DYNAMIC_TRIGGER_ATR = float(os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR)))
-    except (TypeError, ValueError):
-        TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
-    try:
-        TRAILING_DYNAMIC_FACTOR = float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
-    except (TypeError, ValueError):
-        TRAILING_DYNAMIC_FACTOR = 0.65
-    try:
-        TRAILING_DYNAMIC_MIN_ATR = float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
-    except (TypeError, ValueError):
-        TRAILING_DYNAMIC_MIN_ATR = 0.35
+    trailing_dynamic_trigger_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_trigger_atr")
+    if trailing_dynamic_trigger_spec is not None:
+        TRAILING_DYNAMIC_TRIGGER_ATR = float(trailing_dynamic_trigger_spec)
+    else:
+        try:
+            TRAILING_DYNAMIC_TRIGGER_ATR = float(
+                os.getenv("TRAILING_DYNAMIC_TRIGGER_ATR", str(TRAILING_DYNAMIC_TRIGGER_ATR))
+            )
+        except (TypeError, ValueError):
+            TRAILING_DYNAMIC_TRIGGER_ATR = 1.4
+    trailing_dynamic_factor_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_factor")
+    if trailing_dynamic_factor_spec is not None:
+        TRAILING_DYNAMIC_FACTOR = float(trailing_dynamic_factor_spec)
+    else:
+        try:
+            TRAILING_DYNAMIC_FACTOR = float(os.getenv("TRAILING_DYNAMIC_FACTOR", str(TRAILING_DYNAMIC_FACTOR)))
+        except (TypeError, ValueError):
+            TRAILING_DYNAMIC_FACTOR = 0.65
+    trailing_dynamic_min_spec = STRATEGY_EXECUTION_SPEC.get("trailing_dynamic_min_atr")
+    if trailing_dynamic_min_spec is not None:
+        TRAILING_DYNAMIC_MIN_ATR = float(trailing_dynamic_min_spec)
+    else:
+        try:
+            TRAILING_DYNAMIC_MIN_ATR = float(os.getenv("TRAILING_DYNAMIC_MIN_ATR", str(TRAILING_DYNAMIC_MIN_ATR)))
+        except (TypeError, ValueError):
+            TRAILING_DYNAMIC_MIN_ATR = 0.35
     TRAILING_DYNAMIC_TRIGGER_ATR = max(0.0, TRAILING_DYNAMIC_TRIGGER_ATR)
     TRAILING_DYNAMIC_FACTOR = max(0.1, TRAILING_DYNAMIC_FACTOR)
     TRAILING_DYNAMIC_MIN_ATR = max(0.05, TRAILING_DYNAMIC_MIN_ATR)
@@ -8509,6 +8807,10 @@ def handle_telegram_command(chat_id: int, text: str, *, thread_id: Optional[int]
         reply = _handle_sandbox_command(args, user_id=user_id)
         if reply is None:
             return
+    elif command == "demo":
+        reply = _handle_demo_command(args, user_id=user_id)
+        if reply is None:
+            return
     elif command in {"stable", "backup"}:
         reply = _set_target_and_restart("branch:stable", "[RESTART] /stable -> switching to stable/backup", chat_id=chat_id, thread_id=response_thread)
     elif command in {"head", "normal"}:
@@ -9837,6 +10139,15 @@ def _init_exchange_enhanced() -> Any:
         return max(1000, min(60000, v))
 
     recv_window_ms = _env_int("BYBIT_RECV_WINDOW_MS", 15000)
+    mode_raw = (os.getenv("BYBIT_ENV") or "").strip().lower()
+    demo_flag = env_bool("BYBIT_DEMO", False) or mode_raw == "demo"
+    sandbox_flag = False
+    if not demo_flag:
+        sandbox_raw = (os.getenv("BYBIT_SANDBOX") or os.getenv("BYBIT_TESTNET") or "").strip().lower()
+        sandbox_flag = sandbox_raw in {"1", "true", "yes", "on"}
+    api_base_override = os.getenv("BYBIT_API_BASE") or os.getenv("BYBIT_API_HOST")
+    if demo_flag and not api_base_override:
+        api_base_override = "https://api-demo.bybit.com"
 
     exchange = ccxt.bybit({
         "apiKey": api_key,
@@ -9849,6 +10160,37 @@ def _init_exchange_enhanced() -> Any:
             "hedgeMode": HEDGE_MODE,
         },
     })
+    if demo_flag and api_base_override:
+        try:
+            if isinstance(exchange.urls.get("api"), dict):
+                exchange.urls["api"]["public"] = api_base_override
+                exchange.urls["api"]["private"] = api_base_override
+            log(f"[CONFIG] BYBIT_DEMO enabled (API {api_base_override})", Fore.LIGHTBLACK_EX)
+            try:
+                if isinstance(getattr(exchange, "has", None), dict):
+                    exchange.has["fetchCurrencies"] = False
+                    log("[CONFIG] BYBIT_DEMO: disabled fetchCurrencies (demo API limitation)", Fore.LIGHTBLACK_EX)
+            except Exception:
+                pass
+        except Exception as exc:
+            log(f"[WARN] Failed to apply demo API base {api_base_override}: {exc}", Fore.YELLOW)
+    elif sandbox_flag:
+        try:
+            if hasattr(exchange, "set_sandbox_mode"):
+                exchange.set_sandbox_mode(True)  # type: ignore[attr-defined]
+                log("[CONFIG] BYBIT_SANDBOX enabled (ccxt sandbox mode)", Fore.LIGHTBLACK_EX)
+            else:
+                log("[WARN] BYBIT_SANDBOX requested but ccxt exchange has no set_sandbox_mode()", Fore.YELLOW)
+        except Exception as exc:
+            log(f"[WARN] Failed to enable ccxt sandbox mode: {exc}", Fore.YELLOW)
+    elif api_base_override:
+        try:
+            if isinstance(exchange.urls.get("api"), dict):
+                exchange.urls["api"]["public"] = api_base_override
+                exchange.urls["api"]["private"] = api_base_override
+            log(f"[CONFIG] BYBIT_API_BASE override -> {api_base_override}", Fore.LIGHTBLACK_EX)
+        except Exception as exc:
+            log(f"[WARN] Failed to apply BYBIT_API_BASE {api_base_override}: {exc}", Fore.YELLOW)
     try:
         exchange.options["recvWindow"] = recv_window_ms
         exchange.options["adjustForTimeDifference"] = True
@@ -14472,47 +14814,56 @@ def run_cycle():
         if missing_from_ai:
             send_tg(f"[WARN] Model symbols missing on Bybit: {missing_from_ai}")
 
+    # Per-cycle symbol selection:
+    #   A) Always process open positions and non-reduce orders.
+    #   B) Plus N symbols from config universe (PAIR_LIST).
+    #   C) Plus N symbols from the dynamic universe/news.
+    config_symbols_per_cycle = 3
+    universe_symbols_per_cycle = 3
+
     symbols_sequence: list[str] = []
     seen_symbols: set[str] = set()
-    for sym_sel in selected_symbols:
-        if sym_sel and sym_sel not in seen_symbols:
-            symbols_sequence.append(sym_sel)
-            seen_symbols.add(sym_sel)
 
-    for sym_candidate in sorted(position_symbols):
-        if sym_candidate not in seen_symbols:
-            symbols_sequence.append(sym_candidate)
-            seen_symbols.add(sym_candidate)
+    def _append_cycle_symbols(values, *, limit: int | None = None) -> None:
+        added = 0
+        for value in values:
+            if not value:
+                continue
+            if value in seen_symbols:
+                continue
+            symbols_sequence.append(value)
+            seen_symbols.add(value)
+            added += 1
+            if limit is not None and added >= limit:
+                break
 
-    for sym_candidate in sorted(order_symbols):
-        if sym_candidate not in seen_symbols:
-            symbols_sequence.append(sym_candidate)
-            seen_symbols.add(sym_candidate)
+    # A) Exposure first (positions + non-reduce orders)
+    if position_symbols:
+        prioritized_positions = sorted(
+            position_symbols,
+            key=lambda sym: (0 if sym in spot_position_symbols else 1, sym),
+        )
+        _append_cycle_symbols(prioritized_positions)
+    if order_symbols_non_reduce:
+        _append_cycle_symbols(sorted(order_symbols_non_reduce))
 
-    for sym_candidate in available_pairs:
-        if sym_candidate not in seen_symbols:
-            symbols_sequence.append(sym_candidate)
-            seen_symbols.add(sym_candidate)
+    # B) Fixed config universe
+    config_candidates = [p for p in normalized_pair_list if p in markets_set and p not in seen_symbols]
+    _append_cycle_symbols(config_candidates, limit=config_symbols_per_cycle)
 
-    priority_sequence = []
-    seen_priority: set[str] = set()
-    for sym_order in symbols_sequence:
-        if sym_order in position_symbols and sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    for sym_order in symbols_sequence:
-        if sym_order in new_universe_set and sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    for sym_order in symbols_sequence:
-        if sym_order in order_symbols_non_reduce and sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    for sym_order in symbols_sequence:
-        if sym_order not in seen_priority:
-            priority_sequence.append(sym_order)
-            seen_priority.add(sym_order)
-    symbols_sequence = priority_sequence
+    # C) Dynamic universe/news (reuse already computed candidates)
+    dynamic_candidates: list[str] = []
+    for candidate in list(news_sorted or []) + list(new_universe_candidates or []):
+        if candidate and candidate in markets_set and candidate not in seen_symbols:
+            dynamic_candidates.append(candidate)
+    _append_cycle_symbols(dynamic_candidates, limit=universe_symbols_per_cycle)
+
+    # Fallback: keep the legacy selection if everything above produced nothing.
+    if not symbols_sequence:
+        _append_cycle_symbols(selected_symbols)
+        _append_cycle_symbols(sorted(position_symbols))
+        _append_cycle_symbols(sorted(order_symbols))
+        _append_cycle_symbols(available_pairs)
     if len(symbols_sequence) > symbol_processing_limit:
         protected_symbols = [sym for sym in symbols_sequence if sym in position_symbols]
         trimmed_sequence = protected_symbols[:]
@@ -17556,11 +17907,16 @@ def main():
         )
     except Exception:
         pass
-    # If we are running from a backup script but the repo is reachable, jump back to the latest code.
+    # If we are running from a backup script, only jump back when fallback mode is not active.
     try:
+        _configure_state_paths()
         script_path = Path(__file__).resolve()
         if "backups" in script_path.parts and (REPO_ROOT / ".git").exists():
-            _restart_with_latest_code("[RECOVER] Running from backup, switching to latest HEAD")
+            history = _read_fallback_history()
+            if bool(history.get("fallback_active")):
+                log("[RECOVER] Running from backup; fallback_active=1 so staying on backup until a newer commit appears.", Fore.YELLOW)
+            else:
+                _restart_with_latest_code("[RECOVER] Running from backup, switching to latest code")
     except Exception:
         pass
     ensure_version_backup()
@@ -18086,6 +18442,75 @@ def _handle_sandbox_command(args: list[str], *, user_id: Optional[int]) -> Optio
         "Использование: /sandbox list, /sandbox delete <id>, /sandbox promote <id>\n"
         "Песочницы создаются автоматически через Support."
     )
+
+
+def _is_root_user() -> bool:
+    try:
+        return os.geteuid() == 0  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+def _run_systemctl(action: str, unit: str) -> tuple[bool, str]:
+    if platform.system().lower() != "linux":
+        return False, "systemctl доступен только на Linux."
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return False, "systemctl не найден."
+    cmd = [systemctl, action, unit]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"systemctl error: {exc}"
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    msg = "\n".join([line for line in [out, err] if line]) or f"exit={proc.returncode}"
+    return proc.returncode == 0, msg
+
+
+def _demo_unit_name() -> str:
+    return (os.getenv("BYBITBOT_DEMO_SERVICE") or "bybitbot-demo").strip() + ".service"
+
+
+def _handle_demo_command(args: list[str], *, user_id: Optional[int]) -> Optional[str]:
+    action = (args[0].lower() if args else "help").strip()
+    unit = _demo_unit_name()
+    if action in {"help", "h", "?"}:
+        return (
+            "Демо-режим = отдельный процесс бота с ключами Bybit testnet.\n"
+            "\n"
+            "Рекомендуемый вариант: второй systemd unit (не мешает real-боту).\n"
+            f"- Статус: /demo status\n"
+            f"- Старт: /demo start\n"
+            f"- Стоп: /demo stop\n"
+            f"- Рестарт: /demo restart\n"
+            "\n"
+            "Как включить testnet в конфиге демо-бота:\n"
+            "- В `users/<demo_id>/secrets.env` добавить `BYBIT_SANDBOX=1` + testnet ключи.\n"
+            "- Для демо-юнита задать отдельный lock: `BYBITBOT_LOCK_FILE=/var/run/bybitbot-demo.lock`.\n"
+            "\n"
+            f"Unit по умолчанию: `{unit}` (переопределяется `BYBITBOT_DEMO_SERVICE`)."
+        )
+    if action in {"status", "st"}:
+        ok, msg = _run_systemctl("status", unit)
+        prefix = "✅" if ok else "⚠️"
+        return f"{prefix} {unit}\n{msg}"
+    if action in {"start", "stop", "restart"}:
+        if not _is_root_user():
+            return (
+                f"🚫 Недостаточно прав для управления `{unit}` (нужно root или sudo без пароля).\n"
+                f"Ручной запуск: `sudo systemctl {action} {unit}`"
+            )
+        ok, msg = _run_systemctl(action, unit)
+        prefix = "✅" if ok else "⚠️"
+        return f"{prefix} systemctl {action} {unit}\n{msg}"
+    return "Использование: /demo, /demo status, /demo start|stop|restart"
 
 
 
