@@ -440,6 +440,7 @@ def _configure_state_paths() -> None:
     global SUPPORT_SANDBOX_STATE_FILE
     global COMMANDS_HELP_STATE_FILE
     global MASTER_DECISIONS_FILE
+    global GRAPH_OUTPUT_DIR
     state_dir_raw = os.getenv("BYBITBOT_STATE_DIR")
     try:
         STATE_DIR = (Path(state_dir_raw).expanduser().resolve() if state_dir_raw else REPO_ROOT)
@@ -463,6 +464,11 @@ def _configure_state_paths() -> None:
         SUPPORT_SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+    try:
+        GRAPH_OUTPUT_DIR = STATE_DIR / "graphs"
+        GRAPH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        GRAPH_OUTPUT_DIR = STATE_DIR / "graphs"
 
 # Per-cycle storage for pseudo-trailing decisions.
 _PREV_UNREALIZED_PNL: dict[str, float] = {}
@@ -7504,19 +7510,37 @@ def _graph_thread_id() -> int | None:
     return safe_int(candidate) if candidate is not None else None
 
 
+def _generate_equity_drawdown_plot(state_dir: Path, python_exec: str) -> None:
+    plot_script = state_dir / "plot_equity_drawdown.py"
+    if not plot_script.exists():
+        return
+    try:
+        subprocess.run(
+            [python_exec, str(plot_script)],
+            check=True,
+            cwd=str(state_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log("[GRAPH] Equity drawdown plot regenerated.", Fore.LIGHTBLACK_EX)
+    except Exception as exc:
+        log(f"[GRAPH] Failed to regenerate equity drawdown plot: {exc}", Fore.YELLOW)
+
+
 def _generate_graphs() -> None:
     python_exec = sys.executable or "python"
     script = SCRIPT_DIR / "analyze_graphs.py"
     if not script.exists():
         log("[GRAPH] analyze_graphs.py not found; skipping generation.", Fore.YELLOW)
         return
+    state_dir = STATE_DIR if isinstance(STATE_DIR, Path) else SCRIPT_DIR / "assets"
     try:
         subprocess.run(
             [
                 python_exec,
                 str(script),
                 "--state-dir",
-                str(SCRIPT_DIR / "assets"),
+                str(state_dir),
                 "--output",
                 str(GRAPH_OUTPUT_DIR),
             ],
@@ -7527,6 +7551,7 @@ def _generate_graphs() -> None:
         log("[GRAPH] Diagnostic plots regenerated.", Fore.LIGHTBLACK_EX)
     except Exception as exc:
         log(f"[GRAPH] Failed to regenerate plots: {exc}", Fore.YELLOW)
+    _generate_equity_drawdown_plot(state_dir, python_exec)
 
 
 def _send_graph_photos() -> list[str]:
@@ -7536,16 +7561,24 @@ def _send_graph_photos() -> list[str]:
         return sent_labels
     thread_id = _graph_thread_id()
     now_txt = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    state_dir = STATE_DIR if isinstance(STATE_DIR, Path) else SCRIPT_DIR
+    equity_override = state_dir / "equity_drawdown_trimmed.png"
     captions = {
         "equity": f"Equity / Available margin ({now_txt})",
         "pnl": f"Closed / Unrealized PnL ({now_txt})",
         "signals": f"Signal distribution ({now_txt})",
     }
     for base, caption in captions.items():
-        preferred = [
-            GRAPH_OUTPUT_DIR / f"{base}.jpg",
-            GRAPH_OUTPUT_DIR / f"{base}.png",
-        ]
+        preferred: list[Path] = []
+        if base == "equity" and equity_override.exists():
+            preferred.append(equity_override)
+            caption = f"Equity / Drawdown ({now_txt})"
+        preferred.extend(
+            [
+                GRAPH_OUTPUT_DIR / f"{base}.jpg",
+                GRAPH_OUTPUT_DIR / f"{base}.png",
+            ]
+        )
         path = next((p for p in preferred if p.exists()), None)
         if not path:
             log(f"[GRAPH] Plot {base} (jpg/png) missing; skipping send.", Fore.LIGHTBLACK_EX)
