@@ -57,13 +57,13 @@
     }
   },
   "risk": {
-    "base_pct": 0.03,
-    "min_pct": 0.015,
-    "max_pct": 0.06
+    "base_pct": 0.025,
+    "min_pct": 0.012,
+    "max_pct": 0.05
   },
   "thresholds": {
-    "atr_sigma_hot": 3.0,
-    "atr_limit_multiplier": 1.4,
+    "atr_sigma_hot": 2.8,
+    "atr_limit_multiplier": 1.3,
     "atr_range_ratio": 0.01,
     "atr_extreme_ratio": 0.04,
     "oi_change_pct": 0.004
@@ -80,28 +80,28 @@
   "rules": {
     "trend": {
       "require_secondary_tf": true,
-      "min_ema_spread_pct": 0.0012,
+      "min_ema_spread_pct": 0.0015,
       "long": {
-        "rsi_max": 67,
-        "rsi4h_min": 45,
+        "rsi_max": 62,
+        "rsi4h_min": 50,
         "funding_min": -0.0004,
+        "require_oi_up": true,
         "news_block": [
           "negative"
         ],
-        "require_oi_up": false,
         "confidence": {
           "market": 0.55,
           "limit": 0.45
         }
       },
       "short": {
-        "rsi_min": 33,
-        "rsi4h_max": 55,
+        "rsi_min": 38,
+        "rsi4h_max": 50,
         "funding_max": 0.0004,
+        "require_oi_up": true,
         "news_block": [
           "positive"
         ],
-        "require_oi_up": false,
         "confidence": {
           "market": 0.55,
           "limit": 0.45
@@ -201,14 +201,14 @@
       "coindesk"
     ]
   },
-  "execution": {
-    "market_type": "linear",
-    "manual_only": true,
-    "leverage": 12,
-    "order_margin_utilization": 0.85,
-    "sl_atr": 1.6,
-    "tp_atr": 2.4,
-    "trailing_atr_mult": 0.9,
+    "execution": {
+      "market_type": "linear",
+      "manual_only": true,
+      "leverage": 10,
+      "order_margin_utilization": 0.8,
+      "sl_atr": 1.6,
+      "tp_atr": 2.4,
+      "trailing_atr_mult": 0.9,
     "trailing_dynamic_trigger_atr": 2.1,
     "trailing_dynamic_factor": 0.40,
     "trailing_dynamic_min_atr": 0.55,
@@ -218,10 +218,10 @@
     "trailing_per_regime": {},
     "max_trailing_loss_pct": 0.0,
     "min_position_size": 0.0,
-    "min_notional_usdt": 0.0001,
-    "news_weight": 1.0,
-    "max_open_positions": 3,
-    "max_positions_per_base": 1,
+      "min_notional_usdt": 0.0001,
+      "news_weight": 1.0,
+      "max_open_positions": 2,
+      "max_positions_per_base": 1,
     "default_next_run_minutes": 10,
     "max_retries": 1,
     "retry_delay_sec": 2,
