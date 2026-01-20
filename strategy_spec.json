@@ -57,9 +57,9 @@
     }
   },
   "risk": {
-    "base_pct": 0.025,
-    "min_pct": 0.012,
-    "max_pct": 0.05
+    "base_pct": 0.035,
+    "min_pct": 0.035,
+    "max_pct": 0.055
   },
   "thresholds": {
     "atr_sigma_hot": 2.8,
@@ -204,7 +204,7 @@
     "execution": {
       "market_type": "linear",
       "manual_only": true,
-      "leverage": 10,
+      "leverage": 15,
       "order_margin_utilization": 0.8,
       "sl_atr": 1.6,
       "tp_atr": 2.4,
