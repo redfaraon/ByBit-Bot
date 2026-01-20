@@ -13886,6 +13886,30 @@ def run_cycle():
 
     def log_open_skip(symbol: str, reason: str) -> None:
         log_user(f"OPEN SKIP {symbol}: {reason}")
+    def _tail_indicator_values(data_frame, column, limit=3):
+        if limit <= 0:
+            return []
+        if data_frame is None:
+            return []
+        columns = getattr(data_frame, "columns", None)
+        if columns is None or column not in columns:
+            return []
+        try:
+            series = data_frame[column].dropna()
+        except Exception:
+            return []
+        if series.empty:
+            return []
+        sampled = series.tail(limit)
+        values: list[float] = []
+        for value in sampled:
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(num):
+                values.append(num)
+        return values
     _sync_with_remote()
     _reload_local_modules()
     _write_runtime_status(None, None, "running")
@@ -15360,6 +15384,22 @@ def run_cycle():
                         except Exception:
                             pass
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
+                        if (
+                            manual_event.name == "close_position"
+                            and manual_event.reason
+                            and "ema20 cross" in manual_event.reason.lower()
+                        ):
+                            ema20_values = _tail_indicator_values(tf30_df, "ema20", 3)
+                            ema50_values = _tail_indicator_values(tf30_df, "ema50", 3)
+                            if ema20_values or ema50_values:
+                                parts: list[str] = []
+                                if ema20_values:
+                                    parts.append("EMA20 last=" + ", ".join(f"{val:.4f}" for val in ema20_values))
+                                if ema50_values:
+                                    parts.append("EMA50 last=" + ", ".join(f"{val:.4f}" for val in ema50_values))
+                                detail_msg = f"[MANUAL][EMA] {sym}: " + " | ".join(parts)
+                                log(detail_msg, Fore.LIGHTBLACK_EX)
+                                log_user(detail_msg, color=Fore.LIGHTBLACK_EX)
                         confidence_value = manual_event.confidence if manual_event.confidence is not None else 0.0
                         signal_msg = (
                             f"[MANUAL][SIGNAL] {sym}: {manual_event.name} "
