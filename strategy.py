@@ -134,6 +134,7 @@ INDICATORS = [
     "ema50",
     "rsi14",
     "atr14",
+    "adx14",
     "funding_rate",
     "open_interest",
 ]
@@ -305,6 +306,7 @@ class IndicatorBlock:
     ema50: float
     rsi: float
     atr: float
+    adx: float | None = None
     atr_mean: float | None = None
     atr_std: float | None = None
 
@@ -527,9 +529,21 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     long_rule = trend_rules.get("long", {})
     short_rule = trend_rules.get("short", {})
     min_spread_pct = float(trend_rules.get("min_ema_spread_pct", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    min_adx = float(trend_rules.get("min_adx", 0.0)) if isinstance(trend_rules, dict) else 0.0
     ema_spread_pct = 0.0
     if ctx.price and math.isfinite(ctx.price) and ctx.price > 0:
         ema_spread_pct = abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price
+    spread_ok = (not min_spread_pct) or ema_spread_pct >= min_spread_pct
+    adx_val = ctx.tf30.adx if hasattr(ctx.tf30, "adx") else None
+    adx_ok = (not min_adx) or (adx_val is not None and math.isfinite(adx_val) and adx_val >= min_adx)
+    if min_spread_pct and min_adx:
+        strength_ok = spread_ok or adx_ok
+    elif min_spread_pct:
+        strength_ok = spread_ok
+    elif min_adx:
+        strength_ok = adx_ok
+    else:
+        strength_ok = True
 
     if trend == "long":
         confidence_map = long_rule.get("confidence", {})
@@ -543,7 +557,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         rsi4h_min = float(long_rule.get("rsi4h_min", 0.0)) if isinstance(long_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi <= float(long_rule.get("rsi_max", 65))
-            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and strength_ok
             and (not rsi4h_min or ctx.tf4h.rsi >= rsi4h_min)
             and news not in set(long_rule.get("news_block", []))
             and funding >= float(long_rule.get("funding_min", -0.0002))
@@ -571,6 +585,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
                     f"ema_spread={ema_spread_pct:.4f}",
+                    f"adx={adx_val:.1f}" if adx_val is not None and math.isfinite(adx_val) else "adx=n/a",
                     f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
@@ -595,7 +610,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         rsi4h_max = float(short_rule.get("rsi4h_max", 0.0)) if isinstance(short_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi >= float(short_rule.get("rsi_min", 35))
-            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and strength_ok
             and (not rsi4h_max or ctx.tf4h.rsi <= rsi4h_max)
             and news not in set(short_rule.get("news_block", []))
             and funding <= float(short_rule.get("funding_max", 0.0002))
@@ -623,6 +638,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
                     f"ema_spread={ema_spread_pct:.4f}",
+                    f"adx={adx_val:.1f}" if adx_val is not None and math.isfinite(adx_val) else "adx=n/a",
                     f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
@@ -967,18 +983,36 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
         return event
     trend = ctx.trend_bias or "none"
     counter = ctx.countertrend_bias or "none"
+    # Provide structured diagnostics for tuning (kept lightweight for logs).
+    trend_rules = RULES_SPEC.get("trend", {}) if isinstance(RULES_SPEC, dict) else {}
+    min_spread_pct = float(trend_rules.get("min_ema_spread_pct", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    min_adx = float(trend_rules.get("min_adx", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    trend_side = ctx.trend_bias
+    side_rule = None
+    if isinstance(trend_rules, dict) and trend_side in {"long", "short"}:
+        side_rule = trend_rules.get(trend_side, {})
+    diagnostics: dict[str, Any] = {
+        "trend_bias": ctx.trend_bias,
+        "countertrend_bias": ctx.countertrend_bias,
+        "news_bias": ctx.news_bias,
+        "oi_trend": ctx.oi_trend,
+        "funding": ctx.funding_rate,
+        "rsi": ctx.tf30.rsi,
+        "rsi4h": ctx.tf4h.rsi,
+        "min_ema_spread_pct": min_spread_pct,
+        "min_adx": min_adx,
+        "oi_trend_required": (side_rule or {}).get("oi_trend_required") if isinstance(side_rule, dict) else None,
+        "ema_spread_pct": (
+            abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price if ctx.price and math.isfinite(ctx.price) and ctx.price > 0 else None
+        ),
+        "adx": ctx.tf30.adx,
+    }
     return StrategyEvent(
         "skip",
         reason="no confluence",
         confidence=0.0,
         metadata=_with_trace(
-            {
-                "trend_bias": ctx.trend_bias,
-                "countertrend_bias": ctx.countertrend_bias,
-                "news_bias": ctx.news_bias,
-                "oi_trend": ctx.oi_trend,
-                "rsi": ctx.tf30.rsi,
-            },
+            diagnostics,
             [
                 "skip",
                 "no_confluence",
@@ -987,6 +1021,7 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
                 f"news={ctx.news_bias}",
                 f"oi={ctx.oi_trend}",
                 f"rsi={ctx.tf30.rsi:.1f}",
+                f"adx={ctx.tf30.adx:.1f}" if ctx.tf30.adx is not None and math.isfinite(ctx.tf30.adx) else "adx=n/a",
             ],
         ),
     )

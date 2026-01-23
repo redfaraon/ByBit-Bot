@@ -21,6 +21,7 @@ def _safe_float(val: Any) -> float | None:
 def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | None:
     if tf_df is None or tf_df.empty:
         return None
+    adx_val = _adx14_last(tf_df)
     last_row = tf_df.iloc[-1]
     close_val = _safe_float(last_row.get("close"))
     ema20_val = _safe_float(last_row.get("ema20"))
@@ -50,9 +51,62 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
         ema50=ema50_val,
         rsi=rsi_val,
         atr=atr_val,
+        adx=adx_val,
         atr_mean=atr_mean,
         atr_std=atr_std,
     )
+
+
+def _adx14_last(tf_df: pd.DataFrame, period: int = 14) -> float | None:
+    """
+    Compute last ADX value from OHLC columns if available.
+    Uses Wilder-style smoothing via EWMA with alpha=1/period.
+    Returns None when inputs are missing or insufficient.
+    """
+    if tf_df is None or tf_df.empty:
+        return None
+    if not {"high", "low", "close"}.issubset(set(tf_df.columns)):
+        return None
+    df = tf_df[["high", "low", "close"]].dropna().tail(max(6 * period, 120))
+    if len(df) < period + 2:
+        return None
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    prev_close = close.shift(1)
+
+    tr = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(0.0, index=df.index)
+    minus_dm = pd.Series(0.0, index=df.index)
+    plus_dm[(up_move > down_move) & (up_move > 0)] = up_move[(up_move > down_move) & (up_move > 0)]
+    minus_dm[(down_move > up_move) & (down_move > 0)] = down_move[(down_move > up_move) & (down_move > 0)]
+
+    alpha = 1.0 / float(period)
+    atr = tr.ewm(alpha=alpha, adjust=False).mean()
+    atr_safe = atr.where(atr != 0.0)
+    plus_di = 100.0 * (plus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_safe)
+    minus_di = 100.0 * (minus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_safe)
+    di_sum = (plus_di + minus_di).where((plus_di + minus_di) != 0.0)
+    dx = 100.0 * (plus_di - minus_di).abs() / di_sum
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
+    val = adx.iloc[-1]
+    try:
+        out = float(val)
+    except Exception:
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
 
 
 def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
