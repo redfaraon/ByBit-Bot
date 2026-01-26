@@ -81,7 +81,7 @@
     "trend": {
       "require_secondary_tf": true,
       "min_ema_spread_pct": 0.001,
-      "min_adx": 0,
+      "min_adx": 18,
       "long": {
         "rsi_max": 62,
         "rsi4h_min": 50,
@@ -110,6 +110,18 @@
           "limit": 0.45
         }
       }
+    },
+    "range": {
+      "enabled": true,
+      "max_bb_width_pct": 1.0,
+      "long_percent_b_max": 0.12,
+      "short_percent_b_min": 0.88,
+      "long_rsi_max": 42,
+      "short_rsi_min": 58,
+      "confidence": 0.5,
+      "news_block": [
+        "uncertain"
+      ]
     },
     "countertrend": {
       "require_atr_calm": true,

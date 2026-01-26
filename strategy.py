@@ -135,6 +135,7 @@ INDICATORS = [
     "rsi14",
     "atr14",
     "adx14",
+    "bb20",
     "funding_rate",
     "open_interest",
 ]
@@ -307,6 +308,11 @@ class IndicatorBlock:
     rsi: float
     atr: float
     adx: float | None = None
+    bb_mid: float | None = None
+    bb_upper: float | None = None
+    bb_lower: float | None = None
+    bb_width_pct: float | None = None
+    bb_percent_b: float | None = None
     atr_mean: float | None = None
     atr_std: float | None = None
 
@@ -739,6 +745,90 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     return None
 
 
+def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
+    range_rules = RULES_SPEC.get("range", {}) if isinstance(RULES_SPEC, dict) else {}
+    if not isinstance(range_rules, dict) or not range_rules.get("enabled", True):
+        return None
+    if ctx.news_bias in set(range_rules.get("news_block", [])):
+        return None
+    if ctx.news_bias == "uncertain":
+        return None
+    if ctx.atr_sigma > ATR_SIGMA_HOT:
+        return None
+
+    width = ctx.tf30.bb_width_pct
+    percent_b = ctx.tf30.bb_percent_b
+    if width is None or percent_b is None or not math.isfinite(width) or not math.isfinite(percent_b):
+        return None
+
+    max_width_pct = float(range_rules.get("max_bb_width_pct", 0.9))
+    if max_width_pct and width > max_width_pct:
+        return None
+
+    rsi = ctx.tf30.rsi
+    long_rsi_max = float(range_rules.get("long_rsi_max", 42))
+    short_rsi_min = float(range_rules.get("short_rsi_min", 58))
+    long_b_max = float(range_rules.get("long_percent_b_max", 0.12))
+    short_b_min = float(range_rules.get("short_percent_b_min", 0.88))
+
+    if percent_b <= long_b_max and rsi <= long_rsi_max:
+        meta: dict[str, Any] = {
+            "regime": "range",
+            "bb_width_pct": width,
+            "bb_percent_b": percent_b,
+        }
+        if ENTRY_LADDER:
+            meta["ladder_orders"] = ENTRY_LADDER
+        meta = _with_trace(
+            meta,
+            [
+                "open",
+                "range.long",
+                f"bb_width={width:.2f}%",
+                f"b={percent_b:.2f}",
+                f"rsi={rsi:.1f}",
+            ],
+        )
+        return StrategyEvent(
+            "open_limit",
+            side="buy",
+            order_type="limit",
+            reason="range mean-reversion: near lower band",
+            size_pct=_size_for_regime(ctx, "flat"),
+            confidence=float(range_rules.get("confidence", 0.5)),
+            metadata=meta,
+        )
+
+    if percent_b >= short_b_min and rsi >= short_rsi_min:
+        meta = {
+            "regime": "range",
+            "bb_width_pct": width,
+            "bb_percent_b": percent_b,
+        }
+        if ENTRY_LADDER:
+            meta["ladder_orders"] = ENTRY_LADDER
+        meta = _with_trace(
+            meta,
+            [
+                "open",
+                "range.short",
+                f"bb_width={width:.2f}%",
+                f"b={percent_b:.2f}",
+                f"rsi={rsi:.1f}",
+            ],
+        )
+        return StrategyEvent(
+            "open_limit",
+            side="sell",
+            order_type="limit",
+            reason="range mean-reversion: near upper band",
+            size_pct=_size_for_regime(ctx, "flat"),
+            confidence=float(range_rules.get("confidence", 0.5)),
+            metadata=meta,
+        )
+    return None
+
+
 def should_close(ctx: StrategyContext) -> StrategyEvent | None:
     if not ctx.has_position:
         return None
@@ -978,6 +1068,9 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     event = should_open(ctx)
     if event:
         return event
+    event = should_open_range(ctx)
+    if event:
+        return event
     event = should_modify(ctx)
     if event:
         return event
@@ -1006,6 +1099,8 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
             abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price if ctx.price and math.isfinite(ctx.price) and ctx.price > 0 else None
         ),
         "adx": ctx.tf30.adx,
+        "bb_width_pct": ctx.tf30.bb_width_pct,
+        "bb_percent_b": ctx.tf30.bb_percent_b,
     }
     return StrategyEvent(
         "skip",

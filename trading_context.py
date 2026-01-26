@@ -22,6 +22,7 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
     if tf_df is None or tf_df.empty:
         return None
     adx_val = _adx14_last(tf_df)
+    bb = _bollinger_last(tf_df)
     last_row = tf_df.iloc[-1]
     close_val = _safe_float(last_row.get("close"))
     ema20_val = _safe_float(last_row.get("ema20"))
@@ -52,6 +53,11 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
         rsi=rsi_val,
         atr=atr_val,
         adx=adx_val,
+        bb_mid=bb.get("mid") if bb else None,
+        bb_upper=bb.get("upper") if bb else None,
+        bb_lower=bb.get("lower") if bb else None,
+        bb_width_pct=bb.get("width_pct") if bb else None,
+        bb_percent_b=bb.get("percent_b") if bb else None,
         atr_mean=atr_mean,
         atr_std=atr_std,
     )
@@ -107,6 +113,44 @@ def _adx14_last(tf_df: pd.DataFrame, period: int = 14) -> float | None:
     if not math.isfinite(out):
         return None
     return out
+
+
+def _bollinger_last(tf_df: pd.DataFrame, period: int = 20, std_mult: float = 2.0) -> dict[str, float] | None:
+    """
+    Compute last Bollinger Bands from close prices if available.
+    Returns dict with mid/upper/lower, width_pct (bandwidth as % of mid), percent_b.
+    """
+    if tf_df is None or tf_df.empty:
+        return None
+    if "close" not in tf_df.columns:
+        return None
+    close = tf_df["close"].dropna().astype(float).tail(max(6 * period, 240))
+    if len(close) < period:
+        return None
+    mid = close.rolling(window=period).mean().iloc[-1]
+    std = close.rolling(window=period).std(ddof=0).iloc[-1]
+    if mid is None or std is None:
+        return None
+    try:
+        mid_f = float(mid)
+        std_f = float(std)
+    except Exception:
+        return None
+    if not math.isfinite(mid_f) or not math.isfinite(std_f) or mid_f == 0:
+        return None
+    upper = mid_f + std_mult * std_f
+    lower = mid_f - std_mult * std_f
+    width_pct = ((upper - lower) / abs(mid_f)) * 100.0 if mid_f else 0.0
+    last_close = float(close.iloc[-1])
+    denom = (upper - lower) if (upper - lower) != 0 else None
+    percent_b = ((last_close - lower) / denom) if denom else 0.5
+    return {
+        "mid": mid_f,
+        "upper": upper,
+        "lower": lower,
+        "width_pct": width_pct,
+        "percent_b": percent_b,
+    }
 
 
 def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
