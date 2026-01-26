@@ -34,7 +34,20 @@ import ccxt
 import requests
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from colorama import Fore, Style, init
-from openai import OpenAI, RateLimitError
+try:
+    # openai>=1.0
+    from openai import OpenAI, RateLimitError
+except Exception:  # pragma: no cover
+    # Compatibility with older openai package versions.
+    OpenAI = None
+    try:
+        import openai  # type: ignore
+
+        RateLimitError = getattr(openai, "RateLimitError", Exception)
+        if hasattr(openai, "OpenAI"):
+            OpenAI = getattr(openai, "OpenAI")
+    except Exception:  # pragma: no cover
+        RateLimitError = Exception
 from dotenv import dotenv_values
 import db_logger
 import strategy
@@ -10011,6 +10024,86 @@ def get_news_from_rss(base_symbol: str, limit: int):
     return {"summary": summary, "items": selected, "asset": base_upper, "source": "rss"}
 
 
+def get_news_from_rss_http(base_symbol: str, limit: int) -> dict[str, Any]:
+    """
+    RSS fallback that does not depend on `feedparser`.
+    Fetches RSS/Atom via `requests` with a timeout and parses XML using stdlib.
+    """
+    base_upper = (base_symbol or "").upper()
+    if not RSS_FEEDS:
+        return {"summary": "RSS feeds not configured", "items": [], "asset": base_upper, "source": "rss"}
+
+    try:
+        import xml.etree.ElementTree as ET
+    except Exception:
+        return {"summary": "RSS XML parser unavailable", "items": [], "asset": base_upper, "source": "rss"}
+
+    def _strip(tag: str) -> str:
+        return tag.split("}", 1)[-1] if "}" in tag else tag
+
+    def _parse_items(xml_text: str) -> list[dict[str, Any]]:
+        try:
+            root = ET.fromstring(xml_text)
+        except Exception:
+            return []
+        entries: list[dict[str, Any]] = []
+        for node in root.iter():
+            if _strip(node.tag) not in {"item", "entry"}:
+                continue
+            title = ""
+            link = ""
+            summary_text = ""
+            published = ""
+            for child in list(node):
+                key = _strip(child.tag)
+                text = (child.text or "").strip()
+                if key == "title" and text:
+                    title = text
+                elif key == "link":
+                    link = (child.attrib.get("href") or text or "").strip()
+                elif key in {"description", "summary", "content"} and text:
+                    summary_text = text
+                elif key in {"pubDate", "published", "updated"} and text:
+                    published = text
+            if not title and not summary_text:
+                continue
+            entries.append(
+                {
+                    "title": title,
+                    "url": link or None,
+                    "source": "rss",
+                    "published_at": to_iso_utc(published),
+                    "body": summary_text,
+                }
+            )
+        return entries
+
+    symbol_articles: list[dict[str, Any]] = []
+    general_articles: list[dict[str, Any]] = []
+    headers = {"User-Agent": "ByBitBot/1.0 (+rss)"}
+    for url in RSS_FEEDS:
+        try:
+            resp = requests.get(url, timeout=6, headers=headers)
+            resp.raise_for_status()
+            items = _parse_items(resp.text)[:10]
+        except Exception as exc:
+            log(f"[WARN] RSS fetch failed ({url}): {exc}", Fore.YELLOW)
+            continue
+        for item in items:
+            general_articles.append(item)
+            title_u = str(item.get("title") or "").upper()
+            if base_upper and base_upper in title_u:
+                symbol_articles.append(item)
+            if len(symbol_articles) >= limit and len(general_articles) >= limit:
+                break
+        if len(symbol_articles) >= limit and len(general_articles) >= limit:
+            break
+
+    selected = (symbol_articles or general_articles)[:limit]
+    summary = f"RSS {len(selected)} items" if selected else "RSS unavailable"
+    return {"summary": summary, "items": selected, "asset": base_upper, "source": "rss"}
+
+
 def get_news_from_cryptocompare(base_symbol: str, limit: int):
     url = "https://min-api.cryptocompare.com/data/v2/news/"
     params = {
@@ -10094,6 +10187,16 @@ def _merge_news_payloads(base_symbol: str, payloads: Sequence[dict[str, Any]], l
 
 def get_news(symbol):
     base = symbol.split("/")[0].split(":")[0].upper()
+    cache = globals().setdefault("_NEWS_CACHE", {})
+    now_ts = time.time()
+    cache_ttl_sec = 30 * 60
+    cached_payload = None
+    if isinstance(cache, dict):
+        cached = cache.get(base)
+        if isinstance(cached, dict) and now_ts - float(cached.get("ts") or 0.0) <= cache_ttl_sec:
+            candidate = cached.get("payload")
+            if isinstance(candidate, dict) and candidate.get("items"):
+                cached_payload = candidate
     limit = max(1, AI_INITIAL_NEWS_LIMIT or NEWS_ITEMS_LIMIT)
     provider_source = AI_INITIAL_NEWS_PROVIDER or NEWS_PROVIDER
     normalized_provider = (provider_source or "hybrid").strip().lower()
@@ -10101,7 +10204,10 @@ def get_news(symbol):
     def _fetch_cc():
         return get_news_from_cryptocompare(base, limit)
     def _fetch_rss():
-        return get_news_from_rss(base, limit)
+        rss_payload = get_news_from_rss(base, limit)
+        if isinstance(rss_payload, dict) and not rss_payload.get("items"):
+            rss_payload = get_news_from_rss_http(base, limit)
+        return rss_payload
 
     if normalized_provider in NEWS_PROVIDER_ALIAS_HYBRID:
         payloads.extend([_fetch_cc(), _fetch_rss()])
@@ -10117,10 +10223,25 @@ def get_news(symbol):
         payloads.extend([_fetch_cc(), _fetch_rss()])
     payloads = [payload for payload in payloads if payload]
     if not payloads:
+        if cached_payload:
+            payload = dict(cached_payload)
+            payload["summary"] = (payload.get("summary") or "") + " (cached)"
+            payload["source"] = payload.get("source") or "cache"
+            return payload
         return {"summary": "News unavailable", "items": [], "asset": base, "source": normalized_provider or "hybrid"}
     if len(payloads) == 1:
-        return payloads[0]
-    return _merge_news_payloads(base, payloads, limit)
+        payload = payloads[0]
+    else:
+        payload = _merge_news_payloads(base, payloads, limit)
+    if isinstance(payload, dict) and payload.get("items") and isinstance(cache, dict):
+        cache[base] = {"ts": now_ts, "payload": payload}
+        return payload
+    if cached_payload:
+        payload2 = dict(cached_payload)
+        payload2["summary"] = (payload2.get("summary") or "") + " (cached)"
+        payload2["source"] = payload2.get("source") or "cache"
+        return payload2
+    return payload
 
 # --- Подключение к бирже ---
 def init_exchange():
@@ -17470,7 +17591,10 @@ def run_cycle():
         news_delta_minutes = 0.0
         news_note = "news_intensity=off"
         news_rule = "Y=+0m (news_intensity=off)"
-        if news_intensity_enabled:
+        if news_intensity_enabled and news_items_total <= 0:
+            news_note = "news_intensity=off (no items)"
+            news_rule = "Y=+0m (no news items)"
+        elif news_intensity_enabled:
             try:
                 big_thr = safe_float(schedule_spec.get("news_intensity_shorten_10_at"))
                 small_thr = safe_float(schedule_spec.get("news_intensity_shorten_5_at"))
