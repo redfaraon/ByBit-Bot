@@ -15570,8 +15570,12 @@ def run_cycle():
             ai_offline_mode = False
             manual_active = MANUAL_STRATEGY_FORCE
             if manual_active:
-                tf_primary_df = timeframe_dfs.get(manual_primary_tf) or timeframe_dfs.get("30m")
-                tf_secondary_df = timeframe_dfs.get(manual_secondary_tf) or timeframe_dfs.get("4h")
+                tf_primary_df = timeframe_dfs.get(manual_primary_tf)
+                if tf_primary_df is None:
+                    tf_primary_df = timeframe_dfs.get("30m")
+                tf_secondary_df = timeframe_dfs.get(manual_secondary_tf)
+                if tf_secondary_df is None:
+                    tf_secondary_df = timeframe_dfs.get("4h")
                 if tf_primary_df is not None and tf_secondary_df is not None:
                     funding_snapshot = manual_funding_cache.get(sym)
                     if funding_snapshot is None:
