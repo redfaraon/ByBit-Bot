@@ -22,10 +22,15 @@ def _safe_float(val: Any) -> float | None:
 def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | None:
     if tf_df is None or tf_df.empty:
         return None
+    if len(tf_df) < 2:
+        return None
     last_row = tf_df.iloc[-1]
+    prev_row = tf_df.iloc[-2]
     close_val = _safe_float(last_row.get("close"))
     ema20_val = _safe_float(last_row.get("ema20"))
     ema50_val = _safe_float(last_row.get("ema50"))
+    ema20_prev = _safe_float(prev_row.get("ema20"))
+    ema50_prev = _safe_float(prev_row.get("ema50"))
     rsi_val = _safe_float(last_row.get("rsi14") or last_row.get("rsi"))
     atr_val = _safe_float(last_row.get("atr14") or last_row.get("atr"))
     if close_val is None or ema20_val is None or ema50_val is None or rsi_val is None or atr_val is None:
@@ -49,6 +54,8 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
         close=close_val,
         ema20=ema20_val,
         ema50=ema50_val,
+        ema20_prev=ema20_prev,
+        ema50_prev=ema50_prev,
         rsi=rsi_val,
         atr=atr_val,
         atr_mean=atr_mean,
@@ -79,6 +86,8 @@ def build_manual_strategy_context(
     funding_snapshot: dict[str, Any] | None,
     open_interest_history: Sequence[Any] | None,
     risk_pct: float,
+    primary_tf: str = "30m",
+    secondary_tf: str = "4h",
 ) -> StrategyContext | None:
     return trading_context.build_symbol_context(
         symbol,
@@ -92,4 +101,6 @@ def build_manual_strategy_context(
         funding_snapshot=funding_snapshot,
         open_interest_history=open_interest_history,
         risk_pct=risk_pct,
+        primary_tf=primary_tf,
+        secondary_tf=secondary_tf,
     )

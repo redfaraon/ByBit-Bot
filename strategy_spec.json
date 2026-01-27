@@ -10,7 +10,7 @@
       "SOL/USDT:USDT"
     ],
     "timeframes": {
-      "primary": "30m",
+      "primary": "15m",
       "secondary": "4h",
       "open_interest": "1h",
       "funding": "8h"

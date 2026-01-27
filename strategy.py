@@ -305,6 +305,8 @@ class IndicatorBlock:
     close: float
     ema20: float
     ema50: float
+    ema20_prev: float | None = None
+    ema50_prev: float | None = None
     rsi: float
     atr: float
     adx: float | None = None
@@ -836,10 +838,23 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
     if side not in {"long", "short"}:
         return None
     ema_cross = False
-    if side == "long":
-        ema_cross = ctx.tf30.ema20 < ctx.tf30.ema50
+    prev20 = ctx.tf30.ema20_prev
+    prev50 = ctx.tf30.ema50_prev
+    cur20 = ctx.tf30.ema20
+    cur50 = ctx.tf30.ema50
+    if prev20 is not None and prev50 is not None:
+        if side == "long":
+            # Confirmed bearish cross on closed bars: EMA20 crosses below EMA50
+            ema_cross = prev20 >= prev50 and cur20 < cur50
+        else:
+            # Confirmed bullish cross on closed bars: EMA20 crosses above EMA50
+            ema_cross = prev20 <= prev50 and cur20 > cur50
     else:
-        ema_cross = ctx.tf30.ema20 > ctx.tf30.ema50
+        # Fallback when previous bar is unavailable (should be rare).
+        if side == "long":
+            ema_cross = cur20 < cur50
+        else:
+            ema_cross = cur20 > cur50
     tp_spec = EVENTS_SPEC.get("tp", {}) if isinstance(EVENTS_SPEC, dict) else {}
     rsi_long_tp = float(tp_spec.get("rsi_long", 70))
     rsi_short_tp = float(tp_spec.get("rsi_short", 30))
@@ -864,7 +879,7 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
         reasons: list[str] = []
         trace: list[str] = ["close_position"]
         if ema_cross:
-            reasons.append("ema20 cross against position")
+            reasons.append("ema20/ema50 cross against position")
             trace.append("ema_cross")
         if rsi_extreme and news_against:
             reasons.append("rsi extreme + adverse news")

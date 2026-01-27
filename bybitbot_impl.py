@@ -9148,6 +9148,103 @@ def save_json_line(path, data):
     except Exception as e:
         log(f"⚠️ Ошибка записи в {path}: {e}", Fore.YELLOW)
 
+def save_jsonl_line(path, data, *, max_bytes: int | None = None, backups: int | None = None):
+    try:
+        p = Path(path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        if max_bytes and backups and max_bytes > 0 and backups > 0:
+            try:
+                _maybe_rotate_file(p, max_bytes, backups)
+            except Exception:
+                pass
+        entry = dict(data)
+        entry.setdefault("timestamp", datetime.datetime.now(datetime.timezone.utc).isoformat())
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"[WARN] Failed to write jsonl {path}: {e}", Fore.YELLOW)
+
+
+def _normalize_position_side(side: Any) -> str | None:
+    if side is None:
+        return None
+    text = str(side).strip().lower()
+    if not text:
+        return None
+    if text in {"buy", "long"}:
+        return "long"
+    if text in {"sell", "short"}:
+        return "short"
+    return None
+
+
+def _apply_side_to_amount(amount: float, side: str | None) -> float:
+    if amount is None or not math.isfinite(amount) or amount == 0:
+        return 0.0 if amount is None else amount
+    if side == "short":
+        return -abs(float(amount))
+    if side == "long":
+        return abs(float(amount))
+    return float(amount)
+
+
+def _position_price_fields(payload: dict[str, Any] | None) -> dict[str, float | None]:
+    if not isinstance(payload, dict):
+        return {"entry": None, "avg_entry": None, "avg": None, "mark": None, "last": None}
+    return {
+        "entry": safe_float(payload.get("entryPrice")),
+        "avg_entry": safe_float(payload.get("avgEntryPrice")),
+        "avg": safe_float(payload.get("avgPrice")),
+        "mark": safe_float(payload.get("markPrice")),
+        "last": safe_float(payload.get("lastPrice")),
+    }
+
+
+def _get_position_reference_price_with_source(payload: dict | None) -> tuple[float | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    for key in ("entryPrice", "avgEntryPrice", "avgPrice", "markPrice", "lastPrice"):
+        value = safe_float(payload.get(key))
+        if value is not None and math.isfinite(value):
+            return float(value), key
+    return None, None
+
+
+def _df_last_bar_timestamp_iso(tf_df) -> str | None:
+    try:
+        if tf_df is None or getattr(tf_df, "empty", True):
+            return None
+        idx = getattr(tf_df, "index", None)
+        if idx is not None and len(idx) > 0:
+            last_idx = idx[-1]
+            try:
+                if hasattr(last_idx, "to_pydatetime"):
+                    dt = last_idx.to_pydatetime()
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                    return dt.isoformat()
+            except Exception:
+                pass
+        last_row = tf_df.iloc[-1]
+        for key in ("timestamp", "time", "ts", "datetime"):
+            raw = last_row.get(key) if hasattr(last_row, "get") else None
+            ts_val = safe_float(raw)
+            if ts_val is None or not math.isfinite(ts_val):
+                continue
+            if ts_val > 1e12:
+                dt = datetime.datetime.fromtimestamp(ts_val / 1000.0, tz=datetime.timezone.utc)
+                return dt.isoformat()
+            if ts_val > 1e9:
+                dt = datetime.datetime.fromtimestamp(ts_val, tz=datetime.timezone.utc)
+                return dt.isoformat()
+    except Exception:
+        return None
+    return None
+
+
 def extract_position_amount(position) -> float:
     candidates = [
         position.get("contracts"),
@@ -9180,7 +9277,12 @@ def simplify_position(position):
     if amount == 0:
         return None
     info = position.get("info") or {}
-    side = position.get("side")
+    side = (
+        _normalize_position_side(position.get("side"))
+        or _normalize_position_side(info.get("side"))
+        or _normalize_position_side(info.get("positionSide"))
+    )
+    amount = _apply_side_to_amount(amount, side)
     if not side and amount != 0:
         side = "long" if amount > 0 else "short"
     entry_price = position.get("entryPrice") or position.get("average") or info.get("avgPrice")
@@ -15264,10 +15366,13 @@ def run_cycle():
         if initial_position_amount is None or not math.isfinite(initial_position_amount):
             initial_position_amount = 0.0
         px_ref = None
+        px_ref_src = None
         try:
-            px_ref = _get_position_reference_price(current_position)
+            px_ref, px_ref_src = _get_position_reference_price_with_source(current_position)
         except Exception:
             px_ref = None
+            px_ref_src = None
+        pos_prices = _position_price_fields(current_position)
         position_side_raw = str((current_position or {}).get("side") or "").lower()
         if position_side_raw in {"sell", "short"}:
             side_label = "SHORT"
@@ -15276,6 +15381,11 @@ def run_cycle():
         else:
             side_label = "LONG" if initial_position_amount > 0 else "SHORT" if initial_position_amount < 0 else "FLAT"
         px_text = f"{px_ref:.4f}" if isinstance(px_ref, (int, float)) and math.isfinite(px_ref or 0) else "n/a"
+        px_src_text = px_ref_src or "n/a"
+        entry_val = pos_prices.get("entry")
+        mark_val = pos_prices.get("mark")
+        entry_text = f"{float(entry_val):.4f}" if entry_val is not None and math.isfinite(entry_val) else "n/a"
+        mark_text = f"{float(mark_val):.4f}" if mark_val is not None and math.isfinite(mark_val) else "n/a"
         open_orders_symbol_snapshot = open_orders_prefetch.get(sym) or []
         log(
             f"[DEBUG] {sym}: open_orders(start)={_summarize_open_orders_for_log(open_orders_symbol_snapshot)}",
@@ -15296,7 +15406,7 @@ def run_cycle():
         stop_text = ",".join(f"{lv:.4f}" for lv in sorted(stop_levels)) if stop_levels else "n/a"
         take_text = ",".join(f"{lv:.4f}" for lv in sorted(take_levels)) if take_levels else "n/a"
         log(
-            f"[{i}/{len(symbols_sequence)}] {sym}: px={px_text} side={side_label} qty={initial_position_amount:.4f} stop={stop_text} take={take_text}",
+            f"[{i}/{len(symbols_sequence)}] {sym}: px={px_text}({px_src_text}) entry={entry_text} mark={mark_text} side={side_label} qty={initial_position_amount:.4f} stop={stop_text} take={take_text}",
             Fore.LIGHTBLACK_EX,
         )
         if AI_HARD_STOP_BUDGET and AI_TOKEN_USAGE_TOTAL >= AI_HARD_STOP_BUDGET and not has_priority_exposure:
@@ -15324,7 +15434,15 @@ def run_cycle():
                 merged_target = dict(symbol_meta.get("target") or {})
                 merged_target.update(decision_target)
                 symbol_meta["target"] = merged_target
-            base_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or []) or [TIMEFRAME, "4h"]
+            manual_tf_spec = {}
+            try:
+                manual_tf_spec = (getattr(strategy, "CONTEXT_SPEC", {}) or {}).get("timeframes", {}) or {}
+            except Exception:
+                manual_tf_spec = {}
+            manual_primary_tf = str(manual_tf_spec.get("primary") or "30m")
+            manual_secondary_tf = str(manual_tf_spec.get("secondary") or "4h")
+
+            base_timeframes = list(SUMMARY_TIMEFRAME_SHORTLIST or []) or [manual_primary_tf, manual_secondary_tf, TIMEFRAME]
             requested_timeframes = list(dict.fromkeys(base_timeframes))
             if NEEDS_MAX_TIMEFRAMES and requested_timeframes:
                 requested_timeframes = requested_timeframes[:NEEDS_MAX_TIMEFRAMES]
@@ -15441,9 +15559,9 @@ def run_cycle():
             ai_offline_mode = False
             manual_active = MANUAL_STRATEGY_FORCE
             if manual_active:
-                tf30_df = timeframe_dfs.get("30m")
-                tf4h_df = timeframe_dfs.get("4h")
-                if tf30_df is not None and tf4h_df is not None:
+                tf_primary_df = timeframe_dfs.get(manual_primary_tf) or timeframe_dfs.get("30m")
+                tf_secondary_df = timeframe_dfs.get(manual_secondary_tf) or timeframe_dfs.get("4h")
+                if tf_primary_df is not None and tf_secondary_df is not None:
                     funding_snapshot = manual_funding_cache.get(sym)
                     if funding_snapshot is None:
                         try:
@@ -15458,11 +15576,11 @@ def run_cycle():
                         except Exception:
                             oi_history = []
                         manual_open_interest_cache[sym] = oi_history or []
-                    log(f"[MODULE][context] build {sym}: tf30={tf30_df is not None} tf4h={tf4h_df is not None} pos_amt={safe_float((current_position or {}).get('amount') or (current_position or {}).get('contracts'))} orders={len(open_orders_symbol or [])}", Fore.LIGHTBLACK_EX)
+                    log(f"[MODULE][context] build {sym}: tf_primary={manual_primary_tf} tf_secondary={manual_secondary_tf} pos_amt={safe_float((current_position or {}).get('amount') or (current_position or {}).get('contracts'))} orders={len(open_orders_symbol or [])}", Fore.LIGHTBLACK_EX)
                     manual_ctx = strategy_context.build_manual_strategy_context(
                         sym,
-                        tf30_df,
-                        tf4h_df,
+                        tf_primary_df,
+                        tf_secondary_df,
                         df,
                         current_position=current_position,
                         open_orders=open_orders_symbol or [],
@@ -15471,6 +15589,8 @@ def run_cycle():
                         funding_snapshot=funding_snapshot or {},
                         open_interest_history=manual_open_interest_cache.get(sym) or [],
                         risk_pct=CURRENT_RISK_PCT or RISK_PCT,
+                        primary_tf=manual_primary_tf,
+                        secondary_tf=manual_secondary_tf,
                     )
                     if manual_ctx:
                         price_display = manual_ctx.price or 0.0
@@ -15505,19 +15625,90 @@ def run_cycle():
                         except Exception:
                             pass
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
+                        try:
+                            diag_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                            diag_path = Path("runtime") / str(USER_ID) / "diagnostics" / "strategy_events.jsonl"
+                            pos_prices = _position_price_fields(current_position)
+                            trace_items = None
+                            if isinstance(manual_event.metadata, dict):
+                                trace_items = manual_event.metadata.get("trace")
+                            diag_payload = {
+                                "kind": "manual_signal",
+                                "user_id": USER_ID,
+                                "symbol": sym,
+                                "event": manual_event.name,
+                                "reason": manual_event.reason,
+                                "confidence": float(manual_event.confidence) if manual_event.confidence is not None else None,
+                                "timeframes": {"primary": manual_primary_tf, "secondary": manual_secondary_tf},
+                                "bars": {
+                                    "primary": {
+                                        "tf": manual_primary_tf,
+                                        "bar_ts": _df_last_bar_timestamp_iso(tf_primary_df),
+                                        "close": safe_float(tf_primary_df.iloc[-1].get("close")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "ema20": safe_float(tf_primary_df.iloc[-1].get("ema20")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "ema50": safe_float(tf_primary_df.iloc[-1].get("ema50")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "rsi": safe_float(tf_primary_df.iloc[-1].get("rsi14") or tf_primary_df.iloc[-1].get("rsi")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "atr": safe_float(tf_primary_df.iloc[-1].get("atr14") or tf_primary_df.iloc[-1].get("atr")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                    },
+                                    "secondary": {
+                                        "tf": manual_secondary_tf,
+                                        "bar_ts": _df_last_bar_timestamp_iso(tf_secondary_df),
+                                        "close": safe_float(tf_secondary_df.iloc[-1].get("close")) if tf_secondary_df is not None and not tf_secondary_df.empty else None,
+                                        "ema20": safe_float(tf_secondary_df.iloc[-1].get("ema20")) if tf_secondary_df is not None and not tf_secondary_df.empty else None,
+                                        "ema50": safe_float(tf_secondary_df.iloc[-1].get("ema50")) if tf_secondary_df is not None and not tf_secondary_df.empty else None,
+                                        "rsi": safe_float(tf_secondary_df.iloc[-1].get("rsi14") or tf_secondary_df.iloc[-1].get("rsi")) if tf_secondary_df is not None and not tf_secondary_df.empty else None,
+                                        "atr": safe_float(tf_secondary_df.iloc[-1].get("atr14") or tf_secondary_df.iloc[-1].get("atr")) if tf_secondary_df is not None and not tf_secondary_df.empty else None,
+                                    },
+                                },
+                                "position": {
+                                    "has_position": bool(manual_ctx.has_position),
+                                    "side": manual_ctx.position_side,
+                                    "size": float(manual_ctx.position_size) if manual_ctx.position_size is not None else None,
+                                    "entry": pos_prices.get("entry"),
+                                    "mark": pos_prices.get("mark"),
+                                },
+                                "context": {
+                                    "price": float(manual_ctx.price) if manual_ctx.price is not None else None,
+                                    "trend": manual_ctx.trend_bias,
+                                    "news": manual_ctx.news_bias,
+                                    "oi_trend": manual_ctx.oi_trend,
+                                    "risk_pct": float(manual_ctx.risk_pct) if manual_ctx.risk_pct is not None else None,
+                                    "trace": trace_items,
+                                },
+                                "timestamp": diag_ts,
+                            }
+                            save_jsonl_line(diag_path, diag_payload, max_bytes=10_000_000, backups=5)
+                            db_logger.log_strategy_event(
+                                user_id=str(USER_ID) if USER_ID is not None else None,
+                                symbol=sym,
+                                event=str(manual_event.name),
+                                details=diag_payload,
+                                timestamp=diag_ts,
+                            )
+                        except Exception:
+                            pass
                         if (
                             manual_event.name == "close_position"
                             and manual_event.reason
-                            and "ema20 cross" in manual_event.reason.lower()
+                            and ("ema20" in manual_event.reason.lower() and "cross" in manual_event.reason.lower())
                         ):
-                            ema20_values = _tail_indicator_values(tf30_df, "ema20", 3)
-                            ema50_values = _tail_indicator_values(tf30_df, "ema50", 3)
+                            ema20_values = _tail_indicator_values(tf_primary_df, "ema20", 3)
+                            ema50_values = _tail_indicator_values(tf_primary_df, "ema50", 3)
                             if ema20_values or ema50_values:
                                 parts: list[str] = []
+                                tf_bar_ts = _df_last_bar_timestamp_iso(tf_primary_df) or "n/a"
+                                pos_side = manual_ctx.position_side or "n/a"
+                                parts.append(f"tf={manual_primary_tf} bar={tf_bar_ts} pos_side={pos_side}")
                                 if ema20_values:
                                     parts.append("EMA20 last=" + ", ".join(f"{val:.4f}" for val in ema20_values))
                                 if ema50_values:
                                     parts.append("EMA50 last=" + ", ".join(f"{val:.4f}" for val in ema50_values))
+                                if len(ema20_values) >= 2 and len(ema50_values) >= 2:
+                                    prev20, prev50 = ema20_values[-2], ema50_values[-2]
+                                    cur20, cur50 = ema20_values[-1], ema50_values[-1]
+                                    prev_rel = ">" if prev20 > prev50 else "<" if prev20 < prev50 else "="
+                                    cur_rel = ">" if cur20 > cur50 else "<" if cur20 < cur50 else "="
+                                    parts.append(f"ema20_vs_ema50 prev={prev_rel} now={cur_rel}")
                                 detail_msg = f"[MANUAL][EMA] {sym}: " + " | ".join(parts)
                                 log(detail_msg, Fore.LIGHTBLACK_EX)
                                 log_user(detail_msg, color=Fore.LIGHTBLACK_EX)
@@ -16693,15 +16884,23 @@ def run_cycle():
                         detail_entry = _with_meta(f"[{sym}] - failed to close position (error: {close_error})")
                     elif close_success:
                         side_raw = str((current_position or {}).get("side") or "").lower()
-                        is_long = side_raw in {"buy", "long"} or initial_position_amount > 0
+                        if side_raw in {"buy", "long"}:
+                            is_long = True
+                        elif side_raw in {"sell", "short"}:
+                            is_long = False
+                        else:
+                            is_long = initial_position_amount > 0
                         direction = "LONG" if is_long else "SHORT"
                         close_price = _get_position_reference_price(current_position) or _get_position_reference_price(final_position_payload)
                         close_text = f" @ {close_price:.4f}" if close_price is not None else ""
+                        pos_prices = _position_price_fields(current_position)
+                        entry_val = pos_prices.get("entry") or pos_prices.get("avg_entry") or pos_prices.get("avg")
+                        entry_text = f" entry@{float(entry_val):.4f}" if entry_val is not None and math.isfinite(entry_val) else ""
                         close_reason = _format_close_reason(current_position, close_price, initial_protection_orders)
                         reason_suffix = f" ({close_reason})" if close_reason else ""
                         detail_entry = _with_meta(
                             f"[{sym}] - closed {direction or 'position'} {abs(initial_position_amount):.4f}{close_text} "
-                            f"(lev x{symbol_leverage}){reason_suffix}"
+                            f"(lev x{symbol_leverage}){entry_text}{reason_suffix}"
                         )
                     elif close_pending:
                         detail_entry = _with_meta(f"[{sym}] - close requested (still open)")
