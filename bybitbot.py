@@ -1401,41 +1401,53 @@ def _run_backups(reason: str) -> bool:
     if not candidates:
         print("[BOOT] No backup candidates available.", file=sys.stderr)
         return False
-    candidate = random.choice(candidates)
+    stable_candidates: list[BackupCandidate] = []
+    other_candidates: list[BackupCandidate] = []
+    for cand in candidates:
+        label = (cand.source_label or "").lower()
+        if "stable branch" in label:
+            stable_candidates.append(cand)
+        else:
+            other_candidates.append(cand)
+    random.shuffle(other_candidates)
+    prioritized = stable_candidates + other_candidates
     failure_hash = failure_message = failure_timestamp = None
     if head_hash:
         failure_hash, failure_message, failure_timestamp = _resolve_commit_metadata(head_hash)
-    if failure_hash:
-        os.environ["BYBITBOT_FAILURE_HASH"] = failure_hash
-    else:
+    for candidate in prioritized:
+        if failure_hash:
+            os.environ["BYBITBOT_FAILURE_HASH"] = failure_hash
+        else:
+            os.environ.pop("BYBITBOT_FAILURE_HASH", None)
+        if failure_message:
+            os.environ["BYBITBOT_FAILURE_MESSAGE"] = failure_message
+        else:
+            os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
+        if failure_timestamp:
+            os.environ["BYBITBOT_FAILURE_TIMESTAMP"] = failure_timestamp
+        else:
+            os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
+        success = _run_script_candidate(
+            candidate.script_path,
+            candidate.version_label,
+            candidate.reason,
+            candidate.source_label,
+            fallback_context=candidate.context,
+            commit_hash=candidate.commit_hash,
+            commit_message=candidate.commit_message,
+            commit_timestamp=candidate.commit_timestamp,
+            cycle_kind=candidate.cycle_kind,
+            cycle_mode=candidate.cycle_mode,
+            cycle_counter=candidate.cycle_counter,
+            suppress_routine_increment=True,
+        )
         os.environ.pop("BYBITBOT_FAILURE_HASH", None)
-    if failure_message:
-        os.environ["BYBITBOT_FAILURE_MESSAGE"] = failure_message
-    else:
         os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
-    if failure_timestamp:
-        os.environ["BYBITBOT_FAILURE_TIMESTAMP"] = failure_timestamp
-    else:
         os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
-    success = _run_script_candidate(
-        candidate.script_path,
-        candidate.version_label,
-        candidate.reason,
-        candidate.source_label,
-        fallback_context=candidate.context,
-        commit_hash=candidate.commit_hash,
-        commit_message=candidate.commit_message,
-        commit_timestamp=candidate.commit_timestamp,
-        cycle_kind=candidate.cycle_kind,
-        cycle_mode=candidate.cycle_mode,
-        cycle_counter=candidate.cycle_counter,
-        suppress_routine_increment=True,
-    )
-    os.environ.pop("BYBITBOT_FAILURE_HASH", None)
-    os.environ.pop("BYBITBOT_FAILURE_MESSAGE", None)
-    os.environ.pop("BYBITBOT_FAILURE_TIMESTAMP", None)
-    candidate.finalize(success)
-    return success
+        candidate.finalize(success)
+        if success:
+            return True
+    return False
 
 
 def main():
