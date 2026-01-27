@@ -14212,7 +14212,18 @@ def run_cycle():
             log(f"[WARN] {user_tag} {symbol}: fallback market failed: {_exc}", Fore.YELLOW)
             return False
     SYMBOL_RULES_CACHE.clear()
-    ex.load_markets()
+    load_markets_attempts = 0
+    while True:
+        try:
+            load_markets_attempts += 1
+            ex.load_markets()
+            break
+        except Exception as exc_load:
+            log(f"[WARN] load_markets failed (attempt {load_markets_attempts}): {exc_load}", Fore.YELLOW)
+            if load_markets_attempts >= 3:
+                log("[ERROR] load_markets failed after 3 attempts, backing off 5 minutes to avoid crash loop", Fore.RED)
+                return 5.0
+            time.sleep(5)
     try:
         dynamic_aliases = _build_dynamic_symbol_aliases(getattr(ex, "markets", {}))
         DYNAMIC_SYMBOL_ALIASES.clear()
