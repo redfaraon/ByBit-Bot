@@ -54,10 +54,10 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
         close=close_val,
         ema20=ema20_val,
         ema50=ema50_val,
-        ema20_prev=ema20_prev,
-        ema50_prev=ema50_prev,
         rsi=rsi_val,
         atr=atr_val,
+        ema20_prev=ema20_prev,
+        ema50_prev=ema50_prev,
         atr_mean=atr_mean,
         atr_std=atr_std,
     )

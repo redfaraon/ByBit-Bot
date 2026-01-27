@@ -15637,6 +15637,26 @@ def run_cycle():
                             pass
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
                         try:
+                            tf_primary_vals = {
+                                "close": safe_float(tf_primary_df.iloc[-1].get("close")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                "ema20": safe_float(tf_primary_df.iloc[-1].get("ema20")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                "ema50": safe_float(tf_primary_df.iloc[-1].get("ema50")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                "rsi": safe_float(tf_primary_df.iloc[-1].get("rsi14") or tf_primary_df.iloc[-1].get("rsi")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                "atr": safe_float(tf_primary_df.iloc[-1].get("atr14") or tf_primary_df.iloc[-1].get("atr")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                "bb_b": safe_float(tf_primary_df.iloc[-1].get("bb_percent_b")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                "bb_width": safe_float(tf_primary_df.iloc[-1].get("bb_width_pct")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                            }
+                            detail_parts = [f"tf={manual_primary_tf}"]
+                            for key, val in tf_primary_vals.items():
+                                if val is None or not math.isfinite(val):
+                                    continue
+                                detail_parts.append(f"{key}={val:.4f}")
+                            detail_msg = f"[MANUAL][DETAIL] {sym}: " + " ".join(detail_parts)
+                            log(detail_msg, Fore.LIGHTBLACK_EX)
+                            log_user(detail_msg, color=Fore.LIGHTBLACK_EX)
+                        except Exception:
+                            pass
+                        try:
                             diag_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
                             diag_path = Path("runtime") / str(USER_ID) / "diagnostics" / "strategy_events.jsonl"
                             pos_prices = _position_price_fields(current_position)

@@ -305,10 +305,10 @@ class IndicatorBlock:
     close: float
     ema20: float
     ema50: float
-    ema20_prev: float | None = None
-    ema50_prev: float | None = None
     rsi: float
     atr: float
+    ema20_prev: float | None = None
+    ema50_prev: float | None = None
     adx: float | None = None
     bb_mid: float | None = None
     bb_upper: float | None = None
