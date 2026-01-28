@@ -307,6 +307,7 @@ class IndicatorBlock:
     ema50: float
     rsi: float
     atr: float
+    macd_hist: float | None = None
     ema20_prev: float | None = None
     ema50_prev: float | None = None
     adx: float | None = None
@@ -774,6 +775,9 @@ def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
     short_b_min = float(range_rules.get("short_percent_b_min", 0.88))
 
     if percent_b <= long_b_max and rsi <= long_rsi_max:
+        macd_ok = ctx.tf30.macd_hist is None or ctx.tf30.macd_hist > 0
+        if not macd_ok:
+            return None
         meta: dict[str, Any] = {
             "regime": "range",
             "bb_width_pct": width,
@@ -802,6 +806,9 @@ def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
         )
 
     if percent_b >= short_b_min and rsi >= short_rsi_min:
+        macd_ok = ctx.tf30.macd_hist is None or ctx.tf30.macd_hist < 0
+        if not macd_ok:
+            return None
         meta = {
             "regime": "range",
             "bb_width_pct": width,

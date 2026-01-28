@@ -51,6 +51,7 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
                 except Exception:
                     atr_std = None
             break
+    macd_hist = _macd_histogram_last(tf_df)
     return IndicatorBlock(
         close=close_val,
         ema20=ema20_val,
@@ -67,6 +68,7 @@ def _indicator_block_from_df(tf_df: pd.DataFrame | None) -> IndicatorBlock | Non
         bb_percent_b=bb.get("percent_b") if bb else None,
         atr_mean=atr_mean,
         atr_std=atr_std,
+        macd_hist=macd_hist,
     )
 
 
@@ -201,6 +203,27 @@ def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
         if val is not None and val > 0:
             return val
     return None
+
+
+def _macd_histogram_last(tf_df: pd.DataFrame | None) -> float | None:
+    if tf_df is None or tf_df.empty or "close" not in tf_df.columns:
+        return None
+    close = tf_df["close"].dropna().astype(float)
+    if len(close) < 35:
+        return None
+    fast = close.ewm(span=12, adjust=False).mean()
+    slow = close.ewm(span=26, adjust=False).mean()
+    macd = fast - slow
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    value = hist.iloc[-1]
+    try:
+        hist_val = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(hist_val):
+        return None
+    return hist_val
 
 
 def build_symbol_context(
