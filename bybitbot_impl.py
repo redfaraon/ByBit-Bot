@@ -16236,7 +16236,9 @@ def run_cycle():
                 )
                 continue
             elif action == "open":
-                if current_position and abs(float(current_position.get("amount") or 0)) > 0:
+                strategy_event = (dec.get("strategy_event") or "").lower()
+                allow_open_with_position = strategy_event in {"hedge_open"}
+                if current_position and abs(float(current_position.get("amount") or 0)) > 0 and not allow_open_with_position:
                     log(f"⚠️ Позиция по {sym} уже открыта (side={current_position.get('side')}, amount={current_position.get('amount')}), пропускаем повторное открытие", Fore.YELLOW)
                     send_tg_decision(f"ℹ️ {sym}: позиция уже открыта, сигнал open пропущен")
                     updated_orders, refreshed = protection_engine._refresh_position_protection_if_possible(
@@ -16254,6 +16256,15 @@ def run_cycle():
                         open_orders_symbol = updated_orders
                         open_orders_cache[sym] = updated_orders
                     continue
+                if current_position and abs(float(current_position.get("amount") or 0)) > 0 and allow_open_with_position:
+                    existing_side = str(current_position.get("side") or "").lower()
+                    desired_side = str(side or "").lower()
+                    if existing_side and desired_side and existing_side == desired_side:
+                        log(
+                            f"[INFO] {sym}: hedge_open side={desired_side} matches existing position side={existing_side}; skipping.",
+                            Fore.LIGHTBLACK_EX,
+                        )
+                        continue
                 elif max_positions_limit > 0 and open_positions is not None and open_positions >= max_positions_limit:
                     log(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), пропускаем {sym}", Fore.YELLOW)
                     send_tg(f"⛔ Лимит открытых позиций достигнут ({open_positions}/{max_positions_limit}), {sym} пропущен")

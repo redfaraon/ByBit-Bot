@@ -118,6 +118,11 @@
       "short_percent_b_min": 0.88,
       "long_rsi_max": 42,
       "short_rsi_min": 58,
+      "macd": {
+        "enabled": true,
+        "long_hist_min": 0.0,
+        "short_hist_max": 0.0
+      },
       "confidence": 0.5,
       "news_block": [
         "uncertain"
@@ -203,9 +208,7 @@
   "macd": {
     "fast_span": 12,
     "slow_span": 26,
-    "signal_span": 9,
-    "long_hist_min": 0.0,
-    "short_hist_max": 0.0
+    "signal_span": 9
   },
   "account": {
     "fields": [

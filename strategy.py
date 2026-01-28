@@ -152,8 +152,6 @@ TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
 MACD_FAST_SPAN = int(MACD_SPEC.get("fast_span", 12))
 MACD_SLOW_SPAN = int(MACD_SPEC.get("slow_span", 26))
 MACD_SIGNAL_SPAN = int(MACD_SPEC.get("signal_span", 9))
-MACD_LONG_HIST_MIN = float(MACD_SPEC.get("long_hist_min", 0.0))
-MACD_SHORT_HIST_MAX = float(MACD_SPEC.get("short_hist_max", 0.0))
 
 WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "BTC/USDT",
@@ -812,10 +810,14 @@ def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
     short_rsi_min = float(range_rules.get("short_rsi_min", 58))
     long_b_max = float(range_rules.get("long_percent_b_max", 0.12))
     short_b_min = float(range_rules.get("short_percent_b_min", 0.88))
+    macd_spec = range_rules.get("macd", {}) if isinstance(range_rules, dict) else {}
+    macd_enabled = bool(macd_spec.get("enabled", True)) if isinstance(macd_spec, dict) else False
+    macd_long_min = float(macd_spec.get("long_hist_min", 0.0)) if isinstance(macd_spec, dict) else 0.0
+    macd_short_max = float(macd_spec.get("short_hist_max", 0.0)) if isinstance(macd_spec, dict) else 0.0
 
     if percent_b <= long_b_max and rsi <= long_rsi_max:
         macd_hist = ctx.tf30.macd_hist
-        if macd_hist is not None and macd_hist < MACD_LONG_HIST_MIN:
+        if macd_enabled and macd_hist is not None and macd_hist < macd_long_min:
             return None
         meta: dict[str, Any] = {
             "regime": "range",
@@ -846,7 +848,7 @@ def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
 
     if percent_b >= short_b_min and rsi >= short_rsi_min:
         macd_hist = ctx.tf30.macd_hist
-        if macd_hist is not None and macd_hist > MACD_SHORT_HIST_MAX:
+        if macd_enabled and macd_hist is not None and macd_hist > macd_short_max:
             return None
         meta = {
             "regime": "range",
