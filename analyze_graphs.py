@@ -1,6 +1,6 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 
-"""Generate equity, PnL, and signal distribution plots from Bybit bot logs."""
+"""Generate diagnostic graphs for equity, signals, timers, and commits."""
 from __future__ import annotations
 
 import argparse
@@ -8,25 +8,26 @@ import base64
 import json
 import math
 import os
+import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # type: ignore[import]
     import matplotlib.dates as mdates  # type: ignore[import]
-except Exception as exc:  # pragma: no cover - protects from missing dependencies
+except Exception as exc:  # pragma: no cover
     plt = None  # type: ignore[assignment]
     mdates = None  # type: ignore[assignment]
     print(f"[WARN] matplotlib unavailable: {exc}", file=sys.stderr)
 
-# 1x1 PNG placeholder (white) for environments without matplotlib
 _PNG_1PX_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/gn9zqUAAAAASUVORK5CYII="
 )
+
 
 def _write_fallback_png(output_dir: Path, filename: str) -> None:
     try:
@@ -39,15 +40,16 @@ def _write_fallback_png(output_dir: Path, filename: str) -> None:
     except Exception as exc:
         print(f"[WARN] Failed to write fallback PNG {filename}: {exc}", file=sys.stderr)
 
+
 def _save_placeholder(output_dir: Path, filename: str, title: str, subtitle: str = "No data") -> None:
     if plt is None:
         _write_fallback_png(output_dir, filename)
         return
     try:
         plt.figure(figsize=(8, 3))
-        plt.axis('off')
-        plt.text(0.5, 0.65, title, ha='center', va='center', fontsize=14, fontweight='bold')
-        plt.text(0.5, 0.35, subtitle, ha='center', va='center', fontsize=11)
+        plt.axis("off")
+        plt.text(0.5, 0.65, title, ha="center", va="center", fontsize=14, fontweight="bold")
+        plt.text(0.5, 0.35, subtitle, ha="center", va="center", fontsize=11)
         output_path = output_dir / filename
         plt.tight_layout()
         plt.savefig(output_path)
@@ -99,36 +101,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return None
 
 
-def _load_signal_history_from_ai_log(path: Path, limit: int = 1000) -> List[Dict[str, Any]]:
-    if not path or not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception as exc:
-        print(f"[WARN] Failed to read {path}: {exc}", file=sys.stderr)
-        return []
-    if limit > 0:
-        lines = lines[-limit:]
-    history: List[Dict[str, Any]] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except Exception:
-            continue
-        decision = payload.get("decision") or {}
-        if not isinstance(decision, dict):
-            continue
-        ts_val = payload.get("timestamp") or payload.get("time") or payload.get("ts")
-        if ts_val and "_source_timestamp" not in decision:
-            decision["_source_timestamp"] = ts_val
-        history.append(decision)
-    return history
-
-
-def read_json(path: Path) -> Any:
+def _read_json(path: Path) -> Any:
     if not path.exists():
         return None
     try:
@@ -139,202 +112,585 @@ def read_json(path: Path) -> Any:
         return None
 
 
-def plot_equity(history: List[Dict[str, Any]], output_dir: Path) -> None:
-    if plt is None:
-        print("[WARN] Matplotlib not available; using minimal placeholder for equity.")
-        _write_fallback_png(output_dir, "equity.png")
-        return
-    if not history:
-        _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
-        return
-    equities: List[float] = []
-    availables: List[float] = []
+def _read_jsonl(path: Path, limit: int | None = None) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        print(f"[WARN] Failed to read {path}: {exc}", file=sys.stderr)
+        return []
+    if limit:
+        lines = lines[-limit:]
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def _load_commit_timestamps(repo_root: Path, limit: int = 500) -> List[datetime]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "log", f"--max-count={limit}", "--format=%ct"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return []
     timestamps: List[datetime] = []
-    for entry in history:
-        equity = entry.get("equity") or entry.get("equity_total")
-        ts = entry.get("timestamp") or entry.get("time") or entry.get("ts")
-        parsed_ts = _parse_timestamp(ts)
-        if equity is None or parsed_ts is None:
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
             continue
         try:
-            equities.append(float(equity))
+            ts = datetime.fromtimestamp(float(line), tz=timezone.utc)
         except Exception:
             continue
-        timestamps.append(parsed_ts)
-        available = entry.get("available") or entry.get("available_margin")
+        timestamps.append(ts)
+    return sorted(set(timestamps))
+
+
+def _add_commit_lines(ax, commits: List[datetime], start: datetime, end: datetime) -> None:
+    if not commits:
+        return
+    for ts in commits:
+        if ts < start or ts > end:
+            continue
+        ax.axvline(ts, color="gray", linestyle=":", alpha=0.35, linewidth=0.8)
+
+
+def _filter_entries(entries: List[Dict[str, Any]], window_hours: float | None) -> List[Dict[str, Any]]:
+    if window_hours is None:
+        return entries
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    filtered = []
+    for entry in entries:
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        if ts and ts >= cutoff:
+            filtered.append(entry)
+    return filtered
+
+
+def _extract_equity_series(entries: List[Dict[str, Any]]) -> Tuple[List[datetime], List[float], List[float], List[float]]:
+    timestamps: List[datetime] = []
+    equities: List[float] = []
+    balances: List[float] = []
+    drawdowns: List[float] = []
+    peak = None
+    for entry in entries:
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        eq_val = entry.get("equity") or entry.get("equity_total")
+        if ts is None or eq_val is None:
+            continue
         try:
-            availables.append(float(available) if available is not None else math.nan)
+            equity = float(eq_val)
         except Exception:
-            availables.append(math.nan)
-    if not equities:
-        _save_placeholder(output_dir, "equity.png", "Equity / Available margin")
+            continue
+        balance_val = entry.get("balance")
+        if balance_val is None:
+            unreal = entry.get("unrealized") or entry.get("unrealized_pnl")
+            try:
+                unreal_val = float(unreal) if unreal is not None else None
+            except Exception:
+                unreal_val = None
+            if unreal_val is not None and math.isfinite(unreal_val):
+                balance_val = equity - unreal_val
+        try:
+            balance = float(balance_val) if balance_val is not None else math.nan
+        except Exception:
+            balance = math.nan
+        peak = equity if peak is None or equity > peak else peak
+        drawdown = (equity - peak) / peak * 100.0 if peak and peak > 0 else 0.0
+        timestamps.append(ts)
+        equities.append(equity)
+        balances.append(balance)
+        drawdowns.append(drawdown)
+    return timestamps, equities, balances, drawdowns
+
+
+def plot_equity_window(
+    entries: List[Dict[str, Any]],
+    output_dir: Path,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+) -> None:
+    base_name = f"equity_{suffix}"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
+        return
+    if not entries:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    timestamps, equities, balances, drawdowns = _extract_equity_series(entries)
+    if not timestamps:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    try:
+        fig, ax1 = plt.subplots(figsize=(12, 4))
+        ax1.plot(timestamps, equities, label="Equity", color="tab:blue", linewidth=1.8)
+        if any(math.isfinite(x) for x in balances):
+            ax1.plot(timestamps, balances, label="Balance", color="tab:green", linestyle="--", linewidth=1.4)
+        ax1.set_title(title)
+        ax1.set_ylabel("USDT")
+        ax1.grid(axis="x", linestyle=":", alpha=0.4)
+        if mdates is not None:
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax1.xaxis.set_major_locator(locator)
+            ax1.xaxis.set_major_formatter(formatter)
+        ax2 = ax1.twinx()
+        ax2.plot(timestamps, drawdowns, label="Drawdown %", color="tab:red", linestyle=":", linewidth=1.2)
+        ax2.set_ylabel("Drawdown %")
+        start, end = min(timestamps), max(timestamps)
+        _add_commit_lines(ax1, commits, start, end)
+        fig.tight_layout()
+        _save_plot_with_formats(output_dir, base_name)
+        plt.close(fig)
+    except Exception as exc:
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
+
+
+def _extract_timer_series(entries: List[Dict[str, Any]]) -> Tuple[List[datetime], List[float], List[float]]:
+    timestamps: List[datetime] = []
+    delays: List[float] = []
+    intervals: List[float] = []
+    for entry in entries:
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        if ts is None:
+            continue
+        delay_val = (
+            entry.get("next_delay_minutes")
+            or entry.get("cycle_next_delay_minutes")
+            or entry.get("last_next_delay_minutes")
+        )
+        interval_val = (
+            entry.get("cycle_interval_minutes")
+            or entry.get("interval_minutes")
+            or entry.get("last_interval_from_start_minutes")
+        )
+        try:
+            delay = float(delay_val) if delay_val is not None else math.nan
+        except Exception:
+            delay = math.nan
+        try:
+            interval = float(interval_val) if interval_val is not None else math.nan
+        except Exception:
+            interval = math.nan
+        if not (math.isfinite(delay) or math.isfinite(interval)):
+            continue
+        timestamps.append(ts)
+        delays.append(delay)
+        intervals.append(interval)
+    return timestamps, delays, intervals
+
+
+def plot_timer_window(
+    entries: List[Dict[str, Any]],
+    output_dir: Path,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+) -> None:
+    base_name = f"timer_{suffix}"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
+        return
+    timestamps, delays, intervals = _extract_timer_series(entries)
+    if not timestamps:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
         return
     try:
         fig, ax = plt.subplots(figsize=(12, 4))
-        x_values = timestamps if timestamps else list(range(len(equities)))
-        ax.plot(x_values, equities, label="Equity")
-        if any(math.isfinite(x) for x in availables):
-            ax.plot(x_values, availables, label="Available", linestyle="--")
-        ax.set_title("Equity / Available Margin")
-        ax.set_ylabel("USDT")
-        if timestamps and mdates is not None:
+        ax.plot(timestamps, delays, label="Next delay (min)", color="tab:purple", linewidth=1.5)
+        ax.plot(timestamps, intervals, label="Cycle interval (min)", color="tab:orange", linestyle="--", linewidth=1.3)
+        ax.set_title(title)
+        ax.set_ylabel("Minutes")
+        ax.grid(axis="x", linestyle=":", alpha=0.4)
+        if mdates is not None:
             locator = mdates.AutoDateLocator()
             formatter = mdates.ConciseDateFormatter(locator)
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(formatter)
-            ax.set_xlabel("Time")
-            ax.grid(axis="x", linestyle=":", alpha=0.4)
-            fig.autofmt_xdate()
-        else:
-            ax.set_xlabel("Samples")
+        start, end = min(timestamps), max(timestamps)
+        _add_commit_lines(ax, commits, start, end)
         ax.legend()
         fig.tight_layout()
-        _save_plot_with_formats(output_dir, "equity")
+        _save_plot_with_formats(output_dir, base_name)
         plt.close(fig)
     except Exception as exc:
-        print(f"[WARN] Failed to plot equity graph: {exc}", file=sys.stderr)
-        return
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
 
 
-def plot_pnl(
-    history: List[Dict[str, Any]],
+def _normalize_action(event_name: str | None) -> str:
+    if not event_name:
+        return "other"
+    text = str(event_name).lower()
+    if "skip" in text:
+        return "skip"
+    if "close" in text:
+        return "close"
+    if "hedge" in text:
+        return "hedge"
+    if "open" in text:
+        return "open"
+    return "other"
+
+
+def _normalize_reason(reason: str | None) -> str:
+    if not reason:
+        return "other"
+    text = str(reason).lower()
+    if "range" in text or "mean-reversion" in text:
+        return "range"
+    if "flat" in text or "sideways" in text:
+        return "flat"
+    if "counter" in text:
+        return "countertrend"
+    if "trend" in text:
+        return "trend"
+    if "news" in text:
+        return "news"
+    if "breakout" in text:
+        return "breakout"
+    return "other"
+
+
+def _bucketize(entries: Iterable[Tuple[datetime, str]], bucket_minutes: int) -> Dict[datetime, Dict[str, int]]:
+    buckets: Dict[datetime, Dict[str, int]] = {}
+    for ts, key in entries:
+        if bucket_minutes <= 60:
+            bucket = ts.replace(minute=(ts.minute // bucket_minutes) * bucket_minutes, second=0, microsecond=0)
+        else:
+            bucket = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        bucket_map = buckets.setdefault(bucket, {})
+        bucket_map[key] = bucket_map.get(key, 0) + 1
+    return buckets
+
+
+def plot_signal_timeseries(
+    events: List[Dict[str, Any]],
     output_dir: Path,
-    fallback_history: List[Dict[str, Any]] | None = None,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+    bucket_minutes: int,
 ) -> None:
+    base_name = f"signals_timeseries_{suffix}"
     if plt is None:
-        print("[WARN] Matplotlib not available; using minimal placeholder for PnL.")
-        _write_fallback_png(output_dir, "pnl.png")
+        _write_fallback_png(output_dir, f"{base_name}.png")
         return
-    used_fallback = False
-    if not history and fallback_history:
-        history = fallback_history
-        used_fallback = True
-    if not history:
-        _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
+    points: List[Tuple[datetime, str]] = []
+    for entry in events:
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        action = entry.get("event") or entry.get("action")
+        if ts is None:
+            continue
+        points.append((ts, _normalize_action(action)))
+    if not points:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
         return
-    closed_pnls: List[float] = []
-    unrealized: List[float] = []
-    timestamps: List[datetime | None] = []
-    for entry in history:
-        closed = (
-            entry.get("cycle_closed_pnl")
-            or entry.get("closed_pnl")
-            or entry.get("closedPnL")
-            or (entry.get("pnl") or {}).get("cycle")
-            or (entry.get("pnl") or {}).get("closed")
-            or entry.get("realized")
-            or entry.get("realized_pnl")
-            or entry.get("realizedPnl")
-        )
-        unreal = (
-            entry.get("unrealized")
-            or entry.get("unrealized_pnl")
-            or entry.get("unrealizedPnl")
-            or (entry.get("pnl") or {}).get("unrealized")
-        )
-        ts = entry.get("timestamp") or entry.get("time") or entry.get("ts")
-        parsed_ts = _parse_timestamp(ts)
-        timestamps.append(parsed_ts)
-        try:
-            closed_pnls.append(float(closed) if closed is not None else math.nan)
-        except Exception:
-            closed_pnls.append(math.nan)
-        try:
-            unrealized.append(float(unreal) if unreal is not None else math.nan)
-        except Exception:
-            unrealized.append(math.nan)
-    if not closed_pnls:
-        _save_placeholder(output_dir, "pnl.png", "Closed / Unrealized PnL")
-        return
+    buckets = _bucketize(points, bucket_minutes)
+    series_keys = sorted({key for bucket in buckets.values() for key in bucket})
+    bucket_times = sorted(buckets.keys())
     try:
         fig, ax = plt.subplots(figsize=(12, 4))
-        valid_time = all(ts is not None for ts in timestamps) and mdates is not None
-        if valid_time:
-            x_values = [ts for ts in timestamps if ts is not None]
+        for key in series_keys:
+            values = [buckets[ts].get(key, 0) for ts in bucket_times]
+            ax.plot(bucket_times, values, label=key)
+        ax.set_title(title)
+        ax.set_ylabel("Count")
+        ax.grid(axis="x", linestyle=":", alpha=0.4)
+        if mdates is not None:
             locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
             ax.xaxis.set_major_locator(locator)
-            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-            ax.set_xlabel("Time")
-            ax.grid(axis="x", linestyle=":", alpha=0.4)
-        else:
-            x_values = list(range(len(closed_pnls)))
-            ax.set_xlabel("Samples")
-        ax.plot(x_values, closed_pnls, label="Closed PnL")
-        if any(math.isfinite(x) for x in unrealized):
-            ax.plot(x_values, unrealized, label="Unrealized", linestyle="--")
-        ax.set_title("PnL over time")
-        ax.set_ylabel("USDT")
+            ax.xaxis.set_major_formatter(formatter)
+        start, end = min(bucket_times), max(bucket_times)
+        _add_commit_lines(ax, commits, start, end)
         ax.legend()
         fig.tight_layout()
-        source_label = "results_state" if not used_fallback else "equity_history"
-        if x_values:
-            if valid_time:
-                start = x_values[0].isoformat()
-                end = x_values[-1].isoformat()
-                print(f"[INFO] Closed PnL: {len(closed_pnls)} points ({source_label}, {start} -> {end})")
-            else:
-                print(f"[INFO] Closed PnL: {len(closed_pnls)} points ({source_label})")
-        _save_plot_with_formats(output_dir, "pnl")
+        _save_plot_with_formats(output_dir, base_name)
         plt.close(fig)
     except Exception as exc:
-        print(f"[WARN] Failed to plot PnL graph: {exc}", file=sys.stderr)
-        return
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
 
 
-def plot_signal_distribution(
-    history: List[Dict[str, Any]],
+def plot_signal_pie(
+    events: List[Dict[str, Any]],
     output_dir: Path,
-    *,
-    fallback_log: Path | None = None,
-    source_label: str = "results_state",
+    suffix: str,
+    title: str,
 ) -> None:
+    base_name = f"signals_pie_{suffix}"
     if plt is None:
-        print("[WARN] Matplotlib not available; using minimal placeholder for signal distribution.")
-        _write_fallback_png(output_dir, "signals.png")
+        _write_fallback_png(output_dir, f"{base_name}.png")
         return
-    source_used = source_label
-    if not history and fallback_log:
-        history = _load_signal_history_from_ai_log(fallback_log)
-        source_used = "ai_decisions.log"
-    if not history:
-        _save_placeholder(output_dir, "signals.png", "Signal distribution")
+    counts: Dict[str, int] = {}
+    for entry in events:
+        action = entry.get("event") or entry.get("action")
+        key = _normalize_action(action)
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
         return
-    actions = {}
-    timestamps: List[datetime | None] = []
-    for entry in history:
-        action = (entry.get("action") or entry.get("summary") or "").lower()
-        if not action:
-            continue
-        key = "open" if "open" in action else "close" if "close" in action else "skip"
-        actions[key] = actions.get(key, 0) + 1
-        ts_val = entry.get("timestamp") or entry.get("time") or entry.get("_source_timestamp")
-        timestamps.append(_parse_timestamp(ts_val))
-    if not actions:
-        _save_placeholder(output_dir, "signals.png", "Signal distribution")
-        return
-    labels = list(actions.keys())
-    sizes = [actions[label] for label in labels]
     try:
         plt.figure(figsize=(6, 6))
+        labels = list(counts.keys())
+        sizes = [counts[label] for label in labels]
         plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
-        plt.title("Signal/Action Distribution")
+        plt.title(title)
         plt.axis("equal")
         plt.tight_layout()
-        if timestamps:
-            valid_ts = [ts for ts in timestamps if ts is not None]
-            if valid_ts:
-                start = min(valid_ts).isoformat()
-                end = max(valid_ts).isoformat()
-                print(f"[INFO] Signal distribution: {len(history)} entries ({source_used}, {start} -> {end})")
-            else:
-                print(f"[INFO] Signal distribution: {len(history)} entries ({source_used}, no timestamps)")
-        else:
-            print(f"[INFO] Signal distribution: {len(history)} entries ({source_used})")
-        _save_plot_with_formats(output_dir, "signals")
+        _save_plot_with_formats(output_dir, base_name)
         plt.close()
     except Exception as exc:
-        print(f"[WARN] Failed to plot signal distribution: {exc}", file=sys.stderr)
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
+
+
+def plot_reason_timeseries(
+    events: List[Dict[str, Any]],
+    output_dir: Path,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+    bucket_minutes: int,
+) -> None:
+    base_name = f"reasons_timeseries_{suffix}"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
         return
+    points: List[Tuple[datetime, str]] = []
+    for entry in events:
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        event_name = entry.get("event") or entry.get("action")
+        if ts is None or _normalize_action(event_name) != "open":
+            continue
+        points.append((ts, _normalize_reason(entry.get("reason"))))
+    if not points:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    buckets = _bucketize(points, bucket_minutes)
+    series_keys = sorted({key for bucket in buckets.values() for key in bucket})
+    bucket_times = sorted(buckets.keys())
+    try:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        for key in series_keys:
+            values = [buckets[ts].get(key, 0) for ts in bucket_times]
+            ax.plot(bucket_times, values, label=key)
+        ax.set_title(title)
+        ax.set_ylabel("Open signals")
+        ax.grid(axis="x", linestyle=":", alpha=0.4)
+        if mdates is not None:
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        start, end = min(bucket_times), max(bucket_times)
+        _add_commit_lines(ax, commits, start, end)
+        ax.legend()
+        fig.tight_layout()
+        _save_plot_with_formats(output_dir, base_name)
+        plt.close(fig)
+    except Exception as exc:
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
+
+
+def plot_equity_daily_bars(
+    entries: List[Dict[str, Any]],
+    output_dir: Path,
+    commits: List[datetime],
+) -> None:
+    base_name = "equity_daily_bars_all"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
+        return
+    daily: Dict[datetime, Dict[str, float]] = {}
+    for entry in entries:
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        if ts is None:
+            continue
+        day = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        equity_val = entry.get("equity") or entry.get("equity_total")
+        balance_val = entry.get("balance")
+        if balance_val is None:
+            unreal = entry.get("unrealized") or entry.get("unrealized_pnl")
+            try:
+                unreal_val = float(unreal) if unreal is not None else None
+            except Exception:
+                unreal_val = None
+            if equity_val is not None and unreal_val is not None and math.isfinite(unreal_val):
+                try:
+                    balance_val = float(equity_val) - unreal_val
+                except Exception:
+                    balance_val = None
+        try:
+            equity_float = float(equity_val) if equity_val is not None else None
+        except Exception:
+            equity_float = None
+        try:
+            balance_float = float(balance_val) if balance_val is not None else None
+        except Exception:
+            balance_float = None
+        if equity_float is None or not math.isfinite(equity_float):
+            continue
+        daily[day] = {"equity": equity_float, "balance": balance_float}
+    if not daily:
+        _save_placeholder(output_dir, f"{base_name}.png", "Daily equity/balance")
+        return
+    days = sorted(daily.keys())
+    equities = [daily[day]["equity"] for day in days]
+    balances = [daily[day]["balance"] if daily[day]["balance"] is not None else math.nan for day in days]
+    try:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        width = 0.4
+        x_vals = mdates.date2num(days) if mdates is not None else list(range(len(days)))
+        ax.bar([x - width / 2 for x in x_vals], equities, width=width, label="Equity")
+        if any(math.isfinite(x) for x in balances):
+            ax.bar([x + width / 2 for x in x_vals], balances, width=width, label="Balance")
+        ax.set_title("Daily equity/balance (all time)")
+        ax.set_ylabel("USDT")
+        if mdates is not None:
+            ax.xaxis_date()
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        start, end = min(days), max(days)
+        _add_commit_lines(ax, commits, start, end)
+        ax.legend()
+        fig.tight_layout()
+        _save_plot_with_formats(output_dir, base_name)
+        plt.close(fig)
+    except Exception as exc:
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
+
+
+def plot_commit_deltas(
+    entries: List[Dict[str, Any]],
+    output_dir: Path,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+) -> None:
+    base_name = f"equity_commit_deltas_{suffix}"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
+        return
+    if not commits or not entries:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    entries_sorted = sorted(entries, key=lambda e: _parse_timestamp(e.get("timestamp") or e.get("time") or e.get("ts")) or datetime.min)
+    series: List[Tuple[datetime, float, float | None]] = []
+    for commit_ts in commits:
+        last_entry = None
+        for entry in entries_sorted:
+            ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+            if ts is None or ts > commit_ts:
+                break
+            last_entry = entry
+        if not last_entry:
+            continue
+        equity_val = last_entry.get("equity") or last_entry.get("equity_total")
+        balance_val = last_entry.get("balance")
+        if balance_val is None:
+            unreal = last_entry.get("unrealized") or last_entry.get("unrealized_pnl")
+            try:
+                unreal_val = float(unreal) if unreal is not None else None
+            except Exception:
+                unreal_val = None
+            if equity_val is not None and unreal_val is not None and math.isfinite(unreal_val):
+                try:
+                    balance_val = float(equity_val) - unreal_val
+                except Exception:
+                    balance_val = None
+        try:
+            equity_float = float(equity_val) if equity_val is not None else None
+        except Exception:
+            equity_float = None
+        try:
+            balance_float = float(balance_val) if balance_val is not None else None
+        except Exception:
+            balance_float = None
+        if equity_float is None or not math.isfinite(equity_float):
+            continue
+        series.append((commit_ts, equity_float, balance_float))
+    if not series:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    latest_entry = entries_sorted[-1]
+    latest_ts = _parse_timestamp(latest_entry.get("timestamp") or latest_entry.get("time") or latest_entry.get("ts"))
+    if latest_ts:
+        equity_val = latest_entry.get("equity") or latest_entry.get("equity_total")
+        balance_val = latest_entry.get("balance")
+        if balance_val is None:
+            unreal = latest_entry.get("unrealized") or latest_entry.get("unrealized_pnl")
+            try:
+                unreal_val = float(unreal) if unreal is not None else None
+            except Exception:
+                unreal_val = None
+            if equity_val is not None and unreal_val is not None and math.isfinite(unreal_val):
+                try:
+                    balance_val = float(equity_val) - unreal_val
+                except Exception:
+                    balance_val = None
+        try:
+            equity_float = float(equity_val) if equity_val is not None else None
+        except Exception:
+            equity_float = None
+        try:
+            balance_float = float(balance_val) if balance_val is not None else None
+        except Exception:
+            balance_float = None
+        if equity_float is not None and math.isfinite(equity_float):
+            series.append((latest_ts, equity_float, balance_float))
+    if len(series) < 2:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    deltas_equity: List[float] = []
+    deltas_balance: List[float] = []
+    delta_times: List[datetime] = []
+    for idx in range(1, len(series)):
+        prev = series[idx - 1]
+        cur = series[idx]
+        delta_times.append(cur[0])
+        deltas_equity.append(cur[1] - prev[1])
+        if cur[2] is not None and prev[2] is not None:
+            deltas_balance.append(cur[2] - prev[2])
+        else:
+            deltas_balance.append(math.nan)
+    try:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        x_vals = mdates.date2num(delta_times) if mdates is not None else list(range(len(delta_times)))
+        width = 0.4
+        ax.bar([x - width / 2 for x in x_vals], deltas_equity, width=width, label="Equity delta")
+        if any(math.isfinite(x) for x in deltas_balance):
+            ax.bar([x + width / 2 for x in x_vals], deltas_balance, width=width, label="Balance delta")
+        ax.axhline(0, color="gray", linewidth=0.8)
+        ax.set_title(title)
+        ax.set_ylabel("Delta (USDT)")
+        if mdates is not None:
+            ax.xaxis_date()
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        start, end = min(delta_times), max(delta_times)
+        _add_commit_lines(ax, commits, start, end)
+        ax.legend()
+        fig.tight_layout()
+        _save_plot_with_formats(output_dir, base_name)
+        plt.close(fig)
+    except Exception as exc:
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -344,19 +700,7 @@ def main() -> int:
         "--state-dir",
         type=Path,
         default=Path("assets"),
-        help="Directory that stores bot state files (equity_history/results_state). Defaults to ./assets",
-    )
-    parser.add_argument(
-        "--results",
-        type=Path,
-        default=None,
-        help="Results state JSON path (defaults to <state-dir>/results_state.json)",
-    )
-    parser.add_argument(
-        "--equity",
-        type=Path,
-        default=None,
-        help="Equity history JSON path (defaults to <state-dir>/equity_history.json)",
+        help="Directory that stores bot state files (equity_history/results_state).",
     )
     args = parser.parse_args()
     try:
@@ -388,38 +732,52 @@ def main() -> int:
         def _find_state_path(name: str) -> Path:
             return next((d / name for d in candidate_dirs if (d / name).exists()), state_dir / name)
 
-        equity_path = args.equity or _find_state_path("equity_history.json")
-        results_path = args.results or _find_state_path("results_state.json")
+        equity_path = _find_state_path("equity_history.json")
         print(f"[INFO] Equity source: {equity_path}")
-        if results_path.exists():
-            print(f"[INFO] Results source: {results_path}")
-        else:
-            print(f"[WARN] Results state file not found; falling back to equity history where needed.")
-
-        equity_data = read_json(equity_path)
+        equity_data = _read_json(equity_path)
+        equity_history: List[Dict[str, Any]]
         if isinstance(equity_data, dict):
             equity_history = equity_data.get("history") or equity_data.get("entries") or []
         else:
             equity_history = equity_data or []
-        plot_equity(equity_history, args.output)
 
-        results_data = read_json(results_path)
-        if isinstance(results_data, dict):
-            results_history = results_data.get("history") or results_data.get("entries") or []
-        else:
-            results_history = results_data or []
-        plot_pnl(results_history, args.output, fallback_history=equity_history)
-
-        ai_log_path = next((d / "ai_decisions.log" for d in candidate_dirs if (d / "ai_decisions.log").exists()), state_dir / "ai_decisions.log")
-        plot_signal_distribution(
-            results_history,
-            args.output,
-            fallback_log=ai_log_path,
-            source_label="results_state",
+        diagnostics_path = next(
+            (
+                p
+                for d in candidate_dirs
+                for p in (
+                    d / "diagnostics" / "strategy_events.jsonl",
+                    d / "strategy_events.jsonl",
+                )
+                if p.exists()
+            ),
+            None,
         )
+        strategy_events = _read_jsonl(diagnostics_path) if diagnostics_path else []
 
+        repo_root = next((d for d in [script_dir, script_dir.parent] if (d / ".git").exists()), script_dir)
+        commit_ts = _load_commit_timestamps(repo_root)
+
+        windows = {
+            "all": None,
+            "week": 7 * 24,
+            "day": 24,
+        }
+        for suffix, hours in windows.items():
+            entries = _filter_entries(equity_history, hours)
+            events = _filter_entries(strategy_events, hours)
+            label = "All-time" if suffix == "all" else "Last 7 days" if suffix == "week" else "Last 24h"
+            plot_equity_window(entries, args.output, suffix, f"Equity / Balance ({label})", commit_ts)
+            plot_timer_window(entries, args.output, suffix, f"Cycle timers ({label})", commit_ts)
+            bucket_minutes = 60 if suffix == "day" else 24 * 60
+            plot_signal_timeseries(events, args.output, suffix, f"Signals ({label})", commit_ts, bucket_minutes)
+            plot_signal_pie(events, args.output, suffix, f"Signal distribution ({label})")
+            plot_reason_timeseries(events, args.output, suffix, f"Open reasons ({label})", commit_ts, bucket_minutes)
+            plot_commit_deltas(entries, args.output, suffix, f"Commit deltas ({label})", commit_ts)
+
+        plot_equity_daily_bars(equity_history, args.output, commit_ts)
         return 0
-    except Exception as exc:  # pragma: no cover - ensures CLI is resilient
+    except Exception as exc:  # pragma: no cover
         import traceback
 
         print(f"[ERROR] Failed to generate graphs: {exc}", file=sys.stderr)
@@ -429,4 +787,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

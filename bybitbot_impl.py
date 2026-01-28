@@ -7567,31 +7567,88 @@ def _generate_graphs() -> None:
     _generate_equity_drawdown_plot(state_dir, python_exec)
 
 
-def _send_graph_photos() -> list[str]:
+def _graph_group_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "all",
+            "label": "All-time",
+            "suffix": "all",
+            "interval_hours": 24,
+            "send_each_cycle": False,
+            "files": [
+                "equity_all",
+                "timer_all",
+                "signals_timeseries_all",
+                "signals_pie_all",
+                "reasons_timeseries_all",
+                "equity_daily_bars_all",
+                "equity_commit_deltas_all",
+            ],
+        },
+        {
+            "name": "week",
+            "label": "Last 7 days",
+            "suffix": "week",
+            "interval_hours": 24,
+            "send_each_cycle": False,
+            "files": [
+                "equity_week",
+                "timer_week",
+                "signals_timeseries_week",
+                "signals_pie_week",
+                "reasons_timeseries_week",
+                "equity_commit_deltas_week",
+            ],
+        },
+        {
+            "name": "day",
+            "label": "Last 24h",
+            "suffix": "day",
+            "interval_hours": 0,
+            "send_each_cycle": True,
+            "files": [
+                "equity_day",
+                "timer_day",
+                "signals_timeseries_day",
+                "signals_pie_day",
+                "reasons_timeseries_day",
+                "equity_commit_deltas_day",
+            ],
+        },
+    ]
+
+
+def _graph_caption(base: str, label: str, now_txt: str) -> str:
+    if base.startswith("equity_commit_deltas"):
+        return f"Commit deltas ({label}, {now_txt})"
+    if base.startswith("equity_daily_bars"):
+        return f"Daily equity/balance ({label}, {now_txt})"
+    if base.startswith("equity"):
+        return f"Equity / Balance ({label}, {now_txt})"
+    if base.startswith("timer"):
+        return f"Cycle timers ({label}, {now_txt})"
+    if base.startswith("signals_timeseries"):
+        return f"Signals timeline ({label}, {now_txt})"
+    if base.startswith("signals_pie"):
+        return f"Signals distribution ({label}, {now_txt})"
+    if base.startswith("reasons_timeseries"):
+        return f"Open reasons ({label}, {now_txt})"
+    return f"{base} ({label}, {now_txt})"
+
+
+def _send_graph_group(group: dict[str, Any]) -> list[str]:
     sent_labels: list[str] = []
     if not TG_TOKEN or not TG_CHAT:
         log("[GRAPH] Telegram credentials missing; skipping graph delivery.", Fore.YELLOW)
         return sent_labels
     thread_id = _graph_thread_id()
     now_txt = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    state_dir = STATE_DIR if isinstance(STATE_DIR, Path) else SCRIPT_DIR
-    equity_override = state_dir / "equity_drawdown_trimmed.png"
-    captions = {
-        "equity": f"Equity / Available margin ({now_txt})",
-        "pnl": f"Closed / Unrealized PnL ({now_txt})",
-        "signals": f"Signal distribution ({now_txt})",
-    }
-    for base, caption in captions.items():
-        preferred: list[Path] = []
-        if base == "equity" and equity_override.exists():
-            preferred.append(equity_override)
-            caption = f"Equity / Drawdown ({now_txt})"
-        preferred.extend(
-            [
-                GRAPH_OUTPUT_DIR / f"{base}.jpg",
-                GRAPH_OUTPUT_DIR / f"{base}.png",
-            ]
-        )
+    for base in group.get("files", []):
+        caption = _graph_caption(base, group.get("label", ""), now_txt)
+        preferred = [
+            GRAPH_OUTPUT_DIR / f"{base}.jpg",
+            GRAPH_OUTPUT_DIR / f"{base}.png",
+        ]
         path = next((p for p in preferred if p.exists()), None)
         if not path:
             log(f"[GRAPH] Plot {base} (jpg/png) missing; skipping send.", Fore.LIGHTBLACK_EX)
@@ -7611,22 +7668,33 @@ def maybe_send_graphs() -> None:
     interval = _graph_interval_minutes()
     force_each_cycle = _graph_send_each_cycle() or interval <= 0
     status = _read_runtime_status()
-    last_sent = status.get("last_graph_sent")
-    last_dt = None
-    if last_sent:
-        try:
-            last_dt = datetime.datetime.fromisoformat(last_sent)
-        except Exception:
-            last_dt = None
     now = datetime.datetime.now(datetime.timezone.utc)
-    if not force_each_cycle and last_dt and (now - last_dt).total_seconds() < interval * 60:
+    groups = _graph_group_specs()
+    due_groups: list[dict[str, Any]] = []
+    for group in groups:
+        if force_each_cycle or group.get("send_each_cycle"):
+            due_groups.append(group)
+            continue
+        interval_hours = float(group.get("interval_hours") or 0)
+        last_sent = status.get(f"last_graph_sent_{group.get('name')}")
+        last_dt = None
+        if last_sent:
+            try:
+                last_dt = datetime.datetime.fromisoformat(last_sent)
+            except Exception:
+                last_dt = None
+        if last_dt and (now - last_dt).total_seconds() < interval_hours * 3600:
+            continue
+        due_groups.append(group)
+    if not due_groups:
         return
     if force_each_cycle:
         log("[GRAPH] Forced graph push for this cycle.", Fore.LIGHTBLACK_EX)
     _generate_graphs()
-    sent = _send_graph_photos()
-    if sent:
-        _update_runtime_status_field("last_graph_sent", now.isoformat())
+    for group in due_groups:
+        sent = _send_graph_group(group)
+        if sent:
+            _update_runtime_status_field(f"last_graph_sent_{group.get('name')}", now.isoformat())
 
 
 def _build_help_message() -> str:
@@ -10507,6 +10575,34 @@ def _load_equity_history() -> list[dict]:
         payload = {"timestamp": ts, "equity": equity_float}
         if realized_float is not None and math.isfinite(realized_float):
             payload["realized"] = realized_float
+        unreal_val = entry.get("unrealized")
+        try:
+            unreal_float = float(unreal_val)
+        except (TypeError, ValueError):
+            unreal_float = None
+        if unreal_float is not None and math.isfinite(unreal_float):
+            payload["unrealized"] = unreal_float
+        balance_val = entry.get("balance")
+        try:
+            balance_float = float(balance_val)
+        except (TypeError, ValueError):
+            balance_float = None
+        if balance_float is not None and math.isfinite(balance_float):
+            payload["balance"] = balance_float
+        next_delay_val = entry.get("next_delay_minutes")
+        try:
+            next_delay_float = float(next_delay_val)
+        except (TypeError, ValueError):
+            next_delay_float = None
+        if next_delay_float is not None and math.isfinite(next_delay_float):
+            payload["next_delay_minutes"] = next_delay_float
+        interval_val = entry.get("cycle_interval_minutes")
+        try:
+            interval_float = float(interval_val)
+        except (TypeError, ValueError):
+            interval_float = None
+        if interval_float is not None and math.isfinite(interval_float):
+            payload["cycle_interval_minutes"] = interval_float
         result.append(payload)
     return result
 
@@ -10605,6 +10701,10 @@ def _update_equity_history(
     timestamp: datetime.datetime,
     equity: float,
     realized: float | None = None,
+    unrealized: float | None = None,
+    balance: float | None = None,
+    next_delay_minutes: float | None = None,
+    cycle_interval_minutes: float | None = None,
 ) -> None:
     if not math.isfinite(equity):
         return
@@ -10612,6 +10712,14 @@ def _update_equity_history(
     entry: dict[str, float | str] = {"timestamp": ts.isoformat(), "equity": float(equity)}
     if realized is not None and math.isfinite(realized):
         entry["realized"] = float(realized)
+    if unrealized is not None and math.isfinite(unrealized):
+        entry["unrealized"] = float(unrealized)
+    if balance is not None and math.isfinite(balance):
+        entry["balance"] = float(balance)
+    if next_delay_minutes is not None and math.isfinite(next_delay_minutes):
+        entry["next_delay_minutes"] = float(next_delay_minutes)
+    if cycle_interval_minutes is not None and math.isfinite(cycle_interval_minutes):
+        entry["cycle_interval_minutes"] = float(cycle_interval_minutes)
     history.append(entry)
     cutoff = ts - datetime.timedelta(hours=max(PNL_LOOKBACK_HOURS * 6, 72))
     pruned: list[dict] = []
@@ -10637,6 +10745,34 @@ def _update_equity_history(
                 realized_float = None
             if realized_float is not None and math.isfinite(realized_float):
                 payload["realized"] = realized_float
+            unreal_val = entry.get("unrealized")
+            try:
+                unreal_float = float(unreal_val)
+            except (TypeError, ValueError):
+                unreal_float = None
+            if unreal_float is not None and math.isfinite(unreal_float):
+                payload["unrealized"] = unreal_float
+            balance_val = entry.get("balance")
+            try:
+                balance_float = float(balance_val)
+            except (TypeError, ValueError):
+                balance_float = None
+            if balance_float is not None and math.isfinite(balance_float):
+                payload["balance"] = balance_float
+            next_delay_val = entry.get("next_delay_minutes")
+            try:
+                next_delay_float = float(next_delay_val)
+            except (TypeError, ValueError):
+                next_delay_float = None
+            if next_delay_float is not None and math.isfinite(next_delay_float):
+                payload["next_delay_minutes"] = next_delay_float
+            interval_val = entry.get("cycle_interval_minutes")
+            try:
+                interval_float = float(interval_val)
+            except (TypeError, ValueError):
+                interval_float = None
+            if interval_float is not None and math.isfinite(interval_float):
+                payload["cycle_interval_minutes"] = interval_float
             pruned.append(payload)
     history[:] = pruned
     _save_equity_history(history)
@@ -18215,7 +18351,27 @@ def run_cycle():
                     "stable_label": end_stable_label,
                 }
             )
-            _update_equity_history(history_entries, now_utc, equity_end, realized_end)
+            next_delay_minutes_val = None
+            interval_minutes_val = None
+            if isinstance(cycle_state, dict):
+                next_delay_minutes_val = safe_float(cycle_state.get("last_next_delay_minutes"))
+                interval_minutes_val = safe_float(cycle_state.get("last_interval_from_start_minutes"))
+            balance_val = None
+            if unreal_total is not None and math.isfinite(unreal_total) and equity_end is not None:
+                try:
+                    balance_val = float(equity_end) - float(unreal_total)
+                except (TypeError, ValueError):
+                    balance_val = None
+            _update_equity_history(
+                history_entries,
+                now_utc,
+                equity_end,
+                realized_end,
+                unreal_total,
+                balance_val,
+                next_delay_minutes_val,
+                interval_minutes_val,
+            )
         except Exception as exc_pnl:
             log(f"[WARN] Failed to update PnL history: {exc_pnl}", Fore.YELLOW)
     decision_log_path = _resolve_log_path(AI_LOG_FILE)
