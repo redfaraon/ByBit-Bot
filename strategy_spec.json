@@ -192,13 +192,20 @@
       42,
       65
     ],
-      "rsi_short": [
-        35,
-        58
-      ],
-      "confidence": 0.5,
-      "scale": 0.5
-    }
+    "rsi_short": [
+      35,
+      58
+    ],
+    "confidence": 0.5,
+    "scale": 0.5
+  }
+},
+  "macd": {
+    "fast_span": 12,
+    "slow_span": 26,
+    "signal_span": 9,
+    "long_hist_min": 0.0,
+    "short_hist_max": 0.0
   },
   "account": {
     "fields": [

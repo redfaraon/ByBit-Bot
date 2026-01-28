@@ -5,7 +5,13 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-from strategy import StrategyContext, IndicatorBlock
+from strategy import (
+    StrategyContext,
+    IndicatorBlock,
+    MACD_FAST_SPAN,
+    MACD_SLOW_SPAN,
+    MACD_SIGNAL_SPAN,
+)
 
 
 def _safe_float(val: Any) -> float | None:
@@ -205,16 +211,22 @@ def _pending_limit_price(pending_info: dict[str, Any] | None) -> float | None:
     return None
 
 
-def _macd_histogram_last(tf_df: pd.DataFrame | None) -> float | None:
+def _macd_histogram_last(
+    tf_df: pd.DataFrame | None,
+    fast_span: int = MACD_FAST_SPAN,
+    slow_span: int = MACD_SLOW_SPAN,
+    signal_span: int = MACD_SIGNAL_SPAN,
+) -> float | None:
     if tf_df is None or tf_df.empty or "close" not in tf_df.columns:
         return None
     close = tf_df["close"].dropna().astype(float)
-    if len(close) < 35:
+    required = max(fast_span, slow_span, signal_span) * 2
+    if len(close) < required:
         return None
-    fast = close.ewm(span=12, adjust=False).mean()
-    slow = close.ewm(span=26, adjust=False).mean()
+    fast = close.ewm(span=fast_span, adjust=False).mean()
+    slow = close.ewm(span=slow_span, adjust=False).mean()
     macd = fast - slow
-    signal = macd.ewm(span=9, adjust=False).mean()
+    signal = macd.ewm(span=signal_span, adjust=False).mean()
     hist = macd - signal
     value = hist.iloc[-1]
     try:

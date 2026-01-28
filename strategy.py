@@ -9,7 +9,112 @@ from typing import Any, Iterable, Sequence
 
 
 def _default_spec() -> dict[str, Any]:
-    return {"version": "1.0.0"}
+    return {
+        "version": "1.1.7",
+        "context": {
+            "universe": [
+                "1000BONK/USDT:USDT",
+                "1000PEPE/USDT:USDT",
+                "1000FLOKI/USDT:USDT",
+                "BTC/USDT:USDT",
+                "ETH/USDT:USDT",
+                "SOL/USDT:USDT",
+            ],
+            "timeframes": {
+                "primary": "15m",
+                "secondary": "4h",
+                "open_interest": "1h",
+                "funding": "8h",
+            },
+            "news": {"positive": 0.45, "negative": -0.45, "neutral_band": 0.44},
+            "schedule": {
+                "offline_min": 4,
+                "offline_max": 35,
+                "online_min": 10,
+                "online_max": 45,
+                "backoff_min": 25,
+                "backoff_max": 55,
+            },
+        },
+        "thresholds": {
+            "atr_sigma_hot": 2.8,
+            "atr_limit_multiplier": 1.3,
+            "atr_range_ratio": 0.01,
+            "atr_extreme_ratio": 0.04,
+            "oi_change_pct": 0.004,
+        },
+        "sizing": {
+            "risk_multiplier": {"trend": 1.0, "counter": 0.6, "flat": 0.4},
+            "min_pct": 0.001,
+            "max_pct": 0.15,
+        },
+        "rules": {
+            "trend": {
+                "require_secondary_tf": True,
+                "min_ema_spread_pct": 0.001,
+                "min_adx": 18,
+                "long": {
+                    "rsi_max": 62,
+                    "rsi4h_min": 50,
+                    "funding_min": -0.0004,
+                    "require_oi_up": False,
+                    "oi_trend_required": "not_down",
+                    "news_block": ["negative"],
+                    "confidence": {"market": 0.55, "limit": 0.45},
+                },
+                "short": {
+                    "rsi_min": 38,
+                    "rsi4h_max": 50,
+                    "funding_max": 0.0004,
+                    "require_oi_up": False,
+                    "oi_trend_required": "not_up",
+                    "news_block": ["positive"],
+                    "confidence": {"market": 0.55, "limit": 0.45},
+                },
+            },
+            "range": {
+                "enabled": True,
+                "max_bb_width_pct": 1.0,
+                "long_percent_b_max": 0.12,
+                "short_percent_b_min": 0.88,
+                "long_rsi_max": 42,
+                "short_rsi_min": 58,
+                "confidence": 0.5,
+                "news_block": ["uncertain"],
+            },
+            "countertrend": {
+                "require_atr_calm": True,
+                "require_oi_flat": True,
+                "long": {"rsi_max": 30, "news_block": ["negative"], "confidence": 0.45},
+                "short": {"rsi_min": 70, "news_block": ["positive"], "confidence": 0.45},
+            },
+            "flat": {"rsi_band": [43, 57]},
+        },
+        "events": {
+            "limit_gap_pct": 0.002,
+            "limit_offsets": {"buy": 0.998, "sell": 1.002},
+            "entry_ladder": [[1.0, 0.0]],
+            "tp_ladder": [
+                [0.5, 1.2],
+                [0.5, 2.2],
+            ],
+            "tp": {"atr_multiple": 2.0, "rsi_long": 70, "rsi_short": 30},
+            "hedge": {"funding_flip": 0.0001, "size_pct": 0.5},
+            "modify_position": {
+                "rsi_long": [42, 65],
+                "rsi_short": [35, 58],
+                "confidence": 0.5,
+                "scale": 0.5,
+            },
+        },
+        "macd": {
+            "fast_span": 12,
+            "slow_span": 26,
+            "signal_span": 9,
+            "long_hist_min": 0.0,
+            "short_hist_max": 0.0,
+        },
+    }
 
 
 def _load_spec() -> dict[str, Any]:
@@ -41,8 +146,14 @@ THRESHOLDS = SPEC.get("thresholds", {})
 RULES_SPEC = SPEC.get("rules", {})
 SIZE_SPEC = SPEC.get("sizing", {})
 EVENTS_SPEC = SPEC.get("events", {})
+MACD_SPEC = SPEC.get("macd", {})
 ENTRY_LADDER = EVENTS_SPEC.get("entry_ladder") or []
 TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
+MACD_FAST_SPAN = int(MACD_SPEC.get("fast_span", 12))
+MACD_SLOW_SPAN = int(MACD_SPEC.get("slow_span", 26))
+MACD_SIGNAL_SPAN = int(MACD_SPEC.get("signal_span", 9))
+MACD_LONG_HIST_MIN = float(MACD_SPEC.get("long_hist_min", 0.0))
+MACD_SHORT_HIST_MAX = float(MACD_SPEC.get("short_hist_max", 0.0))
 
 WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "BTC/USDT",
@@ -703,8 +814,8 @@ def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
     short_b_min = float(range_rules.get("short_percent_b_min", 0.88))
 
     if percent_b <= long_b_max and rsi <= long_rsi_max:
-        macd_ok = ctx.tf30.macd_hist is None or ctx.tf30.macd_hist > 0
-        if not macd_ok:
+        macd_hist = ctx.tf30.macd_hist
+        if macd_hist is not None and macd_hist < MACD_LONG_HIST_MIN:
             return None
         meta: dict[str, Any] = {
             "regime": "range",
@@ -734,8 +845,8 @@ def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
         )
 
     if percent_b >= short_b_min and rsi >= short_rsi_min:
-        macd_ok = ctx.tf30.macd_hist is None or ctx.tf30.macd_hist < 0
-        if not macd_ok:
+        macd_hist = ctx.tf30.macd_hist
+        if macd_hist is not None and macd_hist > MACD_SHORT_HIST_MAX:
             return None
         meta = {
             "regime": "range",
