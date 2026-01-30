@@ -333,16 +333,19 @@ def plot_timer_window(
 def _normalize_action(event_name: str | None) -> str:
     if not event_name:
         return "other"
-    text = str(event_name).lower()
-    if "skip" in text:
+    text_raw = str(event_name).strip()
+    if not text_raw:
+        return "other"
+    text_lower = text_raw.lower()
+    if "skip" in text_lower:
         return "skip"
-    if "close" in text:
+    if "close" in text_lower:
         return "close"
-    if "hedge" in text:
+    if "hedge" in text_lower:
         return "hedge"
-    if "open" in text:
+    if "open" in text_lower:
         return "open"
-    return "other"
+    return text_raw
 
 
 def _normalize_reason(reason: str | None) -> str:
