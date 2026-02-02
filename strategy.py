@@ -10,76 +10,109 @@ from typing import Any, Iterable, Sequence
 
 def _default_spec() -> dict[str, Any]:
     return {
-        "version": "1.1.1",
+        "version": "1.1.7",
         "context": {
             "universe": [
-                "BTC/USDT",
-                "ETH/USDT",
-                "SOL/USDT",
-                "XRP/USDT",
-                "DOGE/USDT",
-                "TON/USDT",
-                "ADA/USDT",
-                "AVAX/USDT",
+                "1000BONK/USDT:USDT",
+                "1000PEPE/USDT:USDT",
+                "1000FLOKI/USDT:USDT",
+                "BTC/USDT:USDT",
+                "ETH/USDT:USDT",
+                "SOL/USDT:USDT",
             ],
             "timeframes": {
-                "primary": "30m",
+                "primary": "15m",
                 "secondary": "4h",
                 "open_interest": "1h",
                 "funding": "8h",
             },
-            "news": {"positive": 0.55, "negative": -0.55, "neutral_band": 0.15},
+            "news": {"positive": 0.45, "negative": -0.45, "neutral_band": 0.44},
+            "schedule": {
+                "offline_min": 4,
+                "offline_max": 35,
+                "online_min": 10,
+                "online_max": 45,
+                "backoff_min": 25,
+                "backoff_max": 55,
+            },
         },
         "thresholds": {
-            "atr_sigma_hot": 2.5,
-            "atr_limit_multiplier": 1.7,
-            "atr_range_ratio": 0.008,
-            "atr_extreme_ratio": 0.025,
-            "oi_change_pct": 0.012,
+            "atr_sigma_hot": 2.8,
+            "atr_limit_multiplier": 1.3,
+            "atr_range_ratio": 0.01,
+            "atr_extreme_ratio": 0.04,
+            "oi_change_pct": 0.004,
         },
         "sizing": {
-            "risk_multiplier": {"trend": 1.15, "counter": 0.55, "flat": 0.4},
-            "min_pct": 0.0025,
-            "max_pct": 0.05,
+            "risk_multiplier": {"trend": 1.0, "counter": 0.6, "flat": 0.4},
+            "min_pct": 0.001,
+            "max_pct": 0.15,
         },
         "rules": {
             "trend": {
+                "require_secondary_tf": True,
+                "min_ema_spread_pct": 0.001,
+                "min_adx": 18,
                 "long": {
-                    "rsi_max": 65,
-                    "funding_min": -0.0002,
+                    "rsi_max": 62,
+                    "rsi4h_min": 50,
+                    "funding_min": -0.0004,
+                    "require_oi_up": False,
+                    "oi_trend_required": "not_down",
                     "news_block": ["negative"],
-                    "require_oi_up": True,
-                    "confidence": {"market": 0.82, "limit": 0.78},
+                    "confidence": {"market": 0.55, "limit": 0.45},
                 },
                 "short": {
-                    "rsi_min": 35,
-                    "funding_max": 0.0002,
+                    "rsi_min": 38,
+                    "rsi4h_max": 50,
+                    "funding_max": 0.0004,
+                    "require_oi_up": False,
+                    "oi_trend_required": "not_up",
                     "news_block": ["positive"],
-                    "require_oi_up": True,
-                    "confidence": {"market": 0.82, "limit": 0.78},
+                    "confidence": {"market": 0.55, "limit": 0.45},
                 },
             },
-            "countertrend": {
-                "long": {"rsi_max": 30, "news_block": ["negative"], "confidence": 0.72},
-                "short": {"rsi_min": 70, "news_block": ["positive"], "confidence": 0.72},
+            "range": {
+                "enabled": True,
+                "max_bb_width_pct": 1.0,
+                "long_percent_b_max": 0.12,
+                "short_percent_b_min": 0.88,
+                "long_rsi_max": 42,
+                "short_rsi_min": 58,
+                "confidence": 0.5,
+                "news_block": ["uncertain"],
             },
-            "flat": {"rsi_band": [45, 55]},
+            "countertrend": {
+                "require_atr_calm": True,
+                "require_oi_flat": True,
+                "long": {"rsi_max": 30, "news_block": ["negative"], "confidence": 0.45},
+                "short": {"rsi_min": 70, "news_block": ["positive"], "confidence": 0.45},
+            },
+            "flat": {"rsi_band": [43, 57]},
         },
         "events": {
             "limit_gap_pct": 0.002,
             "limit_offsets": {"buy": 0.998, "sell": 1.002},
+            "entry_ladder": [[1.0, 0.0]],
+            "tp_ladder": [
+                [0.5, 1.2],
+                [0.5, 2.2],
+            ],
             "tp": {"atr_multiple": 2.0, "rsi_long": 70, "rsi_short": 30},
             "hedge": {"funding_flip": 0.0001, "size_pct": 0.5},
             "modify_position": {
-                "rsi_long": [40, 65],
-                "rsi_short": [35, 60],
-                "confidence": 0.58,
+                "rsi_long": [42, 65],
+                "rsi_short": [35, 58],
+                "confidence": 0.5,
                 "scale": 0.5,
             },
         },
-        "events": {
-            "entry_ladder": [(0.6, 0.0), (0.4, 0.6)],
-            "tp_ladder": [(0.33, 1.2), (0.33, 2.0), (0.34, 3.0)],
+        "macd": {
+            "fast_span": 12,
+            "slow_span": 26,
+            "signal_span": 9,
+            "long_hist_min": 0.0,
+            "short_hist_max": 0.0,
         },
     }
 
@@ -113,8 +146,12 @@ THRESHOLDS = SPEC.get("thresholds", {})
 RULES_SPEC = SPEC.get("rules", {})
 SIZE_SPEC = SPEC.get("sizing", {})
 EVENTS_SPEC = SPEC.get("events", {})
+MACD_SPEC = SPEC.get("macd", {})
 ENTRY_LADDER = EVENTS_SPEC.get("entry_ladder") or []
 TP_LADDER = EVENTS_SPEC.get("tp_ladder") or []
+MACD_FAST_SPAN = int(MACD_SPEC.get("fast_span", 12))
+MACD_SLOW_SPAN = int(MACD_SPEC.get("slow_span", 26))
+MACD_SIGNAL_SPAN = int(MACD_SPEC.get("signal_span", 9))
 
 WATCHLIST_BASE = [sym.upper() for sym in CONTEXT_SPEC.get("universe", [])] or [
     "BTC/USDT",
@@ -134,6 +171,8 @@ INDICATORS = [
     "ema50",
     "rsi14",
     "atr14",
+    "adx14",
+    "bb20",
     "funding_rate",
     "open_interest",
 ]
@@ -305,6 +344,15 @@ class IndicatorBlock:
     ema50: float
     rsi: float
     atr: float
+    macd_hist: float | None = None
+    ema20_prev: float | None = None
+    ema50_prev: float | None = None
+    adx: float | None = None
+    bb_mid: float | None = None
+    bb_upper: float | None = None
+    bb_lower: float | None = None
+    bb_width_pct: float | None = None
+    bb_percent_b: float | None = None
     atr_mean: float | None = None
     atr_std: float | None = None
 
@@ -527,9 +575,21 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     long_rule = trend_rules.get("long", {})
     short_rule = trend_rules.get("short", {})
     min_spread_pct = float(trend_rules.get("min_ema_spread_pct", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    min_adx = float(trend_rules.get("min_adx", 0.0)) if isinstance(trend_rules, dict) else 0.0
     ema_spread_pct = 0.0
     if ctx.price and math.isfinite(ctx.price) and ctx.price > 0:
         ema_spread_pct = abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price
+    spread_ok = (not min_spread_pct) or ema_spread_pct >= min_spread_pct
+    adx_val = ctx.tf30.adx if hasattr(ctx.tf30, "adx") else None
+    adx_ok = (not min_adx) or (adx_val is not None and math.isfinite(adx_val) and adx_val >= min_adx)
+    if min_spread_pct and min_adx:
+        strength_ok = spread_ok or adx_ok
+    elif min_spread_pct:
+        strength_ok = spread_ok
+    elif min_adx:
+        strength_ok = adx_ok
+    else:
+        strength_ok = True
 
     if trend == "long":
         confidence_map = long_rule.get("confidence", {})
@@ -543,7 +603,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         rsi4h_min = float(long_rule.get("rsi4h_min", 0.0)) if isinstance(long_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi <= float(long_rule.get("rsi_max", 65))
-            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and strength_ok
             and (not rsi4h_min or ctx.tf4h.rsi >= rsi4h_min)
             and news not in set(long_rule.get("news_block", []))
             and funding >= float(long_rule.get("funding_min", -0.0002))
@@ -571,6 +631,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
                     f"ema_spread={ema_spread_pct:.4f}",
+                    f"adx={adx_val:.1f}" if adx_val is not None and math.isfinite(adx_val) else "adx=n/a",
                     f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
@@ -595,7 +656,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
         rsi4h_max = float(short_rule.get("rsi4h_max", 0.0)) if isinstance(short_rule, dict) else 0.0
         cond = (
             ctx.tf30.rsi >= float(short_rule.get("rsi_min", 35))
-            and (not min_spread_pct or ema_spread_pct >= min_spread_pct)
+            and strength_ok
             and (not rsi4h_max or ctx.tf4h.rsi <= rsi4h_max)
             and news not in set(short_rule.get("news_block", []))
             and funding <= float(short_rule.get("funding_max", 0.0002))
@@ -623,6 +684,7 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
                     f"news={news}",
                     f"oi={ctx.oi_trend}",
                     f"ema_spread={ema_spread_pct:.4f}",
+                    f"adx={adx_val:.1f}" if adx_val is not None and math.isfinite(adx_val) else "adx=n/a",
                     f"rsi4h={ctx.tf4h.rsi:.1f}",
                 ],
             )
@@ -723,6 +785,100 @@ def should_open(ctx: StrategyContext) -> StrategyEvent | None:
     return None
 
 
+def should_open_range(ctx: StrategyContext) -> StrategyEvent | None:
+    range_rules = RULES_SPEC.get("range", {}) if isinstance(RULES_SPEC, dict) else {}
+    if not isinstance(range_rules, dict) or not range_rules.get("enabled", True):
+        return None
+    if ctx.news_bias in set(range_rules.get("news_block", [])):
+        return None
+    if ctx.news_bias == "uncertain":
+        return None
+    if ctx.atr_sigma > ATR_SIGMA_HOT:
+        return None
+
+    width = ctx.tf30.bb_width_pct
+    percent_b = ctx.tf30.bb_percent_b
+    if width is None or percent_b is None or not math.isfinite(width) or not math.isfinite(percent_b):
+        return None
+
+    max_width_pct = float(range_rules.get("max_bb_width_pct", 0.9))
+    if max_width_pct and width > max_width_pct:
+        return None
+
+    rsi = ctx.tf30.rsi
+    long_rsi_max = float(range_rules.get("long_rsi_max", 42))
+    short_rsi_min = float(range_rules.get("short_rsi_min", 58))
+    long_b_max = float(range_rules.get("long_percent_b_max", 0.12))
+    short_b_min = float(range_rules.get("short_percent_b_min", 0.88))
+    macd_spec = range_rules.get("macd", {}) if isinstance(range_rules, dict) else {}
+    macd_enabled = bool(macd_spec.get("enabled", True)) if isinstance(macd_spec, dict) else False
+    macd_long_min = float(macd_spec.get("long_hist_min", 0.0)) if isinstance(macd_spec, dict) else 0.0
+    macd_short_max = float(macd_spec.get("short_hist_max", 0.0)) if isinstance(macd_spec, dict) else 0.0
+
+    if percent_b <= long_b_max and rsi <= long_rsi_max:
+        macd_hist = ctx.tf30.macd_hist
+        if macd_enabled and macd_hist is not None and macd_hist < macd_long_min:
+            return None
+        meta: dict[str, Any] = {
+            "regime": "range",
+            "bb_width_pct": width,
+            "bb_percent_b": percent_b,
+        }
+        if ENTRY_LADDER:
+            meta["ladder_orders"] = ENTRY_LADDER
+        meta = _with_trace(
+            meta,
+            [
+                "open",
+                "range.long",
+                f"bb_width={width:.2f}%",
+                f"b={percent_b:.2f}",
+                f"rsi={rsi:.1f}",
+            ],
+        )
+        return StrategyEvent(
+            "open_limit",
+            side="buy",
+            order_type="limit",
+            reason="range mean-reversion: near lower band",
+            size_pct=_size_for_regime(ctx, "flat"),
+            confidence=float(range_rules.get("confidence", 0.5)),
+            metadata=meta,
+        )
+
+    if percent_b >= short_b_min and rsi >= short_rsi_min:
+        macd_hist = ctx.tf30.macd_hist
+        if macd_enabled and macd_hist is not None and macd_hist > macd_short_max:
+            return None
+        meta = {
+            "regime": "range",
+            "bb_width_pct": width,
+            "bb_percent_b": percent_b,
+        }
+        if ENTRY_LADDER:
+            meta["ladder_orders"] = ENTRY_LADDER
+        meta = _with_trace(
+            meta,
+            [
+                "open",
+                "range.short",
+                f"bb_width={width:.2f}%",
+                f"b={percent_b:.2f}",
+                f"rsi={rsi:.1f}",
+            ],
+        )
+        return StrategyEvent(
+            "open_limit",
+            side="sell",
+            order_type="limit",
+            reason="range mean-reversion: near upper band",
+            size_pct=_size_for_regime(ctx, "flat"),
+            confidence=float(range_rules.get("confidence", 0.5)),
+            metadata=meta,
+        )
+    return None
+
+
 def should_close(ctx: StrategyContext) -> StrategyEvent | None:
     if not ctx.has_position:
         return None
@@ -730,10 +886,23 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
     if side not in {"long", "short"}:
         return None
     ema_cross = False
-    if side == "long":
-        ema_cross = ctx.tf30.ema20 < ctx.tf30.ema50
+    prev20 = ctx.tf30.ema20_prev
+    prev50 = ctx.tf30.ema50_prev
+    cur20 = ctx.tf30.ema20
+    cur50 = ctx.tf30.ema50
+    if prev20 is not None and prev50 is not None:
+        if side == "long":
+            # Confirmed bearish cross on closed bars: EMA20 crosses below EMA50
+            ema_cross = prev20 >= prev50 and cur20 < cur50
+        else:
+            # Confirmed bullish cross on closed bars: EMA20 crosses above EMA50
+            ema_cross = prev20 <= prev50 and cur20 > cur50
     else:
-        ema_cross = ctx.tf30.ema20 > ctx.tf30.ema50
+        # Fallback when previous bar is unavailable (should be rare).
+        if side == "long":
+            ema_cross = cur20 < cur50
+        else:
+            ema_cross = cur20 > cur50
     tp_spec = EVENTS_SPEC.get("tp", {}) if isinstance(EVENTS_SPEC, dict) else {}
     rsi_long_tp = float(tp_spec.get("rsi_long", 70))
     rsi_short_tp = float(tp_spec.get("rsi_short", 30))
@@ -758,7 +927,7 @@ def should_close(ctx: StrategyContext) -> StrategyEvent | None:
         reasons: list[str] = []
         trace: list[str] = ["close_position"]
         if ema_cross:
-            reasons.append("ema20 cross against position")
+            reasons.append("ema20/ema50 cross against position")
             trace.append("ema_cross")
         if rsi_extreme and news_against:
             reasons.append("rsi extreme + adverse news")
@@ -962,23 +1131,46 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
     event = should_open(ctx)
     if event:
         return event
+    event = should_open_range(ctx)
+    if event:
+        return event
     event = should_modify(ctx)
     if event:
         return event
     trend = ctx.trend_bias or "none"
     counter = ctx.countertrend_bias or "none"
+    # Provide structured diagnostics for tuning (kept lightweight for logs).
+    trend_rules = RULES_SPEC.get("trend", {}) if isinstance(RULES_SPEC, dict) else {}
+    min_spread_pct = float(trend_rules.get("min_ema_spread_pct", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    min_adx = float(trend_rules.get("min_adx", 0.0)) if isinstance(trend_rules, dict) else 0.0
+    trend_side = ctx.trend_bias
+    side_rule = None
+    if isinstance(trend_rules, dict) and trend_side in {"long", "short"}:
+        side_rule = trend_rules.get(trend_side, {})
+    diagnostics: dict[str, Any] = {
+        "trend_bias": ctx.trend_bias,
+        "countertrend_bias": ctx.countertrend_bias,
+        "news_bias": ctx.news_bias,
+        "oi_trend": ctx.oi_trend,
+        "funding": ctx.funding_rate,
+        "rsi": ctx.tf30.rsi,
+        "rsi4h": ctx.tf4h.rsi,
+        "min_ema_spread_pct": min_spread_pct,
+        "min_adx": min_adx,
+        "oi_trend_required": (side_rule or {}).get("oi_trend_required") if isinstance(side_rule, dict) else None,
+        "ema_spread_pct": (
+            abs(ctx.tf30.ema20 - ctx.tf30.ema50) / ctx.price if ctx.price and math.isfinite(ctx.price) and ctx.price > 0 else None
+        ),
+        "adx": ctx.tf30.adx,
+        "bb_width_pct": ctx.tf30.bb_width_pct,
+        "bb_percent_b": ctx.tf30.bb_percent_b,
+    }
     return StrategyEvent(
         "skip",
         reason="no confluence",
         confidence=0.0,
         metadata=_with_trace(
-            {
-                "trend_bias": ctx.trend_bias,
-                "countertrend_bias": ctx.countertrend_bias,
-                "news_bias": ctx.news_bias,
-                "oi_trend": ctx.oi_trend,
-                "rsi": ctx.tf30.rsi,
-            },
+            diagnostics,
             [
                 "skip",
                 "no_confluence",
@@ -987,6 +1179,7 @@ def get_signal_without_ai(ctx: StrategyContext) -> StrategyEvent:
                 f"news={ctx.news_bias}",
                 f"oi={ctx.oi_trend}",
                 f"rsi={ctx.tf30.rsi:.1f}",
+                f"adx={ctx.tf30.adx:.1f}" if ctx.tf30.adx is not None and math.isfinite(ctx.tf30.adx) else "adx=n/a",
             ],
         ),
     )

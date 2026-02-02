@@ -49,6 +49,18 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS strategy_events (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            user_id TEXT,
+            symbol TEXT NOT NULL,
+            event TEXT NOT NULL,
+            details TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS errors (
             id INTEGER PRIMARY KEY,
             timestamp TEXT NOT NULL,
@@ -149,6 +161,43 @@ def log_ai_decision(entry: dict[str, Any]) -> None:
                 auto_low_confidence,
                 needs,
                 context_counts,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def log_strategy_event(
+    *,
+    user_id: str | None,
+    symbol: str,
+    event: str,
+    details: Any | None = None,
+    timestamp: str | None = None,
+) -> None:
+    if not symbol or not event:
+        return
+    ts = timestamp or datetime.utcnow().isoformat()
+    try:
+        conn = _connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO strategy_events (timestamp, user_id, symbol, event, details)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                str(user_id) if user_id is not None else None,
+                str(symbol).strip(),
+                str(event).strip(),
+                _safe_json(details),
             ),
         )
         conn.commit()

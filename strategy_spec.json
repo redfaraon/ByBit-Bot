@@ -10,7 +10,7 @@
       "SOL/USDT:USDT"
     ],
     "timeframes": {
-      "primary": "30m",
+      "primary": "15m",
       "secondary": "4h",
       "open_interest": "1h",
       "funding": "8h"
@@ -80,12 +80,14 @@
   "rules": {
     "trend": {
       "require_secondary_tf": true,
-      "min_ema_spread_pct": 0.0015,
+      "min_ema_spread_pct": 0.001,
+      "min_adx": 18,
       "long": {
         "rsi_max": 62,
         "rsi4h_min": 50,
         "funding_min": -0.0004,
-        "require_oi_up": true,
+        "require_oi_up": false,
+        "oi_trend_required": "not_down",
         "news_block": [
           "negative"
         ],
@@ -98,7 +100,8 @@
         "rsi_min": 38,
         "rsi4h_max": 50,
         "funding_max": 0.0004,
-        "require_oi_up": true,
+        "require_oi_up": false,
+        "oi_trend_required": "not_up",
         "news_block": [
           "positive"
         ],
@@ -107,6 +110,23 @@
           "limit": 0.45
         }
       }
+    },
+    "range": {
+      "enabled": true,
+      "max_bb_width_pct": 1.0,
+      "long_percent_b_max": 0.12,
+      "short_percent_b_min": 0.88,
+      "long_rsi_max": 42,
+      "short_rsi_min": 58,
+      "macd": {
+        "enabled": true,
+        "long_hist_min": 0.0,
+        "short_hist_max": 0.0
+      },
+      "confidence": 0.5,
+      "news_block": [
+        "uncertain"
+      ]
     },
     "countertrend": {
       "require_atr_calm": true,
@@ -177,13 +197,18 @@
       42,
       65
     ],
-      "rsi_short": [
-        35,
-        58
-      ],
-      "confidence": 0.5,
-      "scale": 0.5
-    }
+    "rsi_short": [
+      35,
+      58
+    ],
+    "confidence": 0.5,
+    "scale": 0.5
+  }
+},
+  "macd": {
+    "fast_span": 12,
+    "slow_span": 26,
+    "signal_span": 9
   },
   "account": {
     "fields": [
