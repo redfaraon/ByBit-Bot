@@ -934,16 +934,16 @@ def main() -> int:
         for suffix, hours in windows.items():
             entries = _filter_entries(equity_history, hours)
             events = _filter_entries(strategy_events, hours)
-        label = "All-time" if suffix == "all" else "Last 7 days" if suffix == "week" else "Last 24h"
-        plot_equity_window(entries, args.output, suffix, f"Equity / Balance ({label})", commit_ts)
-        plot_delta_window(entries, args.output, suffix, f"Equity delta ({label})", commit_ts)
-        plot_timer_window(entries, args.output, suffix, f"Cycle timers ({label})", commit_ts)
-        bucket_minutes = 60 if suffix == "day" else 24 * 60
-        plot_signal_timeseries(events, args.output, suffix, f"Signals ({label})", commit_ts, bucket_minutes)
-        plot_signal_pie(events, args.output, suffix, f"Signal distribution ({label})")
-        plot_reason_timeseries(events, args.output, suffix, f"Open reasons ({label})", commit_ts, bucket_minutes)
-        plot_skip_reason_timeseries(events, args.output, suffix, f"Skip reasons ({label})", commit_ts, bucket_minutes)
-        plot_commit_deltas(entries, args.output, suffix, f"Commit deltas ({label})", commit_ts)
+            label = "All-time" if suffix == "all" else "Last 7 days" if suffix == "week" else "Last 24h"
+            plot_equity_window(entries, args.output, suffix, f"Equity / Balance ({label})", commit_ts)
+            plot_delta_window(entries, args.output, suffix, f"Equity delta ({label})", commit_ts)
+            plot_timer_window(entries, args.output, suffix, f"Cycle timers ({label})", commit_ts)
+            bucket_minutes = 60 if suffix == "day" else 24 * 60
+            plot_signal_timeseries(events, args.output, suffix, f"Signals ({label})", commit_ts, bucket_minutes)
+            plot_signal_pie(events, args.output, suffix, f"Signal distribution ({label})")
+            plot_reason_timeseries(events, args.output, suffix, f"Open reasons ({label})", commit_ts, bucket_minutes)
+            plot_skip_reason_timeseries(events, args.output, suffix, f"Skip reasons ({label})", commit_ts, bucket_minutes)
+            plot_commit_deltas(entries, args.output, suffix, f"Commit deltas ({label})", commit_ts)
 
         plot_equity_daily_bars(equity_history, args.output, commit_ts)
         return 0
