@@ -7682,10 +7682,14 @@ def maybe_send_graphs() -> None:
     groups = _graph_group_specs()
     due_groups: list[dict[str, Any]] = []
     for group in groups:
-        if force_each_cycle or group.get("send_each_cycle"):
+        if group.get("send_each_cycle"):
             due_groups.append(group)
             continue
+        if force_each_cycle:
+            continue
         interval_hours = float(group.get("interval_hours") or 0)
+        if interval_hours <= 0:
+            continue
         last_sent = status.get(f"last_graph_sent_{group.get('name')}")
         last_dt = None
         if last_sent:
