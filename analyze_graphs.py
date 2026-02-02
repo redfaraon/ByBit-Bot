@@ -101,6 +101,15 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return None
 
 
+def _float_range(start: float, stop: float, step: float) -> list[float]:
+    values: list[float] = []
+    current = start
+    while current <= stop + 1e-9:
+        values.append(round(current, 6))
+        current += step
+    return values
+
+
 def _read_json(path: Path) -> Any:
     if not path.exists():
         return None
@@ -242,6 +251,21 @@ def plot_equity_window(
         ax1.set_title(title)
         ax1.set_ylabel("USDT")
         ax1.grid(axis="x", linestyle=":", alpha=0.4)
+        axis_values: list[float] = []
+        axis_values.extend(equities)
+        axis_values.extend([x for x in balances if math.isfinite(x)])
+        if axis_values:
+            min_val = min(axis_values)
+            max_val = max(axis_values)
+            lower = math.floor(min_val / 2.0) * 2.0 if min_val is not None else 0.0
+            upper = math.ceil(max_val / 2.0) * 2.0 if max_val is not None else 0.0
+            if upper <= lower:
+                upper = lower + 2.0
+            ticks = _float_range(lower, upper, 2.0)
+            ax1.set_yticks(ticks)
+            ax1.set_ylim(lower, upper)
+            for tick in ticks:
+                ax1.axhline(tick, color="gray", linestyle="--", alpha=0.3, linewidth=0.6, zorder=0)
         if mdates is not None:
             locator = mdates.AutoDateLocator()
             formatter = mdates.ConciseDateFormatter(locator)
