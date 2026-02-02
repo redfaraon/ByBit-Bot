@@ -837,15 +837,24 @@ def plot_delta_window(
     balance_deltas = [item[2] if item[2] is not None else math.nan for item in deltas]
     try:
         fig, ax = plt.subplots(figsize=(12, 4))
-        x_vals = mdates.date2num(times) if mdates is not None else list(range(len(times)))
-        width = 0.4
+        if mdates is not None:
+            x_vals = mdates.date2num(times)
+            axis_formatter = True
+        else:
+            x_vals = list(range(len(times)))
+            axis_formatter = False
+        diffs: List[float] = []
+        for idx in range(1, len(x_vals)):
+            diffs.append(abs(x_vals[idx] - x_vals[idx - 1]))
+        base_width = min(diffs) if diffs else 1.0
+        width = max(base_width * 0.6, 0.05)
         ax.bar([x - width / 2 for x in x_vals], equity_deltas, width=width, label="Equity delta")
         if any(math.isfinite(x) for x in balance_deltas):
             ax.bar([x + width / 2 for x in x_vals], balance_deltas, width=width, label="Balance delta")
         ax.axhline(0, color="gray", linewidth=0.8)
         ax.set_title(title)
         ax.set_ylabel("Delta (USDT)")
-        if mdates is not None:
+        if axis_formatter and mdates is not None:
             ax.xaxis_date()
             locator = mdates.AutoDateLocator()
             formatter = mdates.ConciseDateFormatter(locator)
