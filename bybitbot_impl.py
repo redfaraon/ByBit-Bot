@@ -26,7 +26,7 @@ os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 
 # --- Импорты ---
 import math, time, json, traceback, datetime, random, warnings, re, numbers, hashlib, textwrap, types
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict, deque, OrderedDict
 from pathlib import Path
 from typing import Optional, Tuple, Any, Sequence, Mapping
 import pandas as pd
@@ -75,6 +75,43 @@ _START_TS = time.time()
 _LOCK_FILE: Path | None = None
 _LOCK_OWNED = False
 _GIT_AUTH_HINT_LOGGED = False
+_SIGNAL_DEDUP_EVENTS = {"hedge_open", "open_limit", "open_market", "skip"}
+SIGNAL_HISTORY_MAX = 4096
+
+
+class _SignalDeduplicator:
+    def __init__(self, max_entries: int) -> None:
+        self._max_entries = max_entries
+        self._entries: OrderedDict[tuple[str, str, str, str], datetime.datetime] = OrderedDict()
+
+    def should_emit(self, key: tuple[str, str, str, str] | None) -> bool:
+        if key is None:
+            return True
+        if key in self._entries:
+            return False
+        self._entries[key] = datetime.datetime.now(datetime.timezone.utc)
+        if len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+        return True
+
+
+SIGNAL_DEDUPLICATOR = _SignalDeduplicator(SIGNAL_HISTORY_MAX)
+
+
+def _build_signal_key(
+    symbol: str | None,
+    event_name: str | None,
+    bar_ts: str | None,
+    reason: str | None,
+) -> tuple[str, str, str, str] | None:
+    if not symbol or not event_name or not bar_ts:
+        return None
+    return (
+        str(symbol).upper(),
+        str(event_name).strip().lower(),
+        str(bar_ts).strip(),
+        (str(reason).strip().lower() if reason else ""),
+    )
 
 
 def _signal_name(signum: int) -> str:
@@ -15790,27 +15827,58 @@ def run_cycle():
                         except Exception:
                             pass
                         manual_event = strategy.get_signal_without_ai(manual_ctx)
-                        try:
-                            tf_primary_vals = {
-                                    "close": safe_float(tf_primary_df.iloc[-1].get("close")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "ema20": safe_float(tf_primary_df.iloc[-1].get("ema20")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "ema50": safe_float(tf_primary_df.iloc[-1].get("ema50")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "rsi": safe_float(tf_primary_df.iloc[-1].get("rsi14") or tf_primary_df.iloc[-1].get("rsi")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "atr": safe_float(tf_primary_df.iloc[-1].get("atr14") or tf_primary_df.iloc[-1].get("atr")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "bb_b": safe_float(tf_primary_df.iloc[-1].get("bb_percent_b")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "bb_width": safe_float(tf_primary_df.iloc[-1].get("bb_width_pct")) if tf_primary_df is not None and not tf_primary_df.empty else None,
-                                    "macd_hist": safe_float(tf_primary_df.iloc[-1].get("macd_hist")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                        manual_decision = None
+                        dedup_blocked = False
+                        bar_ts_primary = None
+                        if manual_event:
+                            bar_ts_primary = _df_last_bar_timestamp_iso(tf_primary_df)
+                            signal_key = _build_signal_key(
+                                sym,
+                                manual_event.name,
+                                bar_ts_primary,
+                                manual_event.reason,
+                            )
+                            event_name_lower = str(manual_event.name or "").strip().lower()
+                            if signal_key and event_name_lower in _SIGNAL_DEDUP_EVENTS and not SIGNAL_DEDUPLICATOR.should_emit(signal_key):
+                                dedup_blocked = True
+                                manual_decision = {
+                                    "symbol": sym,
+                                    "action": "skip",
+                                    "reason": "duplicate signal",
+                                    "ai_unavailable": True,
+                                    "confidence": float(manual_event.confidence) if manual_event.confidence is not None else 0.0,
                                 }
-                            detail_parts = [f"tf={manual_primary_tf}"]
-                            for key, val in tf_primary_vals.items():
-                                if val is None or not math.isfinite(val):
-                                    continue
-                                detail_parts.append(f"{key}={val:.4f}")
-                            detail_msg = f"[MANUAL][DETAIL] {sym}: " + " ".join(detail_parts)
-                            log(detail_msg, Fore.LIGHTBLACK_EX)
-                            log_user(detail_msg, color=Fore.LIGHTBLACK_EX)
-                        except Exception:
-                            pass
+                                log(
+                                    f"[MANUAL][DEDUP] {sym}: {manual_event.name} "
+                                    f"bar={bar_ts_primary or 'n/a'} reason={manual_event.reason or 'n/a'}",
+                                    Fore.LIGHTBLACK_EX,
+                                )
+                                log_user(
+                                    f"[MANUAL][DEDUP] {sym}: duplicate {manual_event.name} bar={bar_ts_primary or 'n/a'}",
+                                    color=Fore.LIGHTBLACK_EX,
+                                )
+                        if not dedup_blocked and manual_event:
+                            try:
+                                tf_primary_vals = {
+                                        "close": safe_float(tf_primary_df.iloc[-1].get("close")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "ema20": safe_float(tf_primary_df.iloc[-1].get("ema20")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "ema50": safe_float(tf_primary_df.iloc[-1].get("ema50")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "rsi": safe_float(tf_primary_df.iloc[-1].get("rsi14") or tf_primary_df.iloc[-1].get("rsi")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "atr": safe_float(tf_primary_df.iloc[-1].get("atr14") or tf_primary_df.iloc[-1].get("atr")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "bb_b": safe_float(tf_primary_df.iloc[-1].get("bb_percent_b")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "bb_width": safe_float(tf_primary_df.iloc[-1].get("bb_width_pct")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                        "macd_hist": safe_float(tf_primary_df.iloc[-1].get("macd_hist")) if tf_primary_df is not None and not tf_primary_df.empty else None,
+                                    }
+                                detail_parts = [f"tf={manual_primary_tf}"]
+                                for key, val in tf_primary_vals.items():
+                                    if val is None or not math.isfinite(val):
+                                        continue
+                                    detail_parts.append(f"{key}={val:.4f}")
+                                detail_msg = f"[MANUAL][DETAIL] {sym}: " + " ".join(detail_parts)
+                                log(detail_msg, Fore.LIGHTBLACK_EX)
+                                log_user(detail_msg, color=Fore.LIGHTBLACK_EX)
+                            except Exception:
+                                pass
                         try:
                             diag_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
                             diag_path = Path("runtime") / str(USER_ID) / "diagnostics" / "strategy_events.jsonl"
