@@ -101,6 +101,15 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return None
 
 
+def _float_range(start: float, stop: float, step: float) -> list[float]:
+    values: list[float] = []
+    current = start
+    while current <= stop + 1e-9:
+        values.append(round(current, 6))
+        current += step
+    return values
+
+
 def _read_json(path: Path) -> Any:
     if not path.exists():
         return None
@@ -242,6 +251,21 @@ def plot_equity_window(
         ax1.set_title(title)
         ax1.set_ylabel("USDT")
         ax1.grid(axis="x", linestyle=":", alpha=0.4)
+        axis_values: list[float] = []
+        axis_values.extend(equities)
+        axis_values.extend([x for x in balances if math.isfinite(x)])
+        if axis_values:
+            min_val = min(axis_values)
+            max_val = max(axis_values)
+            lower = math.floor(min_val / 2.0) * 2.0 if min_val is not None else 0.0
+            upper = math.ceil(max_val / 2.0) * 2.0 if max_val is not None else 0.0
+            if upper <= lower:
+                upper = lower + 2.0
+            ticks = _float_range(lower, upper, 2.0)
+            ax1.set_yticks(ticks)
+            ax1.set_ylim(lower, upper)
+            for tick in ticks:
+                ax1.axhline(tick, color="gray", linestyle="--", alpha=0.3, linewidth=0.6, zorder=0)
         if mdates is not None:
             locator = mdates.AutoDateLocator()
             formatter = mdates.ConciseDateFormatter(locator)
@@ -333,16 +357,39 @@ def plot_timer_window(
 def _normalize_action(event_name: str | None) -> str:
     if not event_name:
         return "other"
-    text = str(event_name).lower()
-    if "skip" in text:
+    text_raw = str(event_name).strip()
+    if not text_raw:
+        return "other"
+    text_lower = text_raw.lower()
+    if "skip" in text_lower:
         return "skip"
-    if "close" in text:
+    if "close" in text_lower:
         return "close"
-    if "hedge" in text:
+    if "hedge" in text_lower:
         return "hedge"
-    if "open" in text:
+    if "open" in text_lower:
         return "open"
-    return "other"
+    return text_raw
+
+
+def _skip_reason_category(reason: str | None) -> str:
+    if not reason:
+        return "other"
+    text = str(reason).strip()
+    if not text:
+        return "other"
+    lower = text.lower()
+    if "limit" in lower:
+        return "limit"
+    if "confluence" in lower or "converge" in lower:
+        return "confluence"
+    if "hold" in lower or "wait" in lower:
+        return "hold"
+    if "risk" in lower or "volatility" in lower:
+        return "risk"
+    if "conflict" in lower or "opposed" in lower or "duplicate" in lower:
+        return "conflict"
+    return text
 
 
 def _normalize_reason(reason: str | None) -> str:
@@ -374,6 +421,58 @@ def _bucketize(entries: Iterable[Tuple[datetime, str]], bucket_minutes: int) -> 
         bucket_map = buckets.setdefault(bucket, {})
         bucket_map[key] = bucket_map.get(key, 0) + 1
     return buckets
+
+
+def plot_skip_reason_timeseries(
+    events: List[Dict[str, Any]],
+    output_dir: Path,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+    bucket_minutes: int,
+) -> None:
+    base_name = f"skip_reasons_timeseries_{suffix}"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
+        return
+    points: List[Tuple[datetime, str]] = []
+    for entry in events:
+        action = _normalize_action(entry.get("event") or entry.get("action"))
+        if action != "skip":
+            continue
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        if ts is None:
+            continue
+        reason = entry.get("reason")
+        category = _skip_reason_category(reason)
+        points.append((ts, category))
+    if not points:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    buckets = _bucketize(points, bucket_minutes)
+    series_keys = sorted({key for bucket in buckets.values() for key in bucket})
+    bucket_times = sorted(buckets.keys())
+    try:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        for key in series_keys:
+            values = [buckets[ts].get(key, 0) for ts in bucket_times]
+            ax.plot(bucket_times, values, label=key)
+        ax.set_title(title)
+        ax.set_ylabel("Skip count")
+        ax.grid(axis="x", linestyle=":", alpha=0.4)
+        if mdates is not None:
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        start, end = min(bucket_times), max(bucket_times)
+        _add_commit_lines(ax, commits, start, end)
+        ax.legend()
+        fig.tight_layout()
+        _save_plot_with_formats(output_dir, base_name)
+        plt.close(fig)
+    except Exception as exc:
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
 
 
 def plot_signal_timeseries(
@@ -693,6 +792,108 @@ def plot_commit_deltas(
         print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
 
 
+def _extract_delta_series(entries: List[Dict[str, Any]]) -> List[Tuple[datetime, float, float | None]]:
+    series: List[Tuple[datetime, float, float | None]] = []
+    for entry in sorted(
+        entries,
+        key=lambda e: _parse_timestamp(e.get("timestamp") or e.get("time") or e.get("ts")) or datetime.min,
+    ):
+        ts = _parse_timestamp(entry.get("timestamp") or entry.get("time") or entry.get("ts"))
+        if ts is None:
+            continue
+        equity_val = entry.get("equity") or entry.get("equity_total")
+        if equity_val is None:
+            continue
+        try:
+            equity_float = float(equity_val)
+        except Exception:
+            continue
+        balance_val = entry.get("balance")
+        if balance_val is None:
+            unreal = entry.get("unrealized") or entry.get("unrealized_pnl")
+            try:
+                unreal_float = float(unreal) if unreal is not None else None
+            except Exception:
+                unreal_float = None
+            if unreal_float is not None and math.isfinite(unreal_float):
+                try:
+                    balance_val = equity_float - unreal_float
+                except Exception:
+                    balance_val = None
+        balance_float: float | None
+        try:
+            balance_float = float(balance_val) if balance_val is not None else None
+        except Exception:
+            balance_float = None
+        series.append((ts, equity_float, balance_float))
+    deltas: List[Tuple[datetime, float, float | None]] = []
+    for prev, cur in zip(series, series[1:]):
+        delta_time = cur[0]
+        delta_equity = cur[1] - prev[1]
+        prev_balance = prev[2]
+        cur_balance = cur[2]
+        delta_balance: float | None
+        if prev_balance is not None and cur_balance is not None and math.isfinite(prev_balance) and math.isfinite(cur_balance):
+            delta_balance = cur_balance - prev_balance
+        else:
+            delta_balance = None
+        deltas.append((delta_time, delta_equity, delta_balance))
+    return deltas
+
+
+def plot_delta_window(
+    entries: List[Dict[str, Any]],
+    output_dir: Path,
+    suffix: str,
+    title: str,
+    commits: List[datetime],
+) -> None:
+    base_name = f"equity_delta_{suffix}"
+    if plt is None:
+        _write_fallback_png(output_dir, f"{base_name}.png")
+        return
+    deltas = _extract_delta_series(entries)
+    if not deltas:
+        _save_placeholder(output_dir, f"{base_name}.png", title)
+        return
+    times = [item[0] for item in deltas]
+    equity_deltas = [item[1] for item in deltas]
+    balance_deltas = [item[2] if item[2] is not None else math.nan for item in deltas]
+    try:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        if mdates is not None:
+            x_vals = mdates.date2num(times)
+            axis_formatter = True
+        else:
+            x_vals = list(range(len(times)))
+            axis_formatter = False
+        diffs: List[float] = []
+        for idx in range(1, len(x_vals)):
+            diffs.append(abs(x_vals[idx] - x_vals[idx - 1]))
+        base_width = min(diffs) if diffs else 1.0
+        width = max(base_width * 0.6, 0.05)
+        ax.bar([x - width / 2 for x in x_vals], equity_deltas, width=width, label="Equity delta")
+        if any(math.isfinite(x) for x in balance_deltas):
+            ax.bar([x + width / 2 for x in x_vals], balance_deltas, width=width, label="Balance delta")
+        ax.axhline(0, color="gray", linewidth=0.8)
+        ax.set_title(title)
+        ax.set_ylabel("Delta (USDT)")
+        if axis_formatter and mdates is not None:
+            ax.xaxis_date()
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        start, end = min(times), max(times)
+        _add_commit_lines(ax, commits, start, end)
+        ax.legend()
+        fig.tight_layout()
+        _save_plot_with_formats(output_dir, base_name)
+        plt.close(fig)
+    except Exception as exc:
+        print(f"[WARN] Failed to plot {base_name}: {exc}", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate diagnostic graphs for Bybit bot")
     parser.add_argument("--output", type=Path, default=Path("graphs"), help="Directory for generated plots")
@@ -768,11 +969,13 @@ def main() -> int:
             events = _filter_entries(strategy_events, hours)
             label = "All-time" if suffix == "all" else "Last 7 days" if suffix == "week" else "Last 24h"
             plot_equity_window(entries, args.output, suffix, f"Equity / Balance ({label})", commit_ts)
+            plot_delta_window(entries, args.output, suffix, f"Equity delta ({label})", commit_ts)
             plot_timer_window(entries, args.output, suffix, f"Cycle timers ({label})", commit_ts)
             bucket_minutes = 60 if suffix == "day" else 24 * 60
             plot_signal_timeseries(events, args.output, suffix, f"Signals ({label})", commit_ts, bucket_minutes)
             plot_signal_pie(events, args.output, suffix, f"Signal distribution ({label})")
             plot_reason_timeseries(events, args.output, suffix, f"Open reasons ({label})", commit_ts, bucket_minutes)
+            plot_skip_reason_timeseries(events, args.output, suffix, f"Skip reasons ({label})", commit_ts, bucket_minutes)
             plot_commit_deltas(entries, args.output, suffix, f"Commit deltas ({label})", commit_ts)
 
         plot_equity_daily_bars(equity_history, args.output, commit_ts)

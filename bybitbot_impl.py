@@ -7577,10 +7577,12 @@ def _graph_group_specs() -> list[dict[str, Any]]:
             "send_each_cycle": False,
             "files": [
                 "equity_all",
+                "equity_delta_all",
                 "timer_all",
                 "signals_timeseries_all",
                 "signals_pie_all",
                 "reasons_timeseries_all",
+                "skip_reasons_timeseries_all",
                 "equity_daily_bars_all",
                 "equity_commit_deltas_all",
             ],
@@ -7589,14 +7591,16 @@ def _graph_group_specs() -> list[dict[str, Any]]:
             "name": "week",
             "label": "Last 7 days",
             "suffix": "week",
-            "interval_hours": 24,
+            "interval_hours": 8,
             "send_each_cycle": False,
             "files": [
                 "equity_week",
+                "equity_delta_week",
                 "timer_week",
                 "signals_timeseries_week",
                 "signals_pie_week",
                 "reasons_timeseries_week",
+                "skip_reasons_timeseries_week",
                 "equity_commit_deltas_week",
             ],
         },
@@ -7608,10 +7612,12 @@ def _graph_group_specs() -> list[dict[str, Any]]:
             "send_each_cycle": True,
             "files": [
                 "equity_day",
+                "equity_delta_day",
                 "timer_day",
                 "signals_timeseries_day",
                 "signals_pie_day",
                 "reasons_timeseries_day",
+                "skip_reasons_timeseries_day",
                 "equity_commit_deltas_day",
             ],
         },
@@ -7623,6 +7629,8 @@ def _graph_caption(base: str, label: str, now_txt: str) -> str:
         return f"Commit deltas ({label}, {now_txt})"
     if base.startswith("equity_daily_bars"):
         return f"Daily equity/balance ({label}, {now_txt})"
+    if base.startswith("equity_delta"):
+        return f"Equity delta ({label}, {now_txt})"
     if base.startswith("equity"):
         return f"Equity / Balance ({label}, {now_txt})"
     if base.startswith("timer"):
@@ -7633,6 +7641,8 @@ def _graph_caption(base: str, label: str, now_txt: str) -> str:
         return f"Signals distribution ({label}, {now_txt})"
     if base.startswith("reasons_timeseries"):
         return f"Open reasons ({label}, {now_txt})"
+    if base.startswith("skip_reasons_timeseries"):
+        return f"Skip reasons ({label}, {now_txt})"
     return f"{base} ({label}, {now_txt})"
 
 
@@ -7672,10 +7682,14 @@ def maybe_send_graphs() -> None:
     groups = _graph_group_specs()
     due_groups: list[dict[str, Any]] = []
     for group in groups:
-        if force_each_cycle or group.get("send_each_cycle"):
+        if group.get("send_each_cycle"):
             due_groups.append(group)
             continue
+        if force_each_cycle:
+            continue
         interval_hours = float(group.get("interval_hours") or 0)
+        if interval_hours <= 0:
+            continue
         last_sent = status.get(f"last_graph_sent_{group.get('name')}")
         last_dt = None
         if last_sent:
