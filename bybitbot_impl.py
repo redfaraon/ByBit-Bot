@@ -2456,20 +2456,32 @@ def _sync_with_remote() -> None:
                 except Exception:
                     pass
             if current_commit and current_commit != newest_commit:
-                checkout_target = f"{remote}/{newest_branch}"
-                try:
-                    subprocess.run(
-                        [*git_cmd, "checkout", "-B", newest_branch, checkout_target],
-                        cwd=REPO_ROOT,
-                        env=git_env,
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
+                should_checkout = True
+                if newest_ts and newest_ts <= int(_START_TS):
                     log(
-                        f"[GIT] switched to newest commit {newest_commit[:7]} on branch {newest_branch}",
+                        "[GIT] Detected newer remote commit but it predates this run; "
+                        "staying on current branch until a commit appears after start time.",
                         Fore.LIGHTBLACK_EX,
                     )
+                    should_checkout = False
+                if should_checkout:
+                    checkout_target = f"{remote}/{newest_branch}"
+                else:
+                    checkout_target = None
+                try:
+                    if checkout_target is not None:
+                        subprocess.run(
+                            [*git_cmd, "checkout", "-B", newest_branch, checkout_target],
+                            cwd=REPO_ROOT,
+                            env=git_env,
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                        log(
+                            f"[GIT] switched to newest commit {newest_commit[:7]} on branch {newest_branch}",
+                            Fore.LIGHTBLACK_EX,
+                        )
                 except subprocess.CalledProcessError as exc:
                     details = exc.stderr or exc.stdout or str(exc)
                     log(f"[WARN] Git checkout failed: {details}", Fore.YELLOW)
